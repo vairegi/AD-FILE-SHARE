@@ -28,6 +28,7 @@ import db
 import scanner
 import shortener
 from bot1_admin import COMMANDS as ADMIN_COMMANDS
+from utils import is_admin
 
 log = logging.getLogger("bot1")
 
@@ -35,6 +36,44 @@ WELCOME = (
     "👋 Welcome!\n\n"
     "This bot gives access to the files posted on the channel.\n"
     "Tap the Download button under any post to get started."
+)
+
+HELP_USER = (
+    "📖 *Commands*\n\n"
+    "/start — Start the bot\n"
+    "/help — Show this list\n\n"
+    "*How to get a file*\n"
+    "1. Tap ⬇️ *Download* under any channel post\n"
+    "2. Join the channel if asked, then tap ✅\n"
+    "3. Complete the quick verification\n"
+    f"4. Tap 📥 *Get File* — @{config.BOT2_USERNAME or 'fubuki_vidoebot'} delivers it"
+)
+
+HELP_ADMIN = (
+    "\n\n🛠 *Admin commands*\n\n"
+    "*Shortener gate*\n"
+    "/shortener `on | off | status` — toggle the gate\n"
+    "/shortenerapi `<url>` — shortener API base\n"
+    "/setverifytime `<hours>` — verification validity\n"
+    "/settokenttl `<minutes>` — handoff token TTL\n"
+    "/shortenermsg `<text>` — gate heading\n"
+    "/shortenerbotmsg `<text>` — gate DM text\n"
+    "/verifymsg `<text>` — message after verification\n"
+    "/shortenerbtn `<label> | <url>` — add extra button\n"
+    "/clearshortenerbtns — remove extra buttons\n\n"
+    "*General*\n"
+    "/broadcast `<message>` — message all users\n"
+    "/stats — users / verified / posted stats\n"
+    "/ban `<user_id>` · /unban `<user_id>`\n"
+    "/addadmin `<user_id>` — promote an admin\n"
+    "/setforcesub `<channel_id | off>`\n"
+    "/setautodelete `<time>` — e.g. 30min, 2hour, 7day, never\n"
+    "/setpostchannel `<channel_id>`\n"
+    "/setdbchannel `<channel_id>`\n"
+    "/setposttime `<HH:MM>` — daily post time (UTC)\n"
+    "/dripnow — post the next queued item now\n"
+    "/rescandb — re-index the database channel\n"
+    "/scandb `<channel_id>` — index a channel + set as DB"
 )
 
 
@@ -278,6 +317,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME)
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command list; admins also see the full admin panel list."""
+    user = update.effective_user
+    text = HELP_USER
+    if user and await is_admin(user.id):
+        text += HELP_ADMIN
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
@@ -324,6 +372,7 @@ def build_bot1() -> Application:
     app = Application.builder().token(config.BOT1_TOKEN).updater(None).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     for name, func in ADMIN_COMMANDS.items():
         app.add_handler(CommandHandler(name, func))
     app.add_handler(CallbackQueryHandler(on_checksub, pattern=r"^checksub:"))

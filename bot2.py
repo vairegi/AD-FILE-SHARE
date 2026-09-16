@@ -161,6 +161,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME)
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *Commands*\n\n"
+        "/start — Start the bot\n"
+        "/setautodelete `<time>` — how long files stay in this chat\n"
+        "  e.g. 5min · 2hour · 12hour · 7day · never\n"
+        "/help — Show this list\n\n"
+        "Files are delivered when you tap 📥 *Get File* in the main bot.",
+        parse_mode="Markdown",
+    )
+
+
 async def setautodelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if not args:
@@ -200,6 +212,7 @@ async def on_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_bot2() -> Application:
     app = Application.builder().token(config.BOT2_TOKEN).updater(None).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("setautodelete", setautodelete))
     app.add_handler(CallbackQueryHandler(on_download, pattern=r"^dl:"))
     return app

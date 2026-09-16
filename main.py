@@ -32,10 +32,29 @@ bot2 = build_bot2()
 
 
 async def _set_commands():
-    from telegram import BotCommand
+    """Register the menu-button command lists for both bots."""
+    from telegram import BotCommand, BotCommandScopeChat
     try:
+        # Bot 1 — everyone sees the basics
+        await bot1.bot.set_my_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show all commands"),
+        ])
+        # Bot 1 — admins additionally get the full admin panel in the menu
+        from bot1_admin import COMMANDS
+        admin_cmds = [BotCommand("start", "Start the bot"),
+                      BotCommand("help", "Show all commands")]
+        admin_cmds += [BotCommand(name, "admin") for name in sorted(COMMANDS)]
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await bot1.bot.set_my_commands(
+                    admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
+            except Exception as exc:
+                log.warning("admin menu for %s failed: %s", admin_id, exc)
+        # Bot 2
         await bot2.bot.set_my_commands([
-            BotCommand("start", "Start"),
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show all commands"),
             BotCommand("setautodelete", "Set auto-delete timer"),
         ])
     except Exception as exc:
