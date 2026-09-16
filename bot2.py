@@ -162,14 +162,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram.helpers import escape_markdown
+    body = ("/start — Start the bot\n"
+            "/setautodelete <time> — how long files stay in this chat\n"
+            "  e.g. 5min · 2hour · 12hour · 7day · never\n"
+            "/help — Show this list\n\n"
+            "Files are delivered when you tap 📥 Get File in the main bot.")
     await update.message.reply_text(
-        "📖 *Commands*\n\n"
-        "/start — Start the bot\n"
-        "/setautodelete `<time>` — how long files stay in this chat\n"
-        "  e.g. 5min · 2hour · 12hour · 7day · never\n"
-        "/help — Show this list\n\n"
-        "Files are delivered when you tap 📥 *Get File* in the main bot.",
-        parse_mode="Markdown",
+        "📖 *Commands*\n\n" + escape_markdown(body, version=2),
+        parse_mode="MarkdownV2",
     )
 
 

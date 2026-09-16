@@ -38,42 +38,52 @@ WELCOME = (
     "Tap the Download button under any post to get started."
 )
 
+# /help text is sent with parse_mode=MarkdownV2 — every special character
+# outside a formatting span is escaped (telegram.helpers.escape_markdown
+# handles this; we escape once here so the send can never 400).
+from telegram.helpers import escape_markdown
+
+
+def _md2(t: str) -> str:
+    return escape_markdown(t, version=2)
+
+
 HELP_USER = (
     "📖 *Commands*\n\n"
-    "/start — Start the bot\n"
-    "/help — Show this list\n\n"
-    "*How to get a file*\n"
-    "1. Tap ⬇️ *Download* under any channel post\n"
-    "2. Join the channel if asked, then tap ✅\n"
-    "3. Complete the quick verification\n"
-    f"4. Tap 📥 *Get File* — @{config.BOT2_USERNAME or 'fubuki_vidoebot'} delivers it"
+    + _md2("/start — Start the bot\n"
+           "/help — Show this list\n")
+    + "\n*How to get a file*\n"
+    + _md2("1. Tap ⬇️ Download under any channel post\n"
+           "2. Join the channel if asked, then tap ✅\n"
+           "3. Complete the quick verification\n"
+           "4. Tap 📥 Get File — the delivery bot sends it")
 )
 
 HELP_ADMIN = (
     "\n\n🛠 *Admin commands*\n\n"
-    "*Shortener gate*\n"
-    "/shortener `on | off | status` — toggle the gate\n"
-    "/shortenerapi `<url>` — shortener API base\n"
-    "/setverifytime `<hours>` — verification validity\n"
-    "/settokenttl `<minutes>` — handoff token TTL\n"
-    "/shortenermsg `<text>` — gate heading\n"
-    "/shortenerbotmsg `<text>` — gate DM text\n"
-    "/verifymsg `<text>` — message after verification\n"
-    "/shortenerbtn `<label> | <url>` — add extra button\n"
-    "/clearshortenerbtns — remove extra buttons\n\n"
-    "*General*\n"
-    "/broadcast `<message>` — message all users\n"
-    "/stats — users / verified / posted stats\n"
-    "/ban `<user_id>` · /unban `<user_id>`\n"
-    "/addadmin `<user_id>` — promote an admin\n"
-    "/setforcesub `<channel_id | off>`\n"
-    "/setautodelete `<time>` — e.g. 30min, 2hour, 7day, never\n"
-    "/setpostchannel `<channel_id>`\n"
-    "/setdbchannel `<channel_id>`\n"
-    "/setposttime `<HH:MM>` — daily post time (UTC)\n"
-    "/dripnow — post the next queued item now\n"
-    "/rescandb — re-index the database channel\n"
-    "/scandb `<channel_id>` — index a channel + set as DB"
+    + "*Shortener gate*\n"
+    + _md2("/shortener on | off | status — toggle the gate\n"
+           "/shortenerapi <url> — shortener API base\n"
+           "/setverifytime <hours> — verification validity\n"
+           "/settokenttl <minutes> — handoff token TTL\n"
+           "/shortenermsg <text> — gate heading\n"
+           "/shortenerbotmsg <text> — gate DM text\n"
+           "/verifymsg <text> — message after verification\n"
+           "/shortenerbtn <label> | <url> — add extra button\n"
+           "/clearshortenerbtns — remove extra buttons\n")
+    + "\n*General*\n"
+    + _md2("/broadcast <message> — message all users\n"
+           "/stats — users / verified / posted stats\n"
+           "/ban <user_id> · /unban <user_id>\n"
+           "/addadmin <user_id> — promote an admin\n"
+           "/setforcesub <channel_id | off>\n"
+           "/setautodelete <time> — e.g. 30min, 2hour, 7day, never\n"
+           "/setpostchannel <channel_id>\n"
+           "/setdbchannel <channel_id>\n"
+           "/setposttime <HH:MM> — daily post time (UTC)\n"
+           "/dripnow — post the next queued item now\n"
+           "/rescandb — re-index the database channel\n"
+           "/scandb <channel_id> — index a channel + set as DB")
 )
 
 
@@ -323,7 +333,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = HELP_USER
     if user and await is_admin(user.id):
         text += HELP_ADMIN
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 
 async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
