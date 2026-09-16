@@ -468,6 +468,10 @@ async def do_post(bot):
 async def schedule_daily(job_queue):
     """(Re)install the daily drip job from settings.post_time in
     settings.post_timezone. Removes the job when schedule is disabled."""
+    job_queue = getattr(job_queue, "job_queue", job_queue)  # accept Application or JobQueue
+    if job_queue is None:
+        log.warning("schedule_daily: no job_queue available; skipping")
+        return
     import datetime as _dt
     for j in job_queue.jobs():
         if j.name == "daily_post":

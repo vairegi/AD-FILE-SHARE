@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 import db
 import scanner
 from utils import admin_only, human_duration, parse_duration
+from telegram.helpers import escape_markdown
 
 # NOTE: do_post / schedule_daily are imported lazily inside the commands that
 # need them — importing them here at module level creates a circular import
@@ -452,8 +453,8 @@ async def cmd_queueinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"Queue info",
              f"Position: #{sm['position']} - Remaining: {sm['remaining']}"]
     for i, it in enumerate(items, 1):
-        fid = escape_markdown(str(it["file_id"]), 2)
-        lines.append(f"{i}\. {fid} (db id {it['db_message_id']})")
+        fid = escape_markdown(str(it.get("file_id") or it["db_message_id"]), 2)
+        lines.append(f"{i}\\. {fid} (db id {it['db_message_id']})")
     await update.message.reply_text(
         "\n".join(lines), parse_mode="MarkdownV2")
 

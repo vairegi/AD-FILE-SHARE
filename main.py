@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
             log.error("Failed to set webhooks: %s", exc)
 
     # 3. Background jobs
-    await schedule_daily(bot1)
+    await schedule_daily(bot1.job_queue)
     schedule_sweeper(bot2)
     await _set_commands()
     log.info("Both bots are up.")
