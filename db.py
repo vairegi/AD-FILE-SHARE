@@ -41,6 +41,12 @@ DEFAULT_SETTINGS = {
     "db_channel_id": config.DB_CHANNEL_ID,
     "post_time": "18:00",
     "token_ttl_minutes": 10,
+    "post_main_channel_id": None,
+    "post_tag": None,
+    "post_timezone": "Asia/Kolkata",
+    "schedule_enabled": True,
+    "schedule_paused": False,
+    "queue_cursor": None,
 }
 
 
@@ -304,3 +310,66 @@ async def due_deletions():
 
 async def remove_deletion(doc_id):
     await _db.deletions.delete_one({"_id": doc_id})
+
+
+# === v1.3 : persisted schedule / queue state ===
+
+async def next_unposted():
+    """Lowest unposted db_message_id, honouring queue_cursor if set."""
+    s = await get_settings()
+    q = {"posted": False}
+    cur = (s or {}).get("queue_cursor")
+    if cur:
+        q["db_message_id"] = {"$gte": cur}
+    return await _db.files.find_one(q, sort=[("db_message_id", 1)])
+
+
+async def next_n_queued(n=10):
+    s = await get_settings()
+    q = {"posted": False}
+    cur = (s or {}).get("queue_cursor")
+    if cur:
+        q["db_message_id"] = {"$gte": cur}
+    return await _db.files.find(q).sort("db_message_id", 1).limit(int(n)).to_list(int(n))
+
+
+async def queue_summary(n=10):
+    s = await get_settings()
+    cur = (s or {}).get("queue_cursor")
+    less = 0
+    if cur:
+        less = await _db.files.count_documents(
+            {"posted": False, "db_message_id": {"$lt": cur}})
+    items = await next_n_queued(n)
+    remaining = await _db.files.count_documents(
+        {"posted": False, **({"db_message_id": {"$gte": cur}} if cur else {})})
+    return {
+        "cursor": cur,
+        "position": (less + 1) if cur else 1,
+        "remaining": remaining,
+        "items": items,
+    }
+
+
+async def queue_reset_to_position(n):
+    """Move cursor to the Nth item (1-indexed over ALL items, db_message_id ASC).
+    Flips every earlier still-unposted item to posted. Returns target or None."""
+    n = int(n)
+    if n < 1:
+        return None
+    order = await _db.files.find({}).sort("db_message_id", 1).to_list(None)
+    if n > len(order):
+        return None
+    target = order[n - 1]
+    tid = target["db_message_id"]
+    await _db.files.update_many(
+        {"db_message_id": {"$lt": tid}, "posted": False},
+        {"$set": {"posted": True, "posted_at": now()}})
+    await _db.settings.update_one(
+        {"_id": "global"}, {"$set": {"queue_cursor": tid}}, upsert=True)
+    return target
+
+
+async def clear_queue_cursor():
+    await _db.settings.update_one(
+        {"_id": "global"}, {"$unset": {"queue_cursor": ""}})

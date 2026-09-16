@@ -389,3 +389,123 @@ def build_bot1() -> Application:
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
     return app
+
+
+# === v1.3 : tz-aware scheduling + main-channel forward (overrides) ===
+
+_TZ_ALIASES = {
+    "IST": "Asia/Kolkata", "INDIA": "Asia/Kolkata", "CHENNAI": "Asia/Kolkata",
+    "PKT": "Asia/Karachi", "BST": "Asia/Dhaka", "ICT": "Asia/Bangkok",
+    "JST": "Asia/Tokyo", "KST": "Asia/Seoul", "WIB": "Asia/Jakarta",
+    "GMT": "Etc/GMT", "UTC": "UTC",
+}
+
+
+def _resolve_tz(name):
+    """Return (tzinfo, canonical_label). Falls back to Asia/Kolkata."""
+    from zoneinfo import ZoneInfo
+    raw = (name or "Asia/Kolkata").strip()
+    cand = _TZ_ALIASES.get(raw.upper(), raw)
+    for c in (cand, cand.replace(" ", "/")):
+        try:
+            return ZoneInfo(c), c
+        except Exception:
+            pass
+    return ZoneInfo("Asia/Kolkata"), "Asia/Kolkata"
+
+
+async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag, markup):
+    """Forward the just-published cover from the post channel to the main
+    channel, prefixed with the tag as its own message. Raises on failure."""
+    if tag:
+        await bot.send_message(main_id, tag)
+    return await bot.copy_message(
+        chat_id=main_id, from_chat_id=post_channel,
+        message_id=post_msg_id, reply_markup=markup)
+
+
+async def do_post(bot):
+    """Post the next queued cover to the post channel, then (optionally)
+    forward it to the main channel with the tag. Cursor-safe via Mongo."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    item = await db.next_unposted()
+    if not item:
+        log.info("do_post: queue empty")
+        return None
+    s = await db.get_settings()
+    post_channel = s.get("post_channel_id") or config.POST_CHANNEL_ID
+    db_channel = s.get("db_channel_id") or config.DB_CHANNEL_ID
+    link = f"https://t.me/{config.BOT1_USERNAME}?start=file_{item['file_id']}"
+    markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("\u2b07\ufe0f Download", url=link)]])
+    msg = await bot.copy_message(
+        chat_id=post_channel, from_chat_id=db_channel,
+        message_id=item["cover_message_id"], reply_markup=markup)
+    await db.mark_posted(item["db_message_id"], post_message_id=msg.message_id)
+    log.info("posted %s (db id %s) -> %s", item["file_id"],
+             item["db_message_id"], post_channel)
+    main_id = s.get("post_main_channel_id")
+    if main_id:
+        try:
+            await _forward_with_tag(bot, post_channel, msg.message_id,
+                                    main_id, s.get("post_tag"), markup)
+            log.info("forwarded %s to main channel %s", item["file_id"], main_id)
+        except Exception as exc:
+            log.warning("main-channel forward failed: %s", exc)
+            try:
+                admin = (config.ADMIN_IDS or [None])[0]
+                if admin:
+                    await bot.send_message(
+                        admin,
+                        "\u26a0\ufe0f Forward to main channel failed for "
+                        f"{item['file_id']}: {exc}\n"
+                        "(Is the bot admin in the main channel?)")
+            except Exception:
+                pass
+    return item
+
+
+async def schedule_daily(job_queue):
+    """(Re)install the daily drip job from settings.post_time in
+    settings.post_timezone. Removes the job when schedule is disabled."""
+    import datetime as _dt
+    for j in job_queue.jobs():
+        if j.name == "daily_post":
+            j.schedule_removal()
+    s = await db.get_settings()
+    if not s.get("schedule_enabled", True):
+        log.info("daily schedule disabled")
+        return
+    hh, mm = (s.get("post_time", "18:00").split(":") + ["0"])[:2]
+    tz, label = _resolve_tz(s.get("post_timezone"))
+    job_queue.run_daily(
+        _daily_cb,
+        time=_dt.time(hour=int(hh), minute=int(mm), tzinfo=tz),
+        name="daily_post")
+    log.info("daily post scheduled at %02d:%02d %s", int(hh), int(mm), label)
+
+
+async def _daily_cb(context):
+    s = await db.get_settings()
+    if s.get("schedule_paused"):
+        log.info("schedule_paused=True; skipping today's post")
+        return
+    await do_post(context.bot)
+
+
+_EXTRA_HELP = (
+    "Scheduling and queue\n"
+    "/setschedule HH:MM TZ - set daily time (e.g. /setschedule 07:00 IST)\n"
+    "/schedule on|off - enable or disable daily posting\n"
+    "/pauseposting - pause the daily job\n"
+    "/resumeposting - resume the daily job\n"
+    "/queueinfo - next 10 queued posts\n"
+    "/queue_reset N - reset queue to post number N\n"
+    "Main channel forward\n"
+    "/setpostmainchannel id|off - forward posts to a main channel\n"
+    "/setposttag text|off - tag line sent above each forward"
+)
+try:
+    HELP_ADMIN += "\n\n" + escape_markdown(_EXTRA_HELP, version=2)
+except NameError:
+    pass

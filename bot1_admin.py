@@ -364,3 +364,176 @@ COMMANDS = {
     "rescandb": cmd_rescandb,
     "scandb": cmd_scandb,
 }
+
+
+# === v1.3 : schedule / queue / main-channel admin commands ===
+
+
+def _parse_hhmm(text):
+    try:
+        hh, mm = text.split(":")[:2]
+        hh, mm = int(hh), int(mm)
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            return f"{hh:02d}:{mm:02d}"
+    except Exception:
+        pass
+    return None
+
+
+@admin_only
+async def cmd_setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setschedule HH:MM [TZ] - e.g. /setschedule 07:00 IST or 07:00 Asia/Kolkata"""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /setschedule HH:MM [timezone]\n"
+            "Example: /setschedule 07:00 IST")
+        return
+    t = _parse_hhmm(args[0])
+    if not t:
+        await update.message.reply_text(
+            "\u274c Invalid time. Use HH:MM (00:00-23:59).")
+        return
+    s = await db.get_settings()
+    tz_label = " ".join(args[1:]).strip() or s.get("post_timezone", "Asia/Kolkata")
+    from bot1 import _resolve_tz, schedule_daily
+    _, canonical = _resolve_tz(tz_label)
+    warn = ""
+    if tz_label and canonical == "Asia/Kolkata" and tz_label.upper() not in (
+            "IST", "INDIA", "CHENNAI", "ASIA/KOLKATA", "ASIA KOLKATA"):
+        warn = f"\n\u26a0\ufe0f Unknown timezone '{tz_label}', fell back to Asia/Kolkata."
+    await db.update_settings({
+        "post_time": t, "post_timezone": canonical,
+        "schedule_enabled": True, "schedule_paused": False})
+    await schedule_daily(context.application.job_queue)
+    await update.message.reply_text(
+        f"\u2705 Daily post scheduled at {t} ({canonical}).{warn}")
+
+
+@admin_only
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/schedule on|off"""
+    args = context.args or []
+    if not args or args[0].lower() not in ("on", "off"):
+        await update.message.reply_text("Usage: /schedule on|off")
+        return
+    on = args[0].lower() == "on"
+    await db.update_settings(
+        {"schedule_enabled": on, "schedule_paused": False})
+    from bot1 import schedule_daily
+    await schedule_daily(context.application.job_queue)
+    await update.message.reply_text(
+        "\u2705 Daily posting enabled." if on
+        else "\u23f8\ufe0f Daily posting disabled (job removed).")
+
+
+@admin_only
+async def cmd_pauseposting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.update_settings({"schedule_paused": True})
+    await update.message.reply_text(
+        "\u23f8\ufe0f Posting paused. Daily job will skip until /resumeposting.")
+
+
+@admin_only
+async def cmd_resumeposting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.update_settings({"schedule_paused": False})
+    await update.message.reply_text("\u25b6\ufe0f Posting resumed.")
+
+
+@admin_only
+async def cmd_queueinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the next 10 queued posts. Always read fresh from Mongo, so it
+    self-updates after /dripnow or /queue_reset."""
+    sm = await db.queue_summary(10)
+    items = sm["items"]
+    if not items:
+        await update.message.reply_text("Queue is empty.")
+        return
+    lines = [f"Queue info",
+             f"Position: #{sm['position']} - Remaining: {sm['remaining']}"]
+    for i, it in enumerate(items, 1):
+        fid = escape_markdown(str(it["file_id"]), 2)
+        lines.append(f"{i}\. {fid} (db id {it['db_message_id']})")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="MarkdownV2")
+
+
+@admin_only
+async def cmd_queue_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/queue_reset N - move cursor to the Nth item (1-indexed over the full
+    ordered queue); earlier unposted items are marked posted."""
+    args = context.args or []
+    try:
+        n = int(args[0])
+    except Exception:
+        await update.message.reply_text("Usage: /queue_reset N (e.g. /queue_reset 50)")
+        return
+    res = await db.queue_reset_to_position(n)
+    if not res:
+        await update.message.reply_text("\u274c Invalid queue position.")
+        return
+    posted = await db.count_posted()
+    pending = await db.count_pending()
+    await update.message.reply_text(
+        f"\u2705 Queue reset. Cursor set to db_message_id={res['db_message_id']}\n"
+        f"Posted={posted} - Queued={pending}")
+
+
+@admin_only
+async def cmd_setpostmainchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setpostmainchannel <channel_id|off> - forward every post-channel cover
+    (with the tag) to this main channel. Bot must be admin in BOTH channels."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /setpostmainchannel <channel_id|off>")
+        return
+    if args[0].lower() == "off":
+        await db.update_settings({"post_main_channel_id": None})
+        await update.message.reply_text("\u2705 Main-channel forwarding disabled.")
+        return
+    try:
+        cid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("\u274c channel_id must be a number.")
+        return
+    note = ""
+    try:
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(cid, me.id)
+        note = f" Bot status there: {member.status}."
+        if member.status not in ("administrator", "creator"):
+            note += " \u26a0\ufe0f Bot is NOT admin - forwarding will fail."
+    except Exception as exc:
+        note = f" \u26a0\ufe0f Could not verify channel: {exc}"
+    await db.update_settings({"post_main_channel_id": cid})
+    await update.message.reply_text(
+        f"\u2705 Main channel set to {cid}.{note}")
+
+
+@admin_only
+async def cmd_setposttag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setposttag <text|off> - tag line sent above each main-channel forward."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Usage: /setposttag <text|off>")
+        return
+    tag = " ".join(args)
+    if tag.lower() == "off":
+        await db.update_settings({"post_tag": None})
+        await update.message.reply_text("\u2705 Post tag cleared.")
+        return
+    await db.update_settings({"post_tag": tag})
+    await update.message.reply_text(f"\u2705 Post tag set to: {tag}")
+
+
+COMMANDS.update({
+    "setschedule": cmd_setschedule,
+    "schedule": cmd_schedule,
+    "pauseposting": cmd_pauseposting,
+    "resumeposting": cmd_resumeposting,
+    "queueinfo": cmd_queueinfo,
+    "queue_reset": cmd_queue_reset,
+    "setpostmainchannel": cmd_setpostmainchannel,
+    "setposttag": cmd_setposttag,
+})
