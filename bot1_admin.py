@@ -10,8 +10,11 @@ from telegram.ext import ContextTypes
 
 import db
 import scanner
-from bot1 import do_post, schedule_daily
 from utils import admin_only, human_duration, parse_duration
+
+# NOTE: do_post / schedule_daily are imported lazily inside the commands that
+# need them — importing them here at module level creates a circular import
+# (bot1 -> bot1_admin -> bot1) that crashes the process on startup.
 
 log = logging.getLogger("bot1.admin")
 
@@ -163,7 +166,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ Queued: {pending}\n\n"
         f"Shortener gate: {'ON' if settings.get('shortener_enabled') else 'OFF'}\n"
         f"Force-sub: {settings.get('force_sub_channel_id') or 'off'}\n"
-        f"Auto-delete: {human_duration(int(settings.get('auto_delete_minutes') or 0))}\n"
+        f"Auto-delete: {human_duration(int(settings.get('auto_delete_minutes') or 0) * 60)}\n"
         f"Daily post time: {settings.get('post_time')} UTC"
     )
 
@@ -276,6 +279,7 @@ async def cmd_setposttime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use HH:MM, e.g. /setposttime 20:30")
         return
     await db.update_settings({"post_time": args[0]})
+    from bot1 import schedule_daily  # lazy import avoids circular dependency
     await schedule_daily(context.application)
     await update.message.reply_text(f"✅ Daily post time set to {args[0]} UTC.")
 
@@ -283,6 +287,7 @@ async def cmd_setposttime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_dripnow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Posting the next queued item…")
+    from bot1 import do_post  # lazy import avoids circular dependency
     item = await do_post(context.bot)
     if item:
         await update.message.reply_text(f"✅ Posted item {item['file_id']}.")

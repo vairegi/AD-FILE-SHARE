@@ -65,7 +65,10 @@ async def _is_member(bot, channel_id, user_id):
     """True/False for a definitive answer, None when the check itself failed."""
     try:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        return member.status in ("member", "administrator", "creator", "restricted")
+        # 'restricted' counts only when the member is still inside the chat
+        if member.status == "restricted":
+            return bool(getattr(member, "is_member", False))
+        return member.status in ("member", "administrator", "creator")
     except Exception as exc:
         log.warning("get_chat_member failed for %s: %s", channel_id, exc)
         return None
@@ -212,10 +215,15 @@ async def do_post(bot):
     markup = InlineKeyboardMarkup(
         [[InlineKeyboardButton("⬇️ Download", url=link)]]
     )
+    if config.BOT1_USERNAME:
+        kwargs = {"reply_markup": markup}
+    else:
+        log.warning("BOT1_USERNAME not set; posting cover without Download button.")
+        kwargs = {}
     try:
         msg = await bot.copy_message(
             chat_id=post_channel, from_chat_id=db_channel,
-            message_id=cover_id, reply_markup=markup,
+            message_id=cover_id, **kwargs,
         )
     except Exception as exc:
         log.error("Failed to post item %s: %s", item["file_id"], exc)
@@ -298,7 +306,7 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post
     settings = await db.get_settings()
     db_channel = settings.get("db_channel_id")
-    if db_channel and msg.chat_id != db_channel:
+    if not db_channel or msg.chat_id != db_channel:
         return
     kind = scanner.classify_from_botapi(msg)
     if not kind:

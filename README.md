@@ -110,6 +110,9 @@ Free-tier instances cannot use Blueprints, so create the service by hand:
 2. Connect the GitHub repo you just pushed.
 3. Settings:
    * **Runtime**: `Python 3`
+   * **Environment → Python Version**: `3.11.9` (or add env var `PYTHON_VERSION=3.11.9`).
+     Without this, Render deploys on its newest Python (3.14) — the `runtime.txt`
+     file alone is not always honored on current Render.
    * **Build Command**: `pip install -r requirements.txt`
    * **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
    * **Instance Type**: Free
