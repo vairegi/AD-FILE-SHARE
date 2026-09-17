@@ -62,6 +62,7 @@ class FakeBot:
     def __init__(self):
         self.sent = []          # (chat_id, text, kwargs)
         self.copied = []        # (chat_id, from_chat_id, message_id)
+        self.copy_kwargs = []   # kwargs passed to copy_message
         self.deleted = []
         self.membership = True  # get_chat_member result control
 
@@ -71,6 +72,7 @@ class FakeBot:
 
     async def copy_message(self, chat_id, from_chat_id, message_id, **kw):
         self.copied.append((chat_id, from_chat_id, message_id))
+        self.copy_kwargs.append(kw)
         return types.SimpleNamespace(message_id=8000 + len(self.copied))
 
     async def delete_message(self, chat_id, message_id):
@@ -222,9 +224,12 @@ async def main():
              for c in h.commands}
     expected_admin = {"shortener", "shortenerapi", "setverifytime", "settokenttl",
                       "shortenermsg", "shortenerbotmsg", "verifymsg", "shortenerbtn",
-                      "clearshortenerbtns", "broadcast", "stats", "ban", "unban",
-                      "addadmin", "setforcesub", "setautodelete", "setpostchannel",
-                      "setdbchannel", "setposttime", "dripnow", "rescandb", "scandb"}
+                      "clearshortenerbtns", "protect", "broadcast", "stats", "ban",
+                      "unban", "addadmin", "setforcesub", "setautodelete",
+                      "setpostchannel", "setdbchannel", "setposttime", "dripnow",
+                      "rescandb", "scandb", "setschedule", "schedule",
+                      "pauseposting", "resumeposting", "queueinfo", "queue_reset",
+                      "setpostmainchannel", "setposttag"}
     check("bot1 registers /start", "start" in cmds1)
     check("bot1 registers all admin commands", expected_admin <= cmds1,
           f"missing={expected_admin - cmds1}")
@@ -424,7 +429,32 @@ async def main():
     # non-admin blocked
     upd = FakeUpdate(uid=12345)
     await adm.cmd_stats(upd, FakeContext())
-    check("admin guard blocks non-admin", "admins only" in upd.message.replies[-1])
+    check("admin guard blocks non-admin", "only by admins" in upd.message.replies[-1])
+
+    # /protect command
+    r = await run(adm.cmd_protect, ["on"])
+    check("/protect on", "enabled" in r
+          and (await db.get_settings())["protect_content"] is True)
+    r = await run(adm.cmd_protect, ["off"])
+    check("/protect off", "disabled" in r
+          and (await db.get_settings())["protect_content"] is False)
+    r = await run(adm.cmd_protect, [])
+    check("/protect status", "OFF" in r)
+    upd = FakeUpdate(uid=12345)
+    await adm.cmd_protect(upd, FakeContext(args=["on"]))
+    check("/protect blocked for non-admin", "only by admins" in upd.message.replies[-1]
+          and (await db.get_settings())["protect_content"] is False)
+
+    # /stats shows every connected channel with an embedded link
+    await db.update_settings({"db_channel_id": -100111, "post_channel_id": -100222,
+                              "post_main_channel_id": -100333,
+                              "force_sub_channel_id": -100444})
+    r = await run(adm.cmd_stats)
+    check("/stats lists all channels",
+          "Database:" in r and "Post Channel:" in r
+          and "Main Posting Channel:" in r and "Force-Sub Channel:" in r)
+    check("/stats embeds channel invite links", "https://t.me/forcechannel" in r)
+    check("/stats shows protect state", "Content protection" in r)
 
     # ── 9. /start handlers ────────────────────────────────────
     fb = FakeBot()
@@ -481,6 +511,65 @@ async def main():
     import main as m
     routes = {r.path for r in m.app.routes}
     check("fastapi routes", {"/health", "/bot1/webhook", "/bot2/webhook"} <= routes)
+
+    # ── 11b. posting flow: protect flag + main-channel tag ─────
+    # deterministic queue state: mark everything posted, then add fresh items
+    await db._db.files.update_many({"posted": False}, {"$set": {"posted": True}})
+    await db.update_settings({"post_channel_id": -100222, "db_channel_id": -100111,
+                              "post_main_channel_id": None, "post_tag": None,
+                              "protect_content": True, "queue_cursor": None})
+    await db.clear_queue_cursor()
+    await db.upsert_item({"file_id": "f100", "db_message_id": 100,
+                          "cover_message_id": 100, "caption": "cap100",
+                          "videos": [{"db_message_id": 101, "caption": ""}],
+                          "srts": []})
+    fb = FakeBot()
+    item = await bot1.do_post(fb)
+    check("do_post posts oldest unposted item", item and item["file_id"] == "f100")
+    check("do_post copies DB -> post channel with protect_content ON",
+          fb.copied and fb.copied[0] == (-100222, -100111, 100)
+          and fb.copy_kwargs[0].get("protect_content") is True)
+
+    await db.update_settings({"protect_content": False})
+    await db.upsert_item({"file_id": "f110", "db_message_id": 110,
+                          "cover_message_id": 110, "caption": "cap110",
+                          "videos": [{"db_message_id": 111, "caption": ""}],
+                          "srts": []})
+    fb = FakeBot()
+    item = await bot1.do_post(fb)
+    check("do_post protect_content OFF", item and item["file_id"] == "f110"
+          and fb.copy_kwargs[0].get("protect_content") is False)
+
+    # main-channel forward: tag sent first, then the just-published post
+    await db.upsert_item({"file_id": "f120", "db_message_id": 120,
+                          "cover_message_id": 120, "caption": "cap120",
+                          "videos": [{"db_message_id": 121, "caption": ""}],
+                          "srts": []})
+    await db.update_settings({"post_main_channel_id": -100333,
+                              "post_tag": "#NewDrop"})
+    fb = FakeBot()
+    item = await bot1.do_post(fb)
+    check("do_post sends tag message to main channel",
+          any(cid == -100333 and "#NewDrop" in txt for cid, txt, _ in fb.sent))
+    check("do_post forwards the POST-channel message (with tag) to main",
+          (-100333, -100222, 8001) in fb.copied)
+
+    # tag message fails -> tag must still be embedded as the forward's caption
+    class TagFailBot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            if chat_id == -100333:
+                raise RuntimeError("no send rights in main channel")
+            return await super().send_message(chat_id, text, **kw)
+
+    await db.upsert_item({"file_id": "f130", "db_message_id": 130,
+                          "cover_message_id": 130, "caption": "cap130",
+                          "videos": [{"db_message_id": 131, "caption": ""}],
+                          "srts": []})
+    tf = TagFailBot()
+    item = await bot1.do_post(tf)
+    check("do_post tag failure -> tag embedded in caption, never untagged",
+          tf.copied and tf.copied[-1][0] == -100333
+          and tf.copy_kwargs[-1].get("caption", "").startswith("#NewDrop"))
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

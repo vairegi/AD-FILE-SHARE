@@ -128,6 +128,26 @@ async def cmd_clearshortenerbtns(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text("✅ All extra buttons removed.")
 
 
+@admin_only
+async def cmd_protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/protect on|off - ON: users cannot forward/save delivered files
+    (Telegram protect_content on every message the bots send)."""
+    args = context.args or []
+    if not args or args[0].lower() not in ("on", "off"):
+        settings = await db.get_settings()
+        await update.message.reply_text(
+            "Usage: /protect on | off\n"
+            f"Content protection is currently "
+            f"{'ON' if settings.get('protect_content') else 'OFF'}.")
+        return
+    enabled = args[0].lower() == "on"
+    await db.update_settings({"protect_content": enabled})
+    await update.message.reply_text(
+        f"✅ Content protection {'enabled' if enabled else 'disabled'}.\n"
+        + ("Users can no longer forward or save delivered files."
+           if enabled else "Users can forward and save delivered files again."))
+
+
 # ── general admin ─────────────────────────────────────────────
 @admin_only
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,8 +168,40 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Done. Sent: {sent} · Failed: {failed}")
 
 
+def _h(text) -> str:
+    """Escape a string for HTML parse_mode."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+async def _channel_info(bot, channel_id) -> str:
+    """Channel title with its invite link embedded, e.g. '<a href=...>Title</a>'.
+    Falls back to the raw id when the bot cannot resolve the channel."""
+    if not channel_id:
+        return "not set"
+    title, link = None, None
+    try:
+        chat = await bot.get_chat(channel_id)
+        title = getattr(chat, "title", None)
+        username = getattr(chat, "username", None)
+        if username:
+            link = f"https://t.me/{username}"
+    except Exception:
+        pass
+    if not link:
+        try:
+            link = await bot.export_chat_invite_link(channel_id)
+        except Exception:
+            pass
+    label = _h(title) if title else str(channel_id)
+    if link:
+        label = f'<a href="{link}">{label}</a>'
+    return label
+
+
 @admin_only
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full bot overview: counters, feature toggles and every connected
+    channel shown with its title + embedded invite link."""
     settings = await db.get_settings()
     users = await db.count_users()
     verified = await db.count_verified()
@@ -157,18 +209,42 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     files = await db.count_files()
     posted = await db.count_posted()
     pending = await db.count_pending()
+
+    db_ch = await _channel_info(context.bot, settings.get("db_channel_id"))
+    post_ch = await _channel_info(context.bot, settings.get("post_channel_id"))
+    main_ch = await _channel_info(context.bot, settings.get("post_main_channel_id"))
+    fsub_ch = await _channel_info(context.bot, settings.get("force_sub_channel_id"))
+
+    if not settings.get("schedule_enabled", True):
+        schedule = "OFF"
+    elif settings.get("schedule_paused"):
+        schedule = "PAUSED"
+    else:
+        schedule = "ON"
+
     await update.message.reply_text(
-        "📊 Statistics\n"
+        "📊 <b>Bot Statistics</b>\n\n"
         f"👤 Users: {users}\n"
         f"✅ Verified: {verified}\n"
         f"🚫 Banned: {banned}\n"
         f"🎬 Total items: {files}\n"
         f"📤 Posted: {posted}\n"
         f"⏳ Queued: {pending}\n\n"
+        "🔗 <b>Connected Channels</b>\n"
+        f"Database: {db_ch}\n"
+        f"Main Posting Channel: {main_ch}\n"
+        f"Post Channel: {post_ch}\n"
+        f"Force-Sub Channel: {fsub_ch}\n\n"
+        "⚙️ <b>Settings</b>\n"
         f"Shortener gate: {'ON' if settings.get('shortener_enabled') else 'OFF'}\n"
-        f"Force-sub: {settings.get('force_sub_channel_id') or 'off'}\n"
+        f"Content protection (/protect): {'ON' if settings.get('protect_content') else 'OFF'}\n"
         f"Auto-delete: {human_duration(int(settings.get('auto_delete_minutes') or 0) * 60)}\n"
-        f"Daily post time: {settings.get('post_time')} UTC"
+        f"Daily post time: {_h(settings.get('post_time') or '18:00')} "
+        f"({_h(settings.get('post_timezone') or 'Asia/Kolkata')})\n"
+        f"Schedule: {schedule}\n"
+        f"Post tag: {_h(settings.get('post_tag')) if settings.get('post_tag') else 'not set'}",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -351,6 +427,7 @@ COMMANDS = {
     "verifymsg": cmd_verifymsg,
     "shortenerbtn": cmd_shortenerbtn,
     "clearshortenerbtns": cmd_clearshortenerbtns,
+    "protect": cmd_protect,
     "broadcast": cmd_broadcast,
     "stats": cmd_stats,
     "ban": cmd_ban,

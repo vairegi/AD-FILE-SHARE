@@ -73,7 +73,7 @@ HELP_ADMIN = (
            "/clearshortenerbtns — remove extra buttons\n")
     + "\n*General*\n"
     + _md2("/broadcast <message> — message all users\n"
-           "/stats — users / verified / posted stats\n"
+           "/stats — full overview + all connected channels\n"
            "/ban <user_id> · /unban <user_id>\n"
            "/addadmin <user_id> — promote an admin\n"
            "/setforcesub <channel_id | off>\n"
@@ -81,6 +81,7 @@ HELP_ADMIN = (
            "/setpostchannel <channel_id>\n"
            "/setdbchannel <channel_id>\n"
            "/setposttime <HH:MM> — daily post time (UTC)\n"
+           "/protect on | off — block forwarding/saving of files\n"
            "/dripnow — post the next queued item now\n"
            "/rescandb — re-index the database channel\n"
            "/scandb <channel_id> — index a channel + set as DB")
@@ -414,11 +415,24 @@ def _resolve_tz(name):
     return ZoneInfo("Asia/Kolkata"), "Asia/Kolkata"
 
 
-async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag, markup):
+async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
+                            markup, item_caption=""):
     """Forward the just-published cover from the post channel to the main
-    channel, prefixed with the tag as its own message. Raises on failure."""
+    channel, prefixed with the tag as its own message. Raises on failure.
+
+    If the tag message itself cannot be sent (e.g. restricted rights), the
+    tag is embedded as the forwarded post's caption instead, so the main
+    channel NEVER receives an untagged forward."""
     if tag:
-        await bot.send_message(main_id, tag)
+        try:
+            await bot.send_message(main_id, tag)
+        except Exception as exc:
+            log.warning("tag message failed (%s); embedding tag as caption", exc)
+            caption = f"{tag}\n\n{item_caption}" if item_caption else str(tag)
+            return await bot.copy_message(
+                chat_id=main_id, from_chat_id=post_channel,
+                message_id=post_msg_id, caption=caption[:1000],
+                reply_markup=markup)
     return await bot.copy_message(
         chat_id=main_id, from_chat_id=post_channel,
         message_id=post_msg_id, reply_markup=markup)
@@ -440,7 +454,8 @@ async def do_post(bot):
         [[InlineKeyboardButton("\u2b07\ufe0f Download", url=link)]])
     msg = await bot.copy_message(
         chat_id=post_channel, from_chat_id=db_channel,
-        message_id=item["cover_message_id"], reply_markup=markup)
+        message_id=item["cover_message_id"], reply_markup=markup,
+        protect_content=bool(s.get("protect_content")))
     await db.mark_posted(item["db_message_id"], post_message_id=msg.message_id)
     log.info("posted %s (db id %s) -> %s", item["file_id"],
              item["db_message_id"], post_channel)
@@ -448,7 +463,8 @@ async def do_post(bot):
     if main_id:
         try:
             await _forward_with_tag(bot, post_channel, msg.message_id,
-                                    main_id, s.get("post_tag"), markup)
+                                    main_id, s.get("post_tag"), markup,
+                                    item.get("caption") or "")
             log.info("forwarded %s to main channel %s", item["file_id"], main_id)
         except Exception as exc:
             log.warning("main-channel forward failed: %s", exc)

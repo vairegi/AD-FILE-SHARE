@@ -80,7 +80,8 @@ def admin_only(func):
             return await func(update, context, *args, **kwargs)
         message = update.effective_message
         if message:
-            await message.reply_text("⛔ This command is for admins only.")
+            await message.reply_text(
+                "⛔ This command can be used only by admins.")
         return None
 
     return wrapper

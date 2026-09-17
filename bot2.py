@@ -69,11 +69,15 @@ async def send_item(bot, chat_id, item, index):
         await bot.send_message(chat_id, "❌ Delivery channel is not configured.")
         return
 
+    # /protect on -> users cannot forward or save the delivered file
+    protect = bool(settings.get("protect_content"))
+
     video = item["videos"][index]
     try:
         sent = await bot.copy_message(
             chat_id=chat_id, from_chat_id=db_channel,
             message_id=video["db_message_id"],
+            protect_content=protect,
         )
     except Exception as exc:
         log.error("copy_message failed: %s", exc)
@@ -91,6 +95,7 @@ async def send_item(bot, chat_id, item, index):
             sent_srt = await bot.copy_message(
                 chat_id=chat_id, from_chat_id=db_channel,
                 message_id=srt["db_message_id"],
+                protect_content=protect,
             )
             delivered.append(getattr(sent_srt, "message_id", None))
         except Exception as exc:

@@ -47,6 +47,7 @@ DEFAULT_SETTINGS = {
     "schedule_enabled": True,
     "schedule_paused": False,
     "queue_cursor": None,
+    "protect_content": False,
 }
 
 
