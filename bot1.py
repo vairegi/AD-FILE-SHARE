@@ -416,26 +416,36 @@ def _resolve_tz(name):
 
 
 async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
-                            markup, item_caption=""):
-    """Forward the just-published cover from the post channel to the main
-    channel, prefixed with the tag as its own message. Raises on failure.
+                            markup=None):
+    """FORWARD the just-published post from the Post Channel to the Main
+    Posting Channel, then send the tag as a REPLY (quote) to the forwarded
+    post. Order: post already exists in Post Channel -> forward it -> tag
+    quotes it.
 
-    If the tag message itself cannot be sent (e.g. restricted rights), the
-    tag is embedded as the forwarded post's caption instead, so the main
-    channel NEVER receives an untagged forward."""
+    Telegram cannot forward messages with protected content, so when the
+    forward itself fails (e.g. /protect on) we fall back to copy_message —
+    the main channel still gets the post, and the tag still quotes it."""
+    try:
+        fwd = await bot.forward_message(
+            chat_id=main_id, from_chat_id=post_channel,
+            message_id=post_msg_id)
+    except Exception as exc:
+        log.warning("forward to main failed (%s); copying instead", exc)
+        fwd = await bot.copy_message(
+            chat_id=main_id, from_chat_id=post_channel,
+            message_id=post_msg_id, reply_markup=markup)
     if tag:
         try:
-            await bot.send_message(main_id, tag)
+            await bot.send_message(
+                main_id, tag, reply_to_message_id=fwd.message_id,
+                allow_sending_without_reply=True)
         except Exception as exc:
-            log.warning("tag message failed (%s); embedding tag as caption", exc)
-            caption = f"{tag}\n\n{item_caption}" if item_caption else str(tag)
-            return await bot.copy_message(
-                chat_id=main_id, from_chat_id=post_channel,
-                message_id=post_msg_id, caption=caption[:1000],
-                reply_markup=markup)
-    return await bot.copy_message(
-        chat_id=main_id, from_chat_id=post_channel,
-        message_id=post_msg_id, reply_markup=markup)
+            log.warning("tag quote failed, sending plain tag: %s", exc)
+            try:
+                await bot.send_message(main_id, tag)
+            except Exception as exc2:
+                log.error("tag message failed entirely: %s", exc2)
+    return fwd
 
 
 async def do_post(bot):
@@ -463,8 +473,7 @@ async def do_post(bot):
     if main_id:
         try:
             await _forward_with_tag(bot, post_channel, msg.message_id,
-                                    main_id, s.get("post_tag"), markup,
-                                    item.get("caption") or "")
+                                    main_id, s.get("post_tag"), markup)
             log.info("forwarded %s to main channel %s", item["file_id"], main_id)
         except Exception as exc:
             log.warning("main-channel forward failed: %s", exc)
@@ -519,7 +528,7 @@ _EXTRA_HELP = (
     "/schedule on|off - enable or disable daily posting\n"
     "/pauseposting - pause the daily job\n"
     "/resumeposting - resume the daily job\n"
-    "/queueinfo - next 10 queued posts\n"
+    "/queueinfo - next 10 queued posts (with links)\n"
     "/queue_reset N - reset queue to post number N\n"
     "Main channel forward\n"
     "/setpostmainchannel id|off - forward posts to a main channel\n"

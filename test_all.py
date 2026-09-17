@@ -63,6 +63,7 @@ class FakeBot:
         self.sent = []          # (chat_id, text, kwargs)
         self.copied = []        # (chat_id, from_chat_id, message_id)
         self.copy_kwargs = []   # kwargs passed to copy_message
+        self.forwarded = []     # (chat_id, from_chat_id, message_id)
         self.deleted = []
         self.membership = True  # get_chat_member result control
 
@@ -74,6 +75,10 @@ class FakeBot:
         self.copied.append((chat_id, from_chat_id, message_id))
         self.copy_kwargs.append(kw)
         return types.SimpleNamespace(message_id=8000 + len(self.copied))
+
+    async def forward_message(self, chat_id, from_chat_id, message_id, **kw):
+        self.forwarded.append((chat_id, from_chat_id, message_id))
+        return types.SimpleNamespace(message_id=7000 + len(self.forwarded))
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
@@ -549,10 +554,12 @@ async def main():
                               "post_tag": "#NewDrop"})
     fb = FakeBot()
     item = await bot1.do_post(fb)
-    check("do_post sends tag message to main channel",
-          any(cid == -100333 and "#NewDrop" in txt for cid, txt, _ in fb.sent))
-    check("do_post forwards the POST-channel message (with tag) to main",
-          (-100333, -100222, 8001) in fb.copied)
+    check("do_post forwards the POST-channel post to main (real forward)",
+          (-100333, -100222, 8001) in fb.forwarded)
+    check("do_post sends tag as a QUOTE-REPLY to the forwarded post",
+          any(cid == -100333 and "#NewDrop" in txt
+              and kw.get("reply_to_message_id") == 7001
+              for cid, txt, kw in fb.sent))
 
     # tag message fails -> tag must still be embedded as the forward's caption
     class TagFailBot(FakeBot):
@@ -567,9 +574,21 @@ async def main():
                           "srts": []})
     tf = TagFailBot()
     item = await bot1.do_post(tf)
-    check("do_post tag failure -> tag embedded in caption, never untagged",
-          tf.copied and tf.copied[-1][0] == -100333
-          and tf.copy_kwargs[-1].get("caption", "").startswith("#NewDrop"))
+    check("do_post tag failure -> forward still happens, no crash",
+          bool(item) and (-100333, -100222, 8001) in tf.forwarded)
+
+    # /queueinfo shows queued items with embedded channel links (HTML)
+    await db.upsert_item({"file_id": "f140", "db_message_id": 140,
+                          "cover_message_id": 140, "caption": "My Cool Video",
+                          "videos": [{"db_message_id": 141, "caption": ""}],
+                          "srts": []})
+    upd = FakeUpdate()
+    await adm.cmd_queueinfo(upd, FakeContext())
+    qreply = upd.message.replies[-1] if upd.message.replies else ""
+    check("/queueinfo shows queued items", "Queue info" in qreply
+          and "My Cool Video" in qreply)
+    check("/queueinfo embeds links to the queued posts",
+          'href="https://t.me/c/111/140"' in qreply)
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

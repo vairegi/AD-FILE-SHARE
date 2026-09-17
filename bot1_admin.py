@@ -527,13 +527,21 @@ async def cmd_queueinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not items:
         await update.message.reply_text("Queue is empty.")
         return
-    lines = [f"Queue info",
-             f"Position: #{sm['position']} - Remaining: {sm['remaining']}"]
+    settings = await db.get_settings()
+    db_ch = settings.get("db_channel_id")
+    base = None
+    if db_ch and str(db_ch).startswith("-100"):
+        base = f"https://t.me/c/{str(db_ch)[4:]}"
+    lines = ["📋 <b>Queue info</b>",
+             f"Position: #{sm['position']} — Remaining: {sm['remaining']}", ""]
     for i, it in enumerate(items, 1):
-        fid = escape_markdown(str(it.get("file_id") or it["db_message_id"]), 2)
-        lines.append(f"{i}\\. {fid} (db id {it['db_message_id']})")
+        caption = (it.get("caption") or "").strip().split("\n")[0][:60]
+        label = _h(caption or str(it.get("file_id") or it["db_message_id"]))
+        if base:
+            label = f'<a href="{base}/{it["db_message_id"]}">{label}</a>'
+        lines.append(f"{i}. {label}")
     await update.message.reply_text(
-        "\n".join(lines), parse_mode="MarkdownV2")
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @admin_only
