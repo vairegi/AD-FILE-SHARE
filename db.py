@@ -120,10 +120,25 @@ async def mark_verified(user_id, hours):
     return until
 
 
+async def add_strike(user_id) -> int:
+    """Increment and return the bypass-strike counter for a user."""
+    doc = await _db.users.find_one_and_update(
+        {"user_id": user_id},
+        {"$inc": {"strikes": 1},
+         "$setOnInsert": {"joined_at": now(), "verified_until": 0}},
+        upsert=True, return_document=True)
+    return int((doc or {}).get("strikes") or 1)
+
+
+async def reset_strikes(user_id):
+    await _db.users.update_one({"user_id": user_id},
+                               {"$set": {"strikes": 0}})
+
+
 async def set_banned(user_id, banned: bool):
     await _db.users.update_one(
         {"user_id": user_id},
-        {"$set": {"banned": banned},
+        {"$set": {"banned": banned, **({"strikes": 0} if not banned else {})},
          "$setOnInsert": {"joined_at": now(), "verified_until": 0}},
         upsert=True,
     )
@@ -241,8 +256,17 @@ def group_items(raw: list):
 
 
 async def rebuild_items():
-    """Re-derive the files collection from raw staging (keeps posted flags)."""
+    """Re-derive the files collection from raw staging (keeps posted flags).
+
+    Self-healing: items whose source messages are no longer in the DB channel
+    (e.g. a duplicate the owner deleted) are REMOVED, so the queue renumbers
+    itself on the next /rescandb or /scandb."""
     items = group_items(await all_raw())
+    valid_ids = {it["db_message_id"] for it in items}
+    if valid_ids:
+        await _db.files.delete_many({"db_message_id": {"$nin": list(valid_ids)}})
+    else:
+        await _db.files.delete_many({})
     for it in items:
         await upsert_item({
             "file_id": f"f{it['db_message_id']}",
@@ -298,6 +322,15 @@ async def is_db_admin(user_id):
 
 
 # ── auto-delete queue (restart-safe) ──────────────────────────
+async def list_admin_ids():
+    """ENV admins plus every admin promoted via /addadmin."""
+    ids = list(config.ADMIN_IDS)
+    async for doc in _db.admins.find({}):
+        if doc["user_id"] not in ids:
+            ids.append(doc["user_id"])
+    return ids
+
+
 async def add_deletion(chat_id, message_ids, delete_at):
     await _db.deletions.insert_one({
         "chat_id": chat_id, "message_ids": list(message_ids), "delete_at": delete_at

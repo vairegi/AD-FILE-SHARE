@@ -32,6 +32,10 @@ from utils import is_admin
 
 log = logging.getLogger("bot1")
 
+# A genuine shortener visit (redirect chain + on-page timer + captcha)
+# cannot complete faster than this. Faster == bypass script.
+BYPASS_MIN_SECONDS = 150
+
 WELCOME = (
     "👋 Welcome!\n\n"
     "This bot gives access to the files posted on the channel.\n"
@@ -210,7 +214,7 @@ async def process_file(bot, chat_id, user_id, file_id):
     await send_shortener_gate(bot, chat_id, user_id, item, settings)
 
 
-async def process_verify(bot, chat_id, user_id, file_id, token):
+async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
     doc = await db.get_token(token)
     if (not doc or doc.get("kind") != "verify" or doc.get("used")
             or doc.get("expires_at", 0) < db.now()):
@@ -224,7 +228,45 @@ async def process_verify(bot, chat_id, user_id, file_id, token):
         await bot.send_message(chat_id, "🚫 This verification link belongs to another user.")
         return
 
+    # ── anti-bypass timing gate ───────────────────────────────
+    elapsed = db.now() - float(doc.get("created_at") or 0)
+    if elapsed < BYPASS_MIN_SECONDS:
+        await db.mark_token_used(token)  # burn the bypassed link
+        strikes = await db.add_strike(user_id)
+        if strikes >= 3:
+            await db.set_banned(user_id, True)
+            await db.reset_strikes(user_id)
+            uname = f"@{username}" if username else "(no username)"
+            await bot.send_message(
+                chat_id,
+                "🚫 You have been banned for repeatedly bypassing the "
+                "verification links.")
+            for aid in await db.list_admin_ids():
+                try:
+                    await bot.send_message(
+                        aid,
+                        f"🚨 User {user_id} auto-banned for 3 consecutive "
+                        f"bypass strikes.\nUsername: {uname}\n"
+                        f"Last elapsed: {elapsed:.1f}s\n"
+                        f"/unban {user_id} to reverse")
+                except Exception as exc:
+                    log.warning("admin alert to %s failed: %s", aid, exc)
+            return
+        await bot.send_message(
+            chat_id,
+            f"⚠️ UNAUTHORIZED ACTION (Strike {strikes}/3)\n\n"
+            "You tried to bypass the link to get the files.\n\n"
+            "Our server security system flagged this request. If you reach "
+            "3 strikes, you will be temporarily/permanently banned.")
+        # give them a fresh link to solve properly
+        item = await db.get_item_by_file_id(file_id)
+        if item:
+            settings = await db.get_settings()
+            await send_shortener_gate(bot, chat_id, user_id, item, settings)
+        return
+
     await db.mark_token_used(token)
+    await db.reset_strikes(user_id)  # consecutive strikes only
     settings = await db.get_settings()
     await db.mark_verified(user_id, int(settings.get("verify_hours") or 6))
 
@@ -322,7 +364,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if payload.startswith("verify_"):
             rest = payload[len("verify_"):]
             file_id, _, token = rest.partition("_")
-            await process_verify(context.bot, user.id, user.id, file_id, token)
+            await process_verify(context.bot, user.id, user.id, file_id, token,
+                                 getattr(user, "username", None))
             return
 
     await update.message.reply_text(WELCOME)

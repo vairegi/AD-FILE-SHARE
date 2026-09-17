@@ -307,6 +307,8 @@ async def main():
 
     fb.sent.clear()
     await db.update_settings({"force_sub_channel_id": None})
+    await db._db.tokens.update_one({"token": vtok},
+                                   {"$set": {"created_at": db.now() - 200}})
     await bot1.process_verify(fb, 999, 999, "f21", vtok)
     joined = str(fb.sent[-1])
     check("verify: success -> deliver link issued", "deliver_f21_" in joined)
@@ -628,6 +630,62 @@ async def main():
     healed = await bot1.do_post(dbot)
     check("queue heals itself past a deleted DB post",
           healed is not None and healed["file_id"] == "f160")
+
+    # ── 11c. anti-bypass strikes + auto-ban ───────────────────
+    await db.upsert_item({"file_id": "f170", "db_message_id": 170,
+                          "cover_message_id": 170, "caption": "strike item",
+                          "videos": [{"db_message_id": 171, "caption": ""}],
+                          "srts": []})
+    fb = FakeBot()
+    t1 = await db.create_token(7777, "f170", 60, kind="verify")
+    await bot1.process_verify(fb, 7777, 7777, "f170", t1, "Noob7")
+    check("bypass: strike 1 warning issued",
+          any("Strike 1/3" in txt for _, txt, _ in fb.sent))
+    check("bypass: bypassed token burned",
+          (await db.get_token(t1))["used"] is True)
+    t2 = await db.create_token(7777, "f170", 60, kind="verify")
+    await bot1.process_verify(fb, 7777, 7777, "f170", t2, "Noob7")
+    check("bypass: strike 2 warning issued",
+          any("Strike 2/3" in txt for _, txt, _ in fb.sent))
+    t3 = await db.create_token(7777, "f170", 60, kind="verify")
+    await bot1.process_verify(fb, 7777, 7777, "f170", t3, "Noob7")
+    check("bypass: 3rd strike auto-bans user",
+          (await db.get_user(7777))["banned"] is True)
+    check("bypass: admin alerted (username + elapsed + unban hint)",
+          any(cid == 999 and "auto-banned" in txt and "@Noob7" in txt
+              and "/unban 7777" in txt for cid, txt, _ in fb.sent))
+
+    # banned users cannot get files from Bot 2 either
+    fb2 = FakeBot()
+    dtk = await db.create_token(7777, "f170", 10, kind="deliver")
+    await bot2.process_delivery(fb2, 7777, 7777, "f170", dtk)
+    check("banned user blocked in Bot 2", "banned" in fb2.sent[-1][1])
+
+    # /unban resets the strike counter
+    await db.set_banned(7777, False)
+    check("unban resets strikes",
+          int((await db.get_user(7777)).get("strikes") or 0) == 0)
+
+    # a legitimate slow solve passes and is not flagged
+    t4 = await db.create_token(8888, "f170", 60, kind="verify")
+    await db._db.tokens.update_one({"token": t4},
+                                   {"$set": {"created_at": db.now() - 200}})
+    fb.sent.clear()
+    await bot1.process_verify(fb, 8888, 8888, "f170", t4)
+    check("legit slow verify passes", "deliver_f170_" in str(fb.sent[-1]))
+
+    # ── 11d. /rescandb drops deleted posts (queue renumbers) ──
+    await db.ingest_raw({"message_id": 900, "kind": "cover", "caption": "a"})
+    await db.ingest_raw({"message_id": 901, "kind": "video", "caption": ""})
+    await db.ingest_raw({"message_id": 910, "kind": "cover", "caption": "b"})
+    await db.ingest_raw({"message_id": 911, "kind": "video", "caption": ""})
+    await db.rebuild_items()
+    await db._db.raw.delete_one({"message_id": 900})
+    await db._db.raw.delete_one({"message_id": 901})
+    await db.rebuild_items()
+    check("rescan drops deleted DB posts from the queue",
+          await db.get_item_by_file_id("f900") is None
+          and await db.get_item_by_file_id("f910") is not None)
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

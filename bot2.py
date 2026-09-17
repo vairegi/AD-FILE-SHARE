@@ -112,6 +112,11 @@ async def send_item(bot, chat_id, item, index):
 
 
 async def process_delivery(bot, chat_id, user_id, file_id, token):
+    _rec = await db.get_user(user_id)
+    if _rec and _rec.get("banned"):
+        await bot.send_message(
+            chat_id, "🚫 You are banned from using this bot.")
+        return
     doc = await db.get_token(token)
     if (not doc or doc.get("kind") != "deliver" or doc.get("used")
             or doc.get("expires_at", 0) < db.now()):
@@ -198,6 +203,11 @@ async def setautodelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    _rec = await db.get_user(query.from_user.id)
+    if _rec and _rec.get("banned"):
+        await query.answer("🚫 You are banned from using this bot.",
+                           show_alert=True)
+        return
     _, file_id, index, owner = (query.data or "").split(":")
     if query.from_user.id != int(owner):
         await query.answer("This button was not issued for you.", show_alert=True)
