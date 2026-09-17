@@ -531,9 +531,13 @@ async def main():
     fb = FakeBot()
     item = await bot1.do_post(fb)
     check("do_post posts oldest unposted item", item and item["file_id"] == "f100")
-    check("do_post copies DB -> post channel with protect_content ON",
+    check("channel posts stay unprotected even when /protect is on",
           fb.copied and fb.copied[0] == (-100222, -100111, 100)
-          and fb.copy_kwargs[0].get("protect_content") is True)
+          and fb.copy_kwargs[0].get("protect_content") in (None, False))
+    _btn = fb.copy_kwargs[0].get("reply_markup")
+    _bt = _btn.inline_keyboard[0][0].text if _btn else ""
+    check("download button shows the post number",
+          _bt.startswith("#") and "𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱" in _bt)
 
     await db.update_settings({"protect_content": False})
     await db.upsert_item({"file_id": "f110", "db_message_id": 110,
@@ -542,8 +546,9 @@ async def main():
                           "srts": []})
     fb = FakeBot()
     item = await bot1.do_post(fb)
-    check("do_post protect_content OFF", item and item["file_id"] == "f110"
-          and fb.copy_kwargs[0].get("protect_content") is False)
+    check("channel posts unprotected when /protect off",
+          item and item["file_id"] == "f110"
+          and fb.copy_kwargs[0].get("protect_content") in (None, False))
 
     # main-channel forward: tag sent first, then the just-published post
     await db.upsert_item({"file_id": "f120", "db_message_id": 120,
@@ -589,6 +594,40 @@ async def main():
           and "My Cool Video" in qreply)
     check("/queueinfo embeds links to the queued posts",
           'href="https://t.me/c/111/140"' in qreply)
+    check("/queueinfo shows global post numbers", "#" in qreply)
+
+    # /queue_reset rewinds: re-queue everything from the requested post
+    await db.queue_reset_to_position(2)
+    cur2 = (await db.queue_summary(1))["cursor"]
+    nxt = await db.next_unposted()
+    check("/queue_reset rewinds so the requested post is next",
+          nxt is not None and cur2 is not None
+          and nxt["db_message_id"] == cur2)
+
+    # self-heal: item whose DB message was deleted is skipped, queue moves on
+    await db.upsert_item({"file_id": "f150", "db_message_id": 150,
+                          "cover_message_id": 150, "caption": "dead item",
+                          "videos": [{"db_message_id": 151, "caption": ""}],
+                          "srts": []})
+    await db.upsert_item({"file_id": "f160", "db_message_id": 160,
+                          "cover_message_id": 160, "caption": "alive item",
+                          "videos": [{"db_message_id": 161, "caption": ""}],
+                          "srts": []})
+    await db._db.files.update_many({}, {"$set": {"posted": True}})
+    await db._db.files.update_many({"db_message_id": {"$in": [150, 160]}},
+                                   {"$set": {"posted": False}})
+    await db.clear_queue_cursor()
+    class DeadMsgBot(FakeBot):
+        async def copy_message(self, chat_id, from_chat_id, message_id, **kw):
+            if message_id == 150:
+                raise RuntimeError("message to copy not found")
+            return await super().copy_message(chat_id, from_chat_id,
+                                              message_id, **kw)
+    await db.update_settings({"post_main_channel_id": None, "post_tag": None})
+    dbot = DeadMsgBot()
+    healed = await bot1.do_post(dbot)
+    check("queue heals itself past a deleted DB post",
+          healed is not None and healed["file_id"] == "f160")
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

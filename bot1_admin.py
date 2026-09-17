@@ -534,12 +534,13 @@ async def cmd_queueinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         base = f"https://t.me/c/{str(db_ch)[4:]}"
     lines = ["📋 <b>Queue info</b>",
              f"Position: #{sm['position']} — Remaining: {sm['remaining']}", ""]
+    posted_total = await db.count_posted()
     for i, it in enumerate(items, 1):
         caption = (it.get("caption") or "").strip().split("\n")[0][:60]
         label = _h(caption or str(it.get("file_id") or it["db_message_id"]))
         if base:
             label = f'<a href="{base}/{it["db_message_id"]}">{label}</a>'
-        lines.append(f"{i}. {label}")
+        lines.append(f"#{posted_total + i} · {label}")
     await update.message.reply_text(
         "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 

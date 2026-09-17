@@ -448,9 +448,12 @@ async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
     return fwd
 
 
-async def do_post(bot):
+async def do_post(bot, _depth=0):
     """Post the next queued cover to the post channel, then (optionally)
     forward it to the main channel with the tag. Cursor-safe via Mongo."""
+    if _depth >= 10:
+        log.error("do_post: too many dead items in a row; aborting")
+        return None
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     item = await db.next_unposted()
     if not item:
@@ -460,12 +463,23 @@ async def do_post(bot):
     post_channel = s.get("post_channel_id") or config.POST_CHANNEL_ID
     db_channel = s.get("db_channel_id") or config.DB_CHANNEL_ID
     link = f"https://t.me/{config.BOT1_USERNAME}?start=file_{item['file_id']}"
+    post_no = await db.count_posted() + 1
     markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("\u2b07\ufe0f Download", url=link)]])
-    msg = await bot.copy_message(
-        chat_id=post_channel, from_chat_id=db_channel,
-        message_id=item["cover_message_id"], reply_markup=markup,
-        protect_content=bool(s.get("protect_content")))
+        [[InlineKeyboardButton(f"#{post_no} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱", url=link)]])
+    try:
+        # Channel posts are NEVER protected - /protect only applies to the
+        # files Bot 2 delivers to users (protecting a channel post would
+        # also block the forward to the main channel).
+        msg = await bot.copy_message(
+            chat_id=post_channel, from_chat_id=db_channel,
+            message_id=item["cover_message_id"], reply_markup=markup)
+    except Exception as exc:
+        # Source message was deleted from the DB channel (e.g. a duplicate
+        # the owner removed): skip the dead item - the queue heals itself.
+        log.warning("do_post: db message %s gone (%s); skipping %s",
+                    item["db_message_id"], exc, item["file_id"])
+        await db.mark_posted(item["db_message_id"])
+        return await do_post(bot, _depth + 1)
     await db.mark_posted(item["db_message_id"], post_message_id=msg.message_id)
     log.info("posted %s (db id %s) -> %s", item["file_id"],
              item["db_message_id"], post_channel)

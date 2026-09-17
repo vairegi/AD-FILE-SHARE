@@ -366,6 +366,12 @@ async def queue_reset_to_position(n):
     await _db.files.update_many(
         {"db_message_id": {"$lt": tid}, "posted": False},
         {"$set": {"posted": True, "posted_at": now()}})
+    # Rewind: everything from position N onward becomes unposted again, so
+    # /dripnow and the daily job restart exactly at post number N.
+    await _db.files.update_many(
+        {"db_message_id": {"$gte": tid}},
+        {"$set": {"posted": False},
+         "$unset": {"posted_at": "", "post_message_id": ""}})
     await _db.settings.update_one(
         {"_id": "global"}, {"$set": {"queue_cursor": tid}}, upsert=True)
     return target
