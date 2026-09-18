@@ -518,6 +518,7 @@ def group_items(raw: list, category=None):
         if kind == "cover":
             current = {"db_message_id": m["message_id"],
                        "cover_message_id": m["message_id"],
+                       "cover_file_id": m.get("file_id"),
                        "caption": m.get("caption") or "",
                        "videos": [], "srts": []}
             items.append(current)
@@ -525,6 +526,7 @@ def group_items(raw: list, category=None):
             if current is None:
                 current = {"db_message_id": m["message_id"],
                            "cover_message_id": None,
+                           "cover_file_id": None,
                            "caption": m.get("caption") or "",
                            "videos": [], "srts": []}
                 items.append(current)
@@ -562,6 +564,7 @@ async def rebuild_items(category=None):
             "category": cat or it.get("category"),
             "db_message_id": it["db_message_id"],
             "cover_message_id": it["cover_message_id"],
+            "cover_file_id": it.get("cover_file_id"),
             "caption": it["caption"],
             "videos": it["videos"],
             "srts": it["srts"],

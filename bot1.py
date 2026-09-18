@@ -34,6 +34,27 @@ from utils import is_admin
 
 log = logging.getLogger("bot1")
 
+
+async def _notify_admin(bot, text):
+    """DM every admin a failure report (never raises)."""
+    for aid in await db.list_admin_ids():
+        try:
+            await bot.send_message(aid, text)
+        except Exception as exc:
+            log.warning("admin alert to %s failed: %s", aid, exc)
+
+
+def _is_gone(exc) -> bool:
+    """True only when the source message was genuinely deleted/absent.
+    Anything else (bad kwarg, permissions, flood) must NOT be treated as a
+    deletable item, or a single bug would silently mark the whole queue posted."""
+    msg = str(exc).lower()
+    return ("message to copy not found" in msg
+            or "message not found" in msg
+            or "message_id_invalid" in msg
+            or "message identifier is not specified" in msg)
+
+
 # A genuine shortener visit (redirect chain + on-page timer + captcha)
 # cannot complete faster than this. Faster == bypass script.
 BYPASS_MIN_SECONDS = 150
@@ -333,16 +354,47 @@ async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
     return fwd
 
 
+async def _post_cover(bot, post_channel, db_channel, item, markup):
+    """Post the cover image BLURRED (has_spoiler) so only the IMAGE is hidden;
+    the caption text stays normal.
+
+    copy_message cannot apply a spoiler, so when the cover's Bot API file_id
+    was captured at scan/index time we re-send the photo with
+    send_photo(has_spoiler=True). Falls back to copy_message (no spoiler, full
+    caption preserved) when the cover is not a photo, its file_id is unknown
+    (items scanned before this upgrade), or the caption exceeds the photo
+    caption limit — so posting NEVER breaks."""
+    cover_id = item.get("cover_message_id")
+    if not cover_id and item.get("videos"):
+        cover_id = item["videos"][0]["db_message_id"]
+    caption = item.get("caption") or ""
+    photo_fid = item.get("cover_file_id")
+    if photo_fid and len(caption) <= 1024:
+        return await bot.send_photo(
+            chat_id=post_channel, photo=photo_fid,
+            caption=caption or None, reply_markup=markup, has_spoiler=True)
+    return await bot.copy_message(
+        chat_id=post_channel, from_chat_id=db_channel,
+        message_id=cover_id, reply_markup=markup)
+
+
 async def do_post(bot, category=None, _depth=0):
     """Post the next queued cover for ONE category to its Posting Channel,
     then (optionally) forward it to that category's Main channel with its tag.
-    Self-heals past deleted DB messages. Cursor-safe via Mongo."""
+    Self-heals ONLY past genuinely-deleted DB messages. Any other error aborts
+    the run and reports to the admin. Cursor-safe via Mongo."""
     if _depth >= 10:
         log.error("do_post: too many dead items in a row; aborting")
+        await _notify_admin(
+            bot,
+            f"⚠️ [{category}] Daily post aborted: 10 deleted/empty items in a "
+            f"row. The queue stopped here. Run /queueinfo {category} to inspect "
+            "and /queue_reset N " + str(category) + " to rewind if needed.")
         return None
     cat = await db.get_category(category) if category else None
     if category and not cat:
         log.warning("do_post: unknown category %r", category)
+        await _notify_admin(bot, f"⚠️ Post failed: unknown pipeline '{category}'.")
         return None
     post_channel = (cat or {}).get("post_channel_id")
     db_channel = (cat or {}).get("db_channel_id")
@@ -353,11 +405,17 @@ async def do_post(bot, category=None, _depth=0):
         db_channel = db_channel or s.get("db_channel_id") or config.DB_CHANNEL_ID
     if not post_channel or not db_channel:
         log.warning("post/db channel not configured; skipping post.")
+        await _notify_admin(
+            bot, f"⚠️ [{category}] Daily post skipped: Posting or Database "
+                 f"channel is not configured. Set them via /editcategory {category}.")
         return None
 
     item = await db.next_unposted(category)
     if not item:
         log.info("do_post: queue empty for %r", category)
+        await _notify_admin(
+            bot, f"ℹ️ [{category}] Daily post: queue is empty (nothing to post). "
+                 f"Add files to the DB channel or /rescandb {category}.")
         return None
 
     cover_id = item.get("cover_message_id")
@@ -371,20 +429,28 @@ async def do_post(bot, category=None, _depth=0):
     post_no = await db.count_posted(category) + 1
     markup = InlineKeyboardMarkup(
         [[InlineKeyboardButton(f"#{post_no} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱", url=link)]])
+    caption = item.get("caption") or None
     try:
         # Channel posts are NEVER protected - /protect only applies to the
         # files Bot 2 delivers to users.
-        msg = await bot.copy_message(
-            chat_id=post_channel, from_chat_id=db_channel,
-            message_id=cover_id, reply_markup=markup,
-            has_spoiler=True)
+        msg = await _post_cover(bot, post_channel, db_channel, item, markup)
     except Exception as exc:
-        # Source message was deleted from the DB channel: skip the dead item.
-        log.warning("do_post: db message %s gone (%s); skipping %s",
-                    item["db_message_id"], exc, item["file_id"])
-        await db.mark_posted(item["db_message_id"], category=category)
-        return await do_post(bot, category, _depth + 1)
-    await db.mark_posted(item["db_message_id"], post_message_id=msg.message_id,
+        if _is_gone(exc):
+            # Source message genuinely deleted: skip the dead item, keep going.
+            log.warning("do_post: db message %s gone (%s); skipping %s",
+                        item["db_message_id"], exc, item["file_id"])
+            await db.mark_posted(item["db_message_id"], category=category)
+            return await do_post(bot, category, _depth + 1)
+        # Any OTHER error: do NOT mark posted. Abort and report to the admin.
+        log.error("do_post: failed to post %s: %s", item["file_id"], exc)
+        await _notify_admin(
+            bot,
+            f"⚠️ [{category}] Daily post FAILED on {item['file_id']}\n"
+            f"Error: {exc}\n"
+            "Nothing was posted and the queue was NOT advanced. Fix the cause, "
+            f"then /dripnow {category}.")
+        return None
+    await db.mark_posted(item["db_message_id"], post_message_id=getattr(msg, "message_id", None),
                          category=category)
     log.info("posted %s (db id %s) -> %s [%s]", item["file_id"],
              item["db_message_id"], post_channel, category)
@@ -396,16 +462,10 @@ async def do_post(bot, category=None, _depth=0):
             log.info("forwarded %s to main channel %s", item["file_id"], main_id)
         except Exception as exc:
             log.warning("main-channel forward failed: %s", exc)
-            try:
-                admin = (config.ADMIN_IDS or [None])[0]
-                if admin:
-                    await bot.send_message(
-                        admin,
-                        "⚠️ Forward to main channel failed for "
-                        f"{item['file_id']}: {exc}\n"
-                        "(Is the bot admin in the main channel?)")
-            except Exception:
-                pass
+            await _notify_admin(
+                bot,
+                f"⚠️ [{category}] Forward to main channel failed for "
+                f"{item['file_id']}: {exc}\n(Is the bot admin in the main channel?)")
     return item
 
 
@@ -523,11 +583,12 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kind = scanner.classify_from_botapi(msg)
     if not kind:
         return
-    await db.ingest_raw({
-        "message_id": msg.message_id,
-        "kind": kind,
-        "caption": msg.caption or "",
-    }, category=cat_key)
+    entry = {"message_id": msg.message_id, "kind": kind,
+             "caption": msg.caption or ""}
+    # capture the Bot API file_id of cover photos so do_post can blur them
+    if kind == "cover" and msg.photo:
+        entry["file_id"] = msg.photo[-1].file_id
+    await db.ingest_raw(entry, category=cat_key)
     await db.rebuild_items(cat_key)
 
 

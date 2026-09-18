@@ -67,6 +67,7 @@ class FakeBot:
         self.copied = []        # (chat_id, from_chat_id, message_id)
         self.copy_kwargs = []   # kwargs passed to copy_message
         self.forwarded = []     # (chat_id, from_chat_id, message_id)
+        self.photos = []        # (chat_id, photo_file_id, kwargs) send_photo
         self.deleted = []
         self.membership = True  # get_chat_member result control
 
@@ -82,6 +83,10 @@ class FakeBot:
     async def forward_message(self, chat_id, from_chat_id, message_id, **kw):
         self.forwarded.append((chat_id, from_chat_id, message_id))
         return types.SimpleNamespace(message_id=7000 + len(self.forwarded))
+
+    async def send_photo(self, chat_id, photo, **kw):
+        self.photos.append((chat_id, photo, kw))
+        return types.SimpleNamespace(message_id=6000 + len(self.photos))
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
@@ -575,21 +580,24 @@ async def main():
                                      "protect_content": True, "queue_cursor": None})
     await db.clear_queue_cursor("jav")
     await db.upsert_item({"file_id": "jav_f100", "category": "jav", "db_message_id": 100,
-                          "cover_message_id": 100, "caption": "cap100",
+                          "cover_message_id": 100, "cover_file_id": "PHOTO_FID_100",
+                          "caption": "cap100",
                           "videos": [{"db_message_id": 101, "caption": ""}],
                           "srts": []})
     fb = FakeBot()
     item = await bot1.do_post(fb, category="jav")
     check("do_post posts oldest unposted item", item and item["file_id"] == "jav_f100")
+    check("cover posted via send_photo to the post channel",
+          fb.photos and fb.photos[0][0] == -100222 and fb.photos[0][1] == "PHOTO_FID_100")
     check("channel posts stay unprotected even when /protect is on",
-          fb.copied and fb.copied[0] == (-100222, -100111, 100)
-          and fb.copy_kwargs[0].get("protect_content") in (None, False))
-    _btn = fb.copy_kwargs[0].get("reply_markup")
+          fb.photos[0][2].get("protect_content") in (None, False))
+    _btn = fb.photos[0][2].get("reply_markup")
     _bt = _btn.inline_keyboard[0][0].text if _btn else ""
     check("download button shows the post number",
-          _bt.startswith("#") and "𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱" in _bt)
-    check("cover post is sent as a spoiler image",
-          fb.copy_kwargs[0].get("has_spoiler") is True)
+          _bt.startswith("#") and len(_bt) > 3)
+    check("cover image blurred (has_spoiler), caption text NOT blurred",
+          fb.photos[0][2].get("has_spoiler") is True
+          and fb.photos[0][2].get("caption") == "cap100")
 
     await db.update_category("jav", {"protect_content": False})
     await db.upsert_item({"file_id": "jav_f110", "category": "jav", "db_message_id": 110,

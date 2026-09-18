@@ -67,11 +67,18 @@ async def scan_channel(channel_id, category=None, progress=None):
             kind = classify_message(msg)
             if not kind:
                 continue
-            await db.ingest_raw({
-                "message_id": msg.id,
-                "kind": kind,
-                "caption": msg.message or "",
-            }, category=category)
+            entry = {"message_id": msg.id,
+                     "kind": kind,
+                     "caption": msg.message or ""}
+            # capture a Bot API-compatible file_id for cover photos so Bot 1
+            # can re-send them with has_spoiler=True (copy_message can't blur)
+            if kind == "cover" and getattr(msg, "photo", None):
+                try:
+                    from telethon.utils import pack_bot_file_id
+                    entry["file_id"] = pack_bot_file_id(msg.photo)
+                except Exception:
+                    pass
+            await db.ingest_raw(entry, category=category)
             scanned += 1
             if progress and scanned % 200 == 0:
                 await progress(scanned)
