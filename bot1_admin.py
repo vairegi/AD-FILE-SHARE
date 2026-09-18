@@ -151,26 +151,32 @@ async def cmd_protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── general admin ─────────────────────────────────────────────
 @admin_only
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast the command message to every user via copy_message, so tags,
-    embedded links, bold/italic and quote blocks are delivered EXACTLY as
-    composed. Accepts either a reply to a message or inline text."""
+    """Reply mode: FORWARD the replied-to message to every user — a real
+    forward keeps the 'Forwarded from @channel' tag, quote blocks and media
+    exactly as they are. Inline mode (/broadcast <text>): copy the command
+    message itself so its own formatting (links, bold, quotes) is kept."""
     msg = update.message
-    if not msg.reply_to_message and not msg.text.partition(" ")[2].strip():
+    target = msg.reply_to_message
+    if target is None and not msg.text.partition(" ")[2].strip():
         await update.message.reply_text(
-            "Usage: /broadcast <message> — or reply to any message with "
-            "/broadcast to copy it exactly (tags, links, quotes kept).")
+            "Usage: reply to any message with /broadcast to forward it to "
+            "all users (channel tag & quotes kept) — or /broadcast <text>.")
         return
     ids = await db.all_user_ids()
     sent = failed = 0
     await update.message.reply_text(f"📣 Broadcasting to {len(ids)} users…")
     for uid in ids:
         try:
-            # copy_message re-sends the admin's own message with all its
-            # entities (channel tags, text links, quotes) intact — no
-            # re-parsing, no plain-text flattening.
-            await context.bot.copy_message(
-                chat_id=uid, from_chat_id=msg.chat_id,
-                message_id=msg.message_id)
+            if target is not None:
+                # True forward: the original channel tag and any quote
+                # travel with the message, untouched.
+                await context.bot.forward_message(
+                    chat_id=uid, from_chat_id=msg.chat_id,
+                    message_id=target.message_id)
+            else:
+                await context.bot.copy_message(
+                    chat_id=uid, from_chat_id=msg.chat_id,
+                    message_id=msg.message_id)
             sent += 1
         except Exception:
             failed += 1

@@ -443,6 +443,18 @@ async def main():
           bbot.copied and all(c[1] == 999 and c[2] == 1234
                               for c in bbot.copied))
 
+    # reply mode: REAL forward -> the original channel tag & quote survive
+    upd2 = FakeUpdate()
+    upd2.message.reply_to_message = types.SimpleNamespace(message_id=777)
+    bbot2 = FakeBot()
+    ctx2 = FakeContext(args=[])
+    ctx2.bot = bbot2
+    await adm.cmd_broadcast(upd2, ctx2)
+    check("/broadcast reply mode FORWARDS the replied message to all users",
+          len(bbot2.forwarded) == len(await db.all_user_ids())
+          and all(f[1] == 999 and f[2] == 777 for f in bbot2.forwarded)
+          and not bbot2.copied)
+
     # non-admin blocked
     upd = FakeUpdate(uid=12345)
     await adm.cmd_stats(upd, FakeContext())
@@ -557,6 +569,8 @@ async def main():
     _bt = _btn.inline_keyboard[0][0].text if _btn else ""
     check("download button shows the post number",
           _bt.startswith("#") and "𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱" in _bt)
+    check("cover post is sent as a spoiler image",
+          fb.copy_kwargs[0].get("has_spoiler") is True)
 
     await db.update_settings({"protect_content": False})
     await db.upsert_item({"file_id": "f110", "db_message_id": 110,

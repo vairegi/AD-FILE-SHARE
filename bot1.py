@@ -515,7 +515,8 @@ async def do_post(bot, _depth=0):
         # also block the forward to the main channel).
         msg = await bot.copy_message(
             chat_id=post_channel, from_chat_id=db_channel,
-            message_id=item["cover_message_id"], reply_markup=markup)
+            message_id=item["cover_message_id"], reply_markup=markup,
+            has_spoiler=True)
     except Exception as exc:
         # Source message was deleted from the DB channel (e.g. a duplicate
         # the owner removed): skip the dead item - the queue heals itself.
