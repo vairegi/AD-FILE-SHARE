@@ -47,54 +47,54 @@ WELCOME = (
     "Tap the Download button under any post to get started."
 )
 
-# /help text is sent with parse_mode=MarkdownV2 — every special character
-# outside a formatting span is escaped (telegram.helpers.escape_markdown
-# handles this; we escape once here so the send can never 400).
-from telegram.helpers import escape_markdown
+# /help is sent with parse_mode=HTML (no MarkdownV2 escaping pitfalls — HTML
+# only needs & < > escaped, which the section builder below already does).
 
-
-def _md2(t: str) -> str:
-    return escape_markdown(t, version=2)
+def _hh(t: str) -> str:
+    """HTML-escape a plain-text line (we never put & < > in command names)."""
+    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 HELP_USER = (
-    "📖 *Commands*\n\n"
-    + _md2("/start — Start the bot\n"
-           "/help — Show this list\n")
-    + "\n*How to get a file*\n"
-    + _md2("1. Tap ⬇️ Download under any channel post\n"
-           "2. Join the channel if asked, then tap ✅\n"
-           "3. Complete the quick verification\n"
-           "4. Tap 📥 Get File — the delivery bot sends it")
+    "📖 <b>Commands</b>\n\n"
+    "/start — Start the bot\n"
+    "/help — Show this list\n\n"
+    "<b>How to get a file</b>\n"
+    "1. Tap ⬇️ Download under any channel post\n"
+    "2. Join the channel if asked, then tap ✅\n"
+    "3. Complete the quick verification\n"
+    "4. Tap 📥 Get File — the delivery bot sends it"
 )
 
 HELP_ADMIN = (
-    "\n\n🛠 *Admin commands*\n\n"
-    + "*Shortener gate*\n"
-    + _md2("/shortener on | off | status — toggle the gate\n"
-           "/shortenerapi <url> — shortener API base\n"
-           "/setverifytime <hours> — verification validity\n"
-           "/settokenttl <minutes> — handoff token TTL\n"
-           "/shortenermsg <text> — gate heading\n"
-           "/shortenerbotmsg <text> — gate DM text\n"
-           "/verifymsg <text> — message after verification\n"
-           "/shortenerbtn <label> | <url> — add extra button\n"
-           "/clearshortenerbtns — remove extra buttons\n")
-    + "\n*General*\n"
-    + _md2("/broadcast <message> — copy to all users (tags/links/quotes kept)\n"
-           "/stats — full overview + all connected channels\n"
-           "/ban <user_id> · /unban <user_id>\n"
-           "/addadmin <user_id> — promote an admin\n"
-           "/setforcesub <channel_id | off> — global default\n")
-    + "\n*Pipelines (categories)*\n"
-    + _md2("/addcategory <key> <label> — guided setup wizard\n"
-           "/categories — full dashboard of every pipeline\n"
-           "/editcategory <key> — edit a pipeline's settings\n"
-           "/delcategory <key> — remove a pipeline\n"
-           "/use <key> — set the active pipeline for the commands below\n"
-           "/dripnow · /rescandb · /scandb · /queueinfo · /queue_reset\n"
-           "/pauseposting · /resumeposting · /schedule on|off\n"
-           "/setposttime HH:MM (IST) · /protect on|off · /setautodelete\n")
+    "\n\n🛠 <b>Admin commands</b>\n"
+    "\n<b>▸ Pipelines (categories)</b>\n"
+    "/addcategory &lt;key&gt; &lt;label&gt; — guided setup wizard\n"
+    "/categories — dashboard of every pipeline\n"
+    "/editcategory &lt;key&gt; — edit a pipeline\n"
+    "/delcategory &lt;key&gt; — remove a pipeline\n"
+    "/use &lt;key&gt; — set the active pipeline\n"
+    "\n<b>▸ Posting &amp; queue</b> (scoped to the active pipeline, or append a key)\n"
+    "/dripnow · /rescandb · /scandb &lt;id&gt;\n"
+    "/queueinfo · /queue_reset &lt;N&gt;\n"
+    "/pauseposting · /resumeposting\n"
+    "/schedule on|off · /setschedule HH:MM\n"
+    "/setposttime HH:MM (IST)\n"
+    "/setdbchannel · /setpostchannel · /setpostmainchannel · /setposttag\n"
+    "\n<b>▸ Access &amp; content</b>\n"
+    "/protect on|off — per-category content protection\n"
+    "/setautodelete &lt;time&gt; — per-category auto-delete\n"
+    "/setforcesub &lt;channel_id | off&gt; [category] — force-join\n"
+    "\n<b>▸ Shortener gate</b> (global)\n"
+    "/shortener on|off|status · /shortenerapi &lt;url&gt;\n"
+    "/setverifytime &lt;hours&gt; · /settokenttl &lt;minutes&gt;\n"
+    "/shortenermsg · /shortenerbotmsg · /verifymsg\n"
+    "/shortenerbtn &lt;label&gt; | &lt;url&gt; · /clearshortenerbtns\n"
+    "\n<b>▸ General</b>\n"
+    "/broadcast &lt;message&gt; — copy to all users\n"
+    "/stats — overview + per-pipeline breakdown\n"
+    "/ban &lt;user_id&gt; · /unban &lt;user_id&gt;\n"
+    "/addadmin &lt;user_id&gt; — promote an admin"
 )
 
 
@@ -478,7 +478,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = HELP_USER
     if user and await is_admin(user.id):
         text += HELP_ADMIN
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
