@@ -152,6 +152,18 @@ async def main():
     await db.ping()
     check("mongo: connect + ping", True)
 
+    # multi-category: seed the primary test pipeline (categories replace the
+    # old single global pipeline settings in v2)
+    await db._db.categories.delete_many({})
+    cat = await db.create_category("jav", "Jav", db_channel_id=-100111,
+                                   post_channel_id=-100222)
+    check("category: created", cat is not None)
+    check("category: duplicate key rejected",
+          await db.create_category("jav") is None)
+    await db.set_active_category(999, "jav")
+    check("category: active category persists",
+          await db.get_active_category(999) == "jav")
+
     s = await db.get_settings()
     check("settings defaults", s["shortener_enabled"] is False
           and s["verify_hours"] == 6 and s["token_ttl_minutes"] == 10)
@@ -424,11 +436,18 @@ async def main():
     r = await run(adm.cmd_setforcesub, ["-100555"]);     check("/setforcesub", "Force-subscribe channel set" in r)
     r = await run(adm.cmd_setforcesub, ["off"]);         check("/setforcesub off", "disabled" in r)
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)
-    check("  -> stored as minutes", (await db.get_settings())["auto_delete_minutes"] == 10080)
+    check("  -> stored as minutes (per category)",
+          (await db.get_category("jav"))["auto_delete_minutes"] == 10080)
     r = await run(adm.cmd_setpostchannel, ["-100777"]);  check("/setpostchannel", "-100777" in r)
+    check("  -> category post channel",
+          (await db.get_category("jav"))["post_channel_id"] == -100777)
     r = await run(adm.cmd_setdbchannel, ["-100888"]);    check("/setdbchannel", "-100888" in r)
+    check("  -> category db channel",
+          (await db.get_category("jav"))["db_channel_id"] == -100888)
     r = await run(adm.cmd_setposttime, ["20:30"]);       check("/setposttime", "20:30" in r)
-    r = await run(adm.cmd_stats);                        check("/stats", "Statistics" in r and "Users" in r)
+    check("  -> category post time (IST)",
+          (await db.get_category("jav"))["post_time"] == "20:30")
+    r = await run(adm.cmd_stats);                        check("/stats", "Statistics" in r and "Pipelines" in r)
     r = await run(adm.cmd_dripnow);                      check("/dripnow", "Posted item" in r or "Nothing posted" in r)
     r = await run(adm.cmd_scandb, ["-100888"]);          check("/scandb (no creds -> clean error)",
                                                                 "Scan failed" in r)
@@ -460,30 +479,30 @@ async def main():
     await adm.cmd_stats(upd, FakeContext())
     check("admin guard blocks non-admin", "only by admins" in upd.message.replies[-1])
 
-    # /protect command
+    # /protect command (per-category)
     r = await run(adm.cmd_protect, ["on"])
     check("/protect on", "enabled" in r
-          and (await db.get_settings())["protect_content"] is True)
+          and (await db.get_category("jav"))["protect_content"] is True)
     r = await run(adm.cmd_protect, ["off"])
     check("/protect off", "disabled" in r
-          and (await db.get_settings())["protect_content"] is False)
+          and (await db.get_category("jav"))["protect_content"] is False)
     r = await run(adm.cmd_protect, [])
     check("/protect status", "OFF" in r)
     upd = FakeUpdate(uid=12345)
     await adm.cmd_protect(upd, FakeContext(args=["on"]))
     check("/protect blocked for non-admin", "only by admins" in upd.message.replies[-1]
-          and (await db.get_settings())["protect_content"] is False)
+          and (await db.get_category("jav"))["protect_content"] is False)
 
-    # /stats shows every connected channel with an embedded link
-    await db.update_settings({"db_channel_id": -100111, "post_channel_id": -100222,
-                              "post_main_channel_id": -100333,
-                              "force_sub_channel_id": -100444})
+    # /stats shows global config + per-pipeline breakdown
+    await db.update_settings({"force_sub_channel_id": -100444})
+    await db.update_category("jav", {"db_channel_id": -100111,
+                                     "post_channel_id": -100222,
+                                     "post_main_channel_id": -100333})
     r = await run(adm.cmd_stats)
-    check("/stats lists all channels",
-          "Database:" in r and "Post Channel:" in r
-          and "Main Posting Channel:" in r and "Force-Sub Channel:" in r)
+    check("/stats lists global + pipeline sections",
+          "Statistics" in r and "Pipelines" in r and "Jav" in r
+          and "Force-Sub" in r)
     check("/stats embeds channel invite links", "https://t.me/forcechannel" in r)
-    check("/stats shows protect state", "Content protection" in r)
 
     # ── 9. /start handlers ────────────────────────────────────
     fb = FakeBot()
@@ -551,17 +570,17 @@ async def main():
     # ── 11b. posting flow: protect flag + main-channel tag ─────
     # deterministic queue state: mark everything posted, then add fresh items
     await db._db.files.update_many({"posted": False}, {"$set": {"posted": True}})
-    await db.update_settings({"post_channel_id": -100222, "db_channel_id": -100111,
-                              "post_main_channel_id": None, "post_tag": None,
-                              "protect_content": True, "queue_cursor": None})
-    await db.clear_queue_cursor()
-    await db.upsert_item({"file_id": "f100", "db_message_id": 100,
+    await db.update_category("jav", {"post_channel_id": -100222, "db_channel_id": -100111,
+                                     "post_main_channel_id": None, "post_tag": None,
+                                     "protect_content": True, "queue_cursor": None})
+    await db.clear_queue_cursor("jav")
+    await db.upsert_item({"file_id": "jav_f100", "category": "jav", "db_message_id": 100,
                           "cover_message_id": 100, "caption": "cap100",
                           "videos": [{"db_message_id": 101, "caption": ""}],
                           "srts": []})
     fb = FakeBot()
-    item = await bot1.do_post(fb)
-    check("do_post posts oldest unposted item", item and item["file_id"] == "f100")
+    item = await bot1.do_post(fb, category="jav")
+    check("do_post posts oldest unposted item", item and item["file_id"] == "jav_f100")
     check("channel posts stay unprotected even when /protect is on",
           fb.copied and fb.copied[0] == (-100222, -100111, 100)
           and fb.copy_kwargs[0].get("protect_content") in (None, False))
@@ -572,26 +591,26 @@ async def main():
     check("cover post is sent as a spoiler image",
           fb.copy_kwargs[0].get("has_spoiler") is True)
 
-    await db.update_settings({"protect_content": False})
-    await db.upsert_item({"file_id": "f110", "db_message_id": 110,
+    await db.update_category("jav", {"protect_content": False})
+    await db.upsert_item({"file_id": "jav_f110", "category": "jav", "db_message_id": 110,
                           "cover_message_id": 110, "caption": "cap110",
                           "videos": [{"db_message_id": 111, "caption": ""}],
                           "srts": []})
     fb = FakeBot()
-    item = await bot1.do_post(fb)
+    item = await bot1.do_post(fb, category="jav")
     check("channel posts unprotected when /protect off",
-          item and item["file_id"] == "f110"
+          item and item["file_id"] == "jav_f110"
           and fb.copy_kwargs[0].get("protect_content") in (None, False))
 
     # main-channel forward: tag sent first, then the just-published post
-    await db.upsert_item({"file_id": "f120", "db_message_id": 120,
+    await db.upsert_item({"file_id": "jav_f120", "category": "jav", "db_message_id": 120,
                           "cover_message_id": 120, "caption": "cap120",
                           "videos": [{"db_message_id": 121, "caption": ""}],
                           "srts": []})
-    await db.update_settings({"post_main_channel_id": -100333,
-                              "post_tag": "#NewDrop"})
+    await db.update_category("jav", {"post_main_channel_id": -100333,
+                                     "post_tag": "#NewDrop"})
     fb = FakeBot()
-    item = await bot1.do_post(fb)
+    item = await bot1.do_post(fb, category="jav")
     check("do_post forwards the POST-channel post to main (real forward)",
           (-100333, -100222, 8001) in fb.forwarded)
     check("do_post sends tag as a QUOTE-REPLY to the forwarded post",
@@ -606,17 +625,17 @@ async def main():
                 raise RuntimeError("no send rights in main channel")
             return await super().send_message(chat_id, text, **kw)
 
-    await db.upsert_item({"file_id": "f130", "db_message_id": 130,
+    await db.upsert_item({"file_id": "jav_f130", "category": "jav", "db_message_id": 130,
                           "cover_message_id": 130, "caption": "cap130",
                           "videos": [{"db_message_id": 131, "caption": ""}],
                           "srts": []})
     tf = TagFailBot()
-    item = await bot1.do_post(tf)
+    item = await bot1.do_post(tf, category="jav")
     check("do_post tag failure -> forward still happens, no crash",
           bool(item) and (-100333, -100222, 8001) in tf.forwarded)
 
     # /queueinfo shows queued items with embedded channel links (HTML)
-    await db.upsert_item({"file_id": "f140", "db_message_id": 140,
+    await db.upsert_item({"file_id": "jav_f140", "category": "jav", "db_message_id": 140,
                           "cover_message_id": 140, "caption": "My Cool Video",
                           "videos": [{"db_message_id": 141, "caption": ""}],
                           "srts": []})
@@ -630,37 +649,37 @@ async def main():
     check("/queueinfo shows global post numbers", "#" in qreply)
 
     # /queue_reset rewinds: re-queue everything from the requested post
-    await db.queue_reset_to_position(2)
-    cur2 = (await db.queue_summary(1))["cursor"]
-    nxt = await db.next_unposted()
+    await db.queue_reset_to_position(2, "jav")
+    cur2 = (await db.queue_summary("jav", 1))["cursor"]
+    nxt = await db.next_unposted("jav")
     check("/queue_reset rewinds so the requested post is next",
           nxt is not None and cur2 is not None
           and nxt["db_message_id"] == cur2)
 
     # self-heal: item whose DB message was deleted is skipped, queue moves on
-    await db.upsert_item({"file_id": "f150", "db_message_id": 150,
+    await db.upsert_item({"file_id": "jav_f150", "category": "jav", "db_message_id": 150,
                           "cover_message_id": 150, "caption": "dead item",
                           "videos": [{"db_message_id": 151, "caption": ""}],
                           "srts": []})
-    await db.upsert_item({"file_id": "f160", "db_message_id": 160,
+    await db.upsert_item({"file_id": "jav_f160", "category": "jav", "db_message_id": 160,
                           "cover_message_id": 160, "caption": "alive item",
                           "videos": [{"db_message_id": 161, "caption": ""}],
                           "srts": []})
     await db._db.files.update_many({}, {"$set": {"posted": True}})
     await db._db.files.update_many({"db_message_id": {"$in": [150, 160]}},
                                    {"$set": {"posted": False}})
-    await db.clear_queue_cursor()
+    await db.clear_queue_cursor("jav")
     class DeadMsgBot(FakeBot):
         async def copy_message(self, chat_id, from_chat_id, message_id, **kw):
             if message_id == 150:
                 raise RuntimeError("message to copy not found")
             return await super().copy_message(chat_id, from_chat_id,
                                               message_id, **kw)
-    await db.update_settings({"post_main_channel_id": None, "post_tag": None})
+    await db.update_category("jav", {"post_main_channel_id": None, "post_tag": None})
     dbot = DeadMsgBot()
-    healed = await bot1.do_post(dbot)
+    healed = await bot1.do_post(dbot, category="jav")
     check("queue heals itself past a deleted DB post",
-          healed is not None and healed["file_id"] == "f160")
+          healed is not None and healed["file_id"] == "jav_f160")
 
     # ── 11c. anti-bypass strikes + auto-ban ───────────────────
     await db.upsert_item({"file_id": "f170", "db_message_id": 170,
@@ -705,18 +724,74 @@ async def main():
     await bot1.process_verify(fb, 8888, 8888, "f170", t4)
     check("legit slow verify passes", "deliver_f170_" in str(fb.sent[-1]))
 
-    # ── 11d. /rescandb drops deleted posts (queue renumbers) ──
-    await db.ingest_raw({"message_id": 900, "kind": "cover", "caption": "a"})
-    await db.ingest_raw({"message_id": 901, "kind": "video", "caption": ""})
-    await db.ingest_raw({"message_id": 910, "kind": "cover", "caption": "b"})
-    await db.ingest_raw({"message_id": 911, "kind": "video", "caption": ""})
-    await db.rebuild_items()
-    await db._db.raw.delete_one({"message_id": 900})
-    await db._db.raw.delete_one({"message_id": 901})
-    await db.rebuild_items()
+    # ── 11d. /rescandb drops deleted posts (queue renumbers, per category) ──
+    await db.ingest_raw({"message_id": 900, "kind": "cover", "caption": "a"}, "jav")
+    await db.ingest_raw({"message_id": 901, "kind": "video", "caption": ""}, "jav")
+    await db.ingest_raw({"message_id": 910, "kind": "cover", "caption": "b"}, "jav")
+    await db.ingest_raw({"message_id": 911, "kind": "video", "caption": ""}, "jav")
+    await db.rebuild_items("jav")
+    check("scan creates category-prefixed file ids",
+          await db.get_item_by_file_id("jav_f900") is not None)
+    await db._db.raw.delete_one({"category": "jav", "message_id": 900})
+    await db._db.raw.delete_one({"category": "jav", "message_id": 901})
+    await db.rebuild_items("jav")
     check("rescan drops deleted DB posts from the queue",
-          await db.get_item_by_file_id("f900") is None
-          and await db.get_item_by_file_id("f910") is not None)
+          await db.get_item_by_file_id("jav_f900") is None
+          and await db.get_item_by_file_id("jav_f910") is not None)
+
+    # ── 11e. multi-category isolation (two pipelines, same message ids) ──
+    # NOTE: the rescan above legitimately purged old jav items (self-healing
+    # rebuild), so re-seed the jav items used by this isolation block.
+    await db.create_category("anime", "Anime", db_channel_id=-100777,
+                             post_channel_id=-100888)
+    for cat_key, cap in (("jav", "cap"), ("anime", "anime")):
+        for mid in (100, 110):
+            await db.upsert_item({"file_id": f"{cat_key}_f{mid}",
+                                  "category": cat_key,
+                                  "db_message_id": mid,
+                                  "cover_message_id": mid,
+                                  "caption": f"{cap}{mid}",
+                                  "videos": [{"db_message_id": mid + 1, "caption": ""}],
+                                  "srts": []})
+    check("isolation: same db_message_id coexists in 2 categories",
+          (await db.get_item_by_file_id("jav_f100"))["category"] == "jav"
+          and (await db.get_item_by_file_id("anime_f100"))["category"] == "anime")
+    item = await bot1.do_post(FakeBot(), category="anime")
+    check("isolation: anime posts from ITS OWN db channel",
+          item and item["file_id"] == "anime_f100"
+          and (await db.get_item_by_file_id("jav_f100"))["posted"] is False)
+    await db.mark_posted(110, category="anime")
+    check("isolation: marking anime posted leaves jav untouched",
+          (await db.count_posted("anime")) >= 1
+          and (await db.get_item_by_file_id("jav_f110"))["posted"] is False)
+
+    # per-category verification: verified for jav does NOT unlock anime
+    await db.update_settings({"shortener_enabled": True})
+    await db.mark_verified(3000, "jav", 6)
+    check("verify scoped: jav pass does not unlock anime",
+          await db.is_verified(3000, "jav")
+          and not await db.is_verified(3000, "anime"))
+    # per-category force-sub override
+    await db.update_category("anime", {"force_sub_channel_id": -100999})
+    await db.update_settings({"force_sub_channel_id": -100111})
+    fs_anime = await bot1._force_sub_channel_for("anime")
+    fs_jav = await bot1._force_sub_channel_for("jav")
+    check("force-sub: category override wins, others use global",
+          fs_anime == -100999 and fs_jav == -100111)
+    await db.update_category("anime", {"force_sub_channel_id": None})
+    check("force-sub: cleared override falls back to global",
+          await bot1._force_sub_channel_for("anime") == -100111)
+
+    # wizard parsers (addcategory step logic)
+    ok1 = adm._p_db_channel("-100123")
+    ok2 = adm._p_main_channel("skip")
+    ok3 = adm._p_time("21:30")
+    bad = adm._p_time("banana")
+    check("wizard parsers accept valid input and skips",
+          ok1 == ("db_channel_id", -100123)
+          and ok2 == ("post_main_channel_id", None)
+          and ok3 == ("post_time", "21:30"))
+    check("wizard parsers reject junk", bad[0] is None)
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

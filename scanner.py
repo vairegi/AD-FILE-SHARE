@@ -43,8 +43,9 @@ def classify_from_botapi(msg):
     return None
 
 
-async def scan_channel(channel_id, progress=None):
-    """Scan a channel's full history into the raw staging collection."""
+async def scan_channel(channel_id, category=None, progress=None):
+    """Scan a channel's full history into the raw staging collection,
+    tagged to a single category so pipelines never mix."""
     if not (config.API_ID and config.API_HASH and config.SESSION_USER):
         raise RuntimeError(
             "Telethon credentials are missing. Set API_ID, API_HASH and SESSION_USER."
@@ -70,11 +71,11 @@ async def scan_channel(channel_id, progress=None):
                 "message_id": msg.id,
                 "kind": kind,
                 "caption": msg.message or "",
-            })
+            }, category=category)
             scanned += 1
             if progress and scanned % 200 == 0:
                 await progress(scanned)
-        items = await db.rebuild_items()
+        items = await db.rebuild_items(category)
         return {"scanned": scanned, "items": items}
     finally:
         await client.disconnect()

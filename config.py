@@ -63,3 +63,9 @@ SHORTENER_API_KEY = os.getenv("SHORTENER_API_KEY", "").strip()
 API_ID = _opt_int(os.getenv("API_ID", ""))
 API_HASH = os.getenv("API_HASH", "").strip()
 SESSION_USER = os.getenv("SESSION_USER", "").strip()
+
+# ── Multi-category upgrade ────────────────────────────────────
+# Category key assigned to your EXISTING pipeline on first startup after the
+# upgrade (all current data is migrated into it). Change later with
+# /editcategory — or create 'jav', 'hanime', etc. via /addcategory.
+MIGRATION_CATEGORY_KEY = os.getenv("MIGRATION_CATEGORY_KEY", "manga").strip()

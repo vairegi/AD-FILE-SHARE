@@ -149,19 +149,22 @@ curl "https://api.telegram.org/bot<BOT2_TOKEN>/setWebhook" \
 3. If using force-subscribe, add **Bot 1 as an admin** of that channel and turn on
    **join request approval** so pending requests can be captured.
 4. Fill `.env` (local) or the Render environment, deploy.
-5. In Bot 1 as an admin:
+5. In Bot 1 as an admin, create your first pipeline (categories replace the
+   old single-pipeline commands):
    ```
-   /setdbchannel <db_channel_id>
-   /setpostchannel <post_channel_id>
+   /addcategory jav Jav           (guided wizard: DB channel -> posting
+                                   channel -> main channel -> tag -> time)
    /setforcesub <channel_id>      (or /setforcesub off)
-   /setposttime 20:30             (UTC)
-   /setautodelete 7day
-   /setverifytime 6
    /shortenerapi https://vplink.in/api
    /shortener on
-   /scandb <db_channel_id>        (index the existing ~200-300 videos)
+   /setverifytime 6
+   /setautodelete 7day jav
    ```
-6. Check `/stats`, then `/dripnow` to post the first cover.
+   The wizard offers a **Scan now** button to index the DB channel
+   (the existing ~200-300 videos) right after setup.
+6. Check `/categories` and `/stats`, then `/dripnow jav` to post the first cover.
+7. Adding another category later (Anime, Movies, …) is one command,
+   zero redeploy: `/addcategory anime Anime` — then answer the wizard.
 
 ### Generating `SESSION_USER` (Telethon)
 
@@ -187,36 +190,56 @@ Paste the printed string into the `SESSION_USER` variable.
 
 ### Bot 1 — admin
 
-**Shortener gate**
+**Pipelines (categories) — the core of v2**
+
+| Command | Effect |
+|---|---|
+| `/addcategory <key> <label>` | guided wizard: DB channel -> Posting channel -> Main channel -> tag -> daily time (IST) |
+| `/categories` | full dashboard of every pipeline (channels, queue, posted counts, settings) with Post-now / Pause / Edit / Delete buttons |
+| `/editcategory <key>` | re-run the wizard to change a pipeline's settings |
+| `/delcategory <key>` | remove a pipeline (purge data optional) |
+| `/use <key>` | set the ACTIVE pipeline for the scoped commands below |
+
+**Scoped commands** — act on the active pipeline (`/use`), or append a key
+(e.g. `/dripnow anime`). With only ONE pipeline configured they target it
+automatically.
+
+| Command | Effect |
+|---|---|
+| `/broadcast <message>` | message every known user |
+| `/stats` | users, verified, banned + per-pipeline breakdown |
+| `/ban <id>` · `/unban <id>` | toggle a ban |
+| `/addadmin <id>` | promote an admin without redeploying |
+| `/setforcesub <id \| off> [category]` | global default; per-category override with a trailing key |
+| `/setautodelete <time> [category]` | per-category auto-delete timer |
+| `/setpostchannel <id> [category]` | destination posting channel |
+| `/setdbchannel <id> [category]` | source Database Channel |
+| `/setpostmainchannel <id \| off> [category]` | main-channel forwarding |
+| `/setposttag <text \| off> [category]` | tag line above each main forward |
+| `/setposttime <HH:MM> [category]` | daily post time (**IST**) |
+| `/setschedule <HH:MM> [category]` | set time (IST) + enable |
+| `/schedule on\|off [category]` | enable/disable daily posting |
+| `/pauseposting` · `/resumeposting` | pause/resume one pipeline |
+| `/dripnow [category]` | post the next queued item immediately |
+| `/queueinfo [category]` | next 10 queued posts with links |
+| `/queue_reset N [category]` | rewind the queue to post number N |
+| `/protect on\|off [category]` | per-category content protection |
+| `/rescandb [category]` | re-index the pipeline's DB channel (keeps `posted` flags) |
+| `/scandb <channel_id> [category]` | point a pipeline at a DB channel + index it |
+
+**Shortener gate (global)**
 
 | Command | Effect |
 |---|---|
 | `/shortener on\|off\|status` | toggle or inspect the gate |
 | `/shortenerapi <url>` | set the shortener API base |
-| `/setverifytime <hours>` | verification validity (default 6) |
+| `/setverifytime <hours>` | verification validity (default 6) — per category |
 | `/settokenttl <minutes>` | Bot 1 → Bot 2 handoff token TTL |
 | `/shortenermsg <text>` | landing/overlay heading |
 | `/shortenerbotmsg <text>` | DM text prompting the shortener |
 | `/verifymsg <text>` | text shown after verification |
 | `/shortenerbtn <label> \| <url>` | add a secondary button |
 | `/clearshortenerbtns` | remove all secondary buttons |
-
-**General**
-
-| Command | Effect |
-|---|---|
-| `/broadcast <message>` | message every known user |
-| `/stats` | users, verified, banned, items, queued |
-| `/ban <id>` · `/unban <id>` | toggle a ban |
-| `/addadmin <id>` | promote an admin without redeploying |
-| `/setforcesub <channel_id \| off>` | required-join channel |
-| `/setautodelete <time>` | global auto-delete default |
-| `/setpostchannel <id>` | destination posting channel |
-| `/setdbchannel <id>` | source Database Channel |
-| `/setposttime <HH:MM>` | daily post time (UTC) |
-| `/dripnow` | post the next queued item immediately |
-| `/rescandb` | re-index the DB channel (keeps `posted` flags) |
-| `/scandb <channel_id>` | index a channel and set it as the DB channel |
 
 ### Bot 2 — user
 

@@ -53,23 +53,50 @@ def schedule_sweeper(application: Application):
     jq.run_repeating(sweep_deletions, interval=60, first=15, name="sweep")
 
 
-async def _autodelete_minutes(user_id):
-    """Auto-delete is an admin-controlled GLOBAL setting — per-user overrides
-    are intentionally ignored so regular users cannot keep files longer."""
-    settings = await db.get_settings()
-    return int(settings.get("auto_delete_minutes") or 0)
+async def _autodelete_minutes(user_id, category=None):
+    """Auto-delete is an admin-controlled PER-CATEGORY setting — per-user
+    overrides are intentionally ignored so regular users cannot keep files
+    longer. Falls back to the global default when no category is resolved."""
+    minutes = None
+    if category:
+        cat = await db.get_category(category)
+        if cat:
+            minutes = cat.get("auto_delete_minutes")
+    if minutes is None:
+        settings = await db.get_settings()
+        minutes = settings.get("auto_delete_minutes")
+    return int(minutes or 0)
+
+
+async def _protect_flag(category):
+    """Per-category /protect (block forwarding/saving); global fallback."""
+    if category:
+        cat = await db.get_category(category)
+        if cat:
+            return bool(cat.get("protect_content"))
+    return bool((await db.get_settings()).get("protect_content"))
+
+
+async def _db_channel_for(item):
+    """Resolve the Database Channel that physically holds this item's files."""
+    cat_key = item.get("category")
+    if cat_key:
+        cat = await db.get_category(cat_key)
+        if cat and cat.get("db_channel_id"):
+            return cat["db_channel_id"]
+    # Legacy items (or a deleted category) fall back to the global setting.
+    return (await db.get_settings()).get("db_channel_id")
 
 
 # ── delivery ──────────────────────────────────────────────────
 async def send_item(bot, chat_id, item, index):
-    settings = await db.get_settings()
-    db_channel = settings.get("db_channel_id")
+    db_channel = await _db_channel_for(item)
     if not db_channel:
         await bot.send_message(chat_id, "❌ Delivery channel is not configured.")
         return
 
     # /protect on -> users cannot forward or save the delivered file
-    protect = bool(settings.get("protect_content"))
+    protect = await _protect_flag(item.get("category"))
 
     video = item["videos"][index]
     try:
@@ -100,7 +127,7 @@ async def send_item(bot, chat_id, item, index):
         except Exception as exc:
             log.warning("srt copy failed: %s", exc)
 
-    minutes = await _autodelete_minutes(chat_id)
+    minutes = await _autodelete_minutes(chat_id, item.get("category"))
     if minutes and minutes > 0:
         await db.add_deletion(chat_id, [m for m in delivered if m], db.now() + minutes * 60)
         note = f"⏳ This file will be auto-deleted in {human_duration(minutes * 60)}."

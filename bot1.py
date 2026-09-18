@@ -1,13 +1,15 @@
-"""Bot 1 — the Link / Gate bot.
+"""Bot 1 — the Link / Gate bot (multi-category).
 
 Responsibilities
 ----------------
-* Daily scheduled drip-posting of covers to the Posting Channel (oldest first).
-* /dripnow manual posting.
-* Force-subscribe gate (active-member check + pending join-request check).
-* Shortener verification gate (one verification == one file, bound to the user).
+* One independent drip-posting pipeline PER CATEGORY (each with its own DB
+  channel -> Posting channel -> optional Main channel, time, pause state).
+* /dripnow manual posting (per category).
+* Force-subscribe gate (global default, optional per-category override).
+* Shortener verification gate (per category: one verification unlocks that
+  category only, for verify_hours).
 * Issues short-lived single-use tokens deep-linking into Bot 2.
-* Live indexing of the Database Channel + the full admin panel.
+* Live indexing of EVERY registered Database Channel + the full admin panel.
 """
 import datetime
 import logging
@@ -35,6 +37,9 @@ log = logging.getLogger("bot1")
 # A genuine shortener visit (redirect chain + on-page timer + captcha)
 # cannot complete faster than this. Faster == bypass script.
 BYPASS_MIN_SECONDS = 150
+
+# Category post times are always interpreted in IST (Asia/Kolkata).
+IST = "Asia/Kolkata"
 
 WELCOME = (
     "👋 Welcome!\n\n"
@@ -80,15 +85,16 @@ HELP_ADMIN = (
            "/stats — full overview + all connected channels\n"
            "/ban <user_id> · /unban <user_id>\n"
            "/addadmin <user_id> — promote an admin\n"
-           "/setforcesub <channel_id | off>\n"
-           "/setautodelete <time> — e.g. 30min, 2hour, 7day, never\n"
-           "/setpostchannel <channel_id>\n"
-           "/setdbchannel <channel_id>\n"
-           "/setposttime <HH:MM> — daily post time (UTC)\n"
-           "/protect on | off — block forwarding/saving of files\n"
-           "/dripnow — post the next queued item now\n"
-           "/rescandb — re-index the database channel\n"
-           "/scandb <channel_id> — index a channel + set as DB")
+           "/setforcesub <channel_id | off> — global default\n")
+    + "\n*Pipelines (categories)*\n"
+    + _md2("/addcategory <key> <label> — guided setup wizard\n"
+           "/categories — full dashboard of every pipeline\n"
+           "/editcategory <key> — edit a pipeline's settings\n"
+           "/delcategory <key> — remove a pipeline\n"
+           "/use <key> — set the active pipeline for the commands below\n"
+           "/dripnow · /rescandb · /scandb · /queueinfo · /queue_reset\n"
+           "/pauseposting · /resumeposting · /schedule on|off\n"
+           "/setposttime HH:MM (IST) · /protect on|off · /setautodelete\n")
 )
 
 
@@ -102,7 +108,7 @@ def _hhmm(value: str):
 
 
 async def _channel_link(bot, channel_id):
-    """Best-effort public link for the force-subscribe channel."""
+    """Best-effort public link for a channel."""
     try:
         chat = await bot.get_chat(channel_id)
         if chat.username:
@@ -119,7 +125,6 @@ async def _is_member(bot, channel_id, user_id):
     """True/False for a definitive answer, None when the check itself failed."""
     try:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        # 'restricted' counts only when the member is still inside the chat
         if member.status == "restricted":
             return bool(getattr(member, "is_member", False))
         return member.status in ("member", "administrator", "creator")
@@ -128,10 +133,18 @@ async def _is_member(bot, channel_id, user_id):
         return None
 
 
-async def gate_ok(bot, user_id) -> bool:
+async def _force_sub_channel_for(category):
+    """Per-category override, else the global default, else None."""
+    if category:
+        cat = await db.get_category(category)
+        if cat and cat.get("force_sub_channel_id"):
+            return cat["force_sub_channel_id"]
+    return (await db.get_settings()).get("force_sub_channel_id")
+
+
+async def gate_ok(bot, user_id, category=None) -> bool:
     """Force-subscribe gate: active member OR a pending join request passes."""
-    settings = await db.get_settings()
-    channel = settings.get("force_sub_channel_id")
+    channel = await _force_sub_channel_for(category)
     if not channel:
         return True
     member = await _is_member(bot, channel, user_id)
@@ -147,9 +160,8 @@ async def gate_ok(bot, user_id) -> bool:
     return False
 
 
-async def send_force_sub(bot, chat_id, file_id):
-    settings = await db.get_settings()
-    channel = settings.get("force_sub_channel_id")
+async def send_force_sub(bot, chat_id, file_id, category=None):
+    channel = await _force_sub_channel_for(category)
     url = await _channel_link(bot, channel) if channel else None
     rows = []
     if url:
@@ -204,11 +216,17 @@ async def process_file(bot, chat_id, user_id, file_id):
     if not item:
         await bot.send_message(chat_id, "❌ This file is no longer available.")
         return
-    if not await gate_ok(bot, user_id):
-        await send_force_sub(bot, chat_id, file_id)
+    category = item.get("category") or await db.resolve_category(file_id)
+    if not await gate_ok(bot, user_id, category):
+        await send_force_sub(bot, chat_id, file_id, category)
         return
     settings = await db.get_settings()
     if not settings.get("shortener_enabled"):
+        await deliver_now(bot, chat_id, user_id, item)
+        return
+    # Per-category verification: a valid pass for THIS category skips the
+    # shortener; otherwise (or for a different category) the gate is shown.
+    if category and await db.is_verified(user_id, category):
         await deliver_now(bot, chat_id, user_id, item)
         return
     await send_shortener_gate(bot, chat_id, user_id, item, settings)
@@ -268,82 +286,165 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
     await db.mark_token_used(token)
     await db.reset_strikes(user_id)  # consecutive strikes only
     settings = await db.get_settings()
-    await db.mark_verified(user_id, int(settings.get("verify_hours") or 6))
-
     item = await db.get_item_by_file_id(file_id)
+    category = (item or {}).get("category") or await db.resolve_category(file_id)
+    hours = int(settings.get("verify_hours") or 6)
+    if category:
+        # per-category verification (also mirrors into the legacy flag)
+        await db.mark_verified(user_id, category, hours)
+    else:
+        await db.mark_verified(user_id, hours)  # legacy/global form
+
     if not item:
         await bot.send_message(chat_id, "❌ This file is no longer available.")
         return
-    if not await gate_ok(bot, user_id):
-        await send_force_sub(bot, chat_id, file_id)
+    if not await gate_ok(bot, user_id, category):
+        await send_force_sub(bot, chat_id, file_id, category)
         return
     await deliver_now(bot, chat_id, user_id, item)
 
 
 # ── posting logic (shared by the scheduler and /dripnow) ──────
-async def do_post(bot):
-    """Post the next unposted cover to the Posting Channel. Returns the item."""
-    settings = await db.get_settings()
-    post_channel = settings.get("post_channel_id")
-    db_channel = settings.get("db_channel_id")
+async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
+                            markup=None):
+    """FORWARD the just-published post to the Main Posting Channel, then send
+    the tag as a REPLY (quote) to it. When the forward itself fails (e.g.
+    /protect on) fall back to copy_message so the main channel still gets it."""
+    try:
+        fwd = await bot.forward_message(
+            chat_id=main_id, from_chat_id=post_channel,
+            message_id=post_msg_id)
+    except Exception as exc:
+        log.warning("forward to main failed (%s); copying instead", exc)
+        fwd = await bot.copy_message(
+            chat_id=main_id, from_chat_id=post_channel,
+            message_id=post_msg_id, reply_markup=markup)
+    if tag:
+        try:
+            await bot.send_message(
+                main_id, tag, reply_to_message_id=fwd.message_id,
+                allow_sending_without_reply=True)
+        except Exception as exc:
+            log.warning("tag quote failed, sending plain tag: %s", exc)
+            try:
+                await bot.send_message(main_id, tag)
+            except Exception as exc2:
+                log.error("tag message failed entirely: %s", exc2)
+    return fwd
+
+
+async def do_post(bot, category=None, _depth=0):
+    """Post the next queued cover for ONE category to its Posting Channel,
+    then (optionally) forward it to that category's Main channel with its tag.
+    Self-heals past deleted DB messages. Cursor-safe via Mongo."""
+    if _depth >= 10:
+        log.error("do_post: too many dead items in a row; aborting")
+        return None
+    cat = await db.get_category(category) if category else None
+    if category and not cat:
+        log.warning("do_post: unknown category %r", category)
+        return None
+    post_channel = (cat or {}).get("post_channel_id")
+    db_channel = (cat or {}).get("db_channel_id")
+    if not post_channel or not db_channel:
+        # legacy fallback for the very first migrated pipeline
+        s = await db.get_settings()
+        post_channel = post_channel or s.get("post_channel_id") or config.POST_CHANNEL_ID
+        db_channel = db_channel or s.get("db_channel_id") or config.DB_CHANNEL_ID
     if not post_channel or not db_channel:
         log.warning("post/db channel not configured; skipping post.")
         return None
 
-    item = await db.next_unposted()
+    item = await db.next_unposted(category)
     if not item:
-        log.info("No unposted items left in the queue.")
+        log.info("do_post: queue empty for %r", category)
         return None
 
     cover_id = item.get("cover_message_id")
     if not cover_id and item.get("videos"):
         cover_id = item["videos"][0]["db_message_id"]
     if not cover_id:
-        # Nothing to post for this item; mark it so we don't loop forever.
-        await db.mark_posted(item["db_message_id"])
+        await db.mark_posted(item["db_message_id"], category=category)
         return None
 
     link = f"https://t.me/{config.BOT1_USERNAME}?start=file_{item['file_id']}"
+    post_no = await db.count_posted(category) + 1
     markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬇️ Download", url=link)]]
-    )
-    if config.BOT1_USERNAME:
-        kwargs = {"reply_markup": markup}
-    else:
-        log.warning("BOT1_USERNAME not set; posting cover without Download button.")
-        kwargs = {}
+        [[InlineKeyboardButton(f"#{post_no} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱", url=link)]])
     try:
+        # Channel posts are NEVER protected - /protect only applies to the
+        # files Bot 2 delivers to users.
         msg = await bot.copy_message(
             chat_id=post_channel, from_chat_id=db_channel,
-            message_id=cover_id, **kwargs,
-        )
+            message_id=cover_id, reply_markup=markup,
+            has_spoiler=True)
     except Exception as exc:
-        log.error("Failed to post item %s: %s", item["file_id"], exc)
-        return None
-    await db.mark_posted(item["db_message_id"], getattr(msg, "message_id", None))
-    log.info("Posted item %s", item["file_id"])
+        # Source message was deleted from the DB channel: skip the dead item.
+        log.warning("do_post: db message %s gone (%s); skipping %s",
+                    item["db_message_id"], exc, item["file_id"])
+        await db.mark_posted(item["db_message_id"], category=category)
+        return await do_post(bot, category, _depth + 1)
+    await db.mark_posted(item["db_message_id"], post_message_id=msg.message_id,
+                         category=category)
+    log.info("posted %s (db id %s) -> %s [%s]", item["file_id"],
+             item["db_message_id"], post_channel, category)
+    main_id = (cat or {}).get("post_main_channel_id")
+    if main_id:
+        try:
+            await _forward_with_tag(bot, post_channel, msg.message_id,
+                                    main_id, (cat or {}).get("post_tag"), markup)
+            log.info("forwarded %s to main channel %s", item["file_id"], main_id)
+        except Exception as exc:
+            log.warning("main-channel forward failed: %s", exc)
+            try:
+                admin = (config.ADMIN_IDS or [None])[0]
+                if admin:
+                    await bot.send_message(
+                        admin,
+                        "⚠️ Forward to main channel failed for "
+                        f"{item['file_id']}: {exc}\n"
+                        "(Is the bot admin in the main channel?)")
+            except Exception:
+                pass
     return item
 
 
-async def schedule_daily(application):
-    """(Re)schedule the daily drip post from settings.post_time (UTC)."""
-    jq = application.job_queue
-    if jq is None:
+# ── per-category scheduling (times are IST) ───────────────────
+async def schedule_daily(job_queue):
+    """(Re)install ONE daily drip job per enabled category, each at that
+    category's post_time in IST. Accepts an Application or a JobQueue."""
+    job_queue = getattr(job_queue, "job_queue", job_queue)  # Application or JobQueue
+    if job_queue is None:
+        log.warning("schedule_daily: no job_queue available; skipping")
         return
-    for job in jq.get_jobs_by_name("daily_post"):
-        job.schedule_removal()
-    settings = await db.get_settings()
-    hour, minute = _hhmm(settings.get("post_time"))
-    jq.run_daily(
-        _daily_cb,
-        time=datetime.time(hour=hour, minute=minute, tzinfo=datetime.timezone.utc),
-        name="daily_post",
-    )
-    log.info("Daily post scheduled for %02d:%02d UTC", hour, minute)
+    for j in list(job_queue.jobs()):
+        if j.name and j.name.startswith("daily_post"):
+            j.schedule_removal()
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo(IST)
+    for cat in await db.list_categories(enabled_only=True):
+        if not cat.get("schedule_enabled", True):
+            log.info("schedule disabled for %s", cat["key"])
+            continue
+        hh, mm = _hhmm(cat.get("post_time"))
+        key = cat["key"]
+        job_queue.run_daily(
+            _make_daily_cb(key),
+            time=datetime.time(hour=hh, minute=mm, tzinfo=ist),
+            name=f"daily_post:{key}")
+        log.info("daily post [%s] scheduled at %02d:%02d IST", key, hh, mm)
 
 
-async def _daily_cb(context: ContextTypes.DEFAULT_TYPE):
-    await do_post(context.bot)
+def _make_daily_cb(key):
+    async def _cb(context: ContextTypes.DEFAULT_TYPE):
+        cat = await db.get_category(key)
+        if not cat or not cat.get("enabled", True):
+            return
+        if cat.get("schedule_paused"):
+            log.info("schedule_paused=True for %s; skipping today's post", key)
+            return
+        await do_post(context.bot, category=key)
+    return _cb
 
 
 # ── command / update handlers ─────────────────────────────────
@@ -384,7 +485,8 @@ async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
     file_id = (query.data or "").split(":", 1)[-1]
-    if await gate_ok(context.bot, user.id):
+    category = await db.resolve_category(file_id)
+    if await gate_ok(context.bot, user.id, category):
         await query.answer("Thanks for joining!")
         try:
             await query.edit_message_text("✅ Membership confirmed.")
@@ -404,12 +506,20 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Live-index new messages appearing in the Database Channel."""
+    """Live-index new messages appearing in ANY registered Database Channel.
+
+    Routes by chat_id -> the owning category, so each pipeline indexes only
+    its own source channel and never touches another category's queue."""
     msg = update.channel_post
-    settings = await db.get_settings()
-    db_channel = settings.get("db_channel_id")
-    if not db_channel or msg.chat_id != db_channel:
-        return
+    cat = await db.category_for_db_channel(msg.chat_id)
+    if not cat:
+        # Back-compat: fall back to the legacy single global DB channel.
+        settings = await db.get_settings()
+        if not settings.get("db_channel_id") or msg.chat_id != settings.get("db_channel_id"):
+            return
+        cat_key = None
+    else:
+        cat_key = cat["key"]
     kind = scanner.classify_from_botapi(msg)
     if not kind:
         return
@@ -417,8 +527,8 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "message_id": msg.message_id,
         "kind": kind,
         "caption": msg.caption or "",
-    })
-    await db.rebuild_items()
+    }, category=cat_key)
+    await db.rebuild_items(cat_key)
 
 
 # ── application factory ───────────────────────────────────────
@@ -430,13 +540,19 @@ def build_bot1() -> Application:
     for name, func in ADMIN_COMMANDS.items():
         app.add_handler(CommandHandler(name, func))
     app.add_handler(CallbackQueryHandler(on_checksub, pattern=r"^checksub:"))
+    # category-management inline actions (post now / pause / resume / delete)
+    from bot1_admin import on_category_action
+    app.add_handler(CallbackQueryHandler(on_category_action, pattern=r"^cat:"))
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
+    # conversational /addcategory + /editcategory wizard (free-text answers)
+    from bot1_admin import wizard_message_handler
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                   wizard_message_handler), group=1)
     return app
 
 
-# === v1.3 : tz-aware scheduling + main-channel forward (overrides) ===
-
+# === tz helper retained for admin /setschedule compat ===
 _TZ_ALIASES = {
     "IST": "Asia/Kolkata", "INDIA": "Asia/Kolkata", "CHENNAI": "Asia/Kolkata",
     "PKT": "Asia/Karachi", "BST": "Asia/Dhaka", "ICT": "Asia/Bangkok",
@@ -446,153 +562,13 @@ _TZ_ALIASES = {
 
 
 def _resolve_tz(name):
-    """Return (tzinfo, canonical_label). Falls back to Asia/Kolkata."""
+    """Return (tzinfo, canonical_label). Falls back to Asia/Kolkata (IST)."""
     from zoneinfo import ZoneInfo
-    raw = (name or "Asia/Kolkata").strip()
+    raw = (name or IST).strip()
     cand = _TZ_ALIASES.get(raw.upper(), raw)
     for c in (cand, cand.replace(" ", "/")):
         try:
             return ZoneInfo(c), c
         except Exception:
             pass
-    return ZoneInfo("Asia/Kolkata"), "Asia/Kolkata"
-
-
-async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
-                            markup=None):
-    """FORWARD the just-published post from the Post Channel to the Main
-    Posting Channel, then send the tag as a REPLY (quote) to the forwarded
-    post. Order: post already exists in Post Channel -> forward it -> tag
-    quotes it.
-
-    Telegram cannot forward messages with protected content, so when the
-    forward itself fails (e.g. /protect on) we fall back to copy_message —
-    the main channel still gets the post, and the tag still quotes it."""
-    try:
-        fwd = await bot.forward_message(
-            chat_id=main_id, from_chat_id=post_channel,
-            message_id=post_msg_id)
-    except Exception as exc:
-        log.warning("forward to main failed (%s); copying instead", exc)
-        fwd = await bot.copy_message(
-            chat_id=main_id, from_chat_id=post_channel,
-            message_id=post_msg_id, reply_markup=markup)
-    if tag:
-        try:
-            await bot.send_message(
-                main_id, tag, reply_to_message_id=fwd.message_id,
-                allow_sending_without_reply=True)
-        except Exception as exc:
-            log.warning("tag quote failed, sending plain tag: %s", exc)
-            try:
-                await bot.send_message(main_id, tag)
-            except Exception as exc2:
-                log.error("tag message failed entirely: %s", exc2)
-    return fwd
-
-
-async def do_post(bot, _depth=0):
-    """Post the next queued cover to the post channel, then (optionally)
-    forward it to the main channel with the tag. Cursor-safe via Mongo."""
-    if _depth >= 10:
-        log.error("do_post: too many dead items in a row; aborting")
-        return None
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    item = await db.next_unposted()
-    if not item:
-        log.info("do_post: queue empty")
-        return None
-    s = await db.get_settings()
-    post_channel = s.get("post_channel_id") or config.POST_CHANNEL_ID
-    db_channel = s.get("db_channel_id") or config.DB_CHANNEL_ID
-    link = f"https://t.me/{config.BOT1_USERNAME}?start=file_{item['file_id']}"
-    post_no = await db.count_posted() + 1
-    markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"#{post_no} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱", url=link)]])
-    try:
-        # Channel posts are NEVER protected - /protect only applies to the
-        # files Bot 2 delivers to users (protecting a channel post would
-        # also block the forward to the main channel).
-        msg = await bot.copy_message(
-            chat_id=post_channel, from_chat_id=db_channel,
-            message_id=item["cover_message_id"], reply_markup=markup,
-            has_spoiler=True)
-    except Exception as exc:
-        # Source message was deleted from the DB channel (e.g. a duplicate
-        # the owner removed): skip the dead item - the queue heals itself.
-        log.warning("do_post: db message %s gone (%s); skipping %s",
-                    item["db_message_id"], exc, item["file_id"])
-        await db.mark_posted(item["db_message_id"])
-        return await do_post(bot, _depth + 1)
-    await db.mark_posted(item["db_message_id"], post_message_id=msg.message_id)
-    log.info("posted %s (db id %s) -> %s", item["file_id"],
-             item["db_message_id"], post_channel)
-    main_id = s.get("post_main_channel_id")
-    if main_id:
-        try:
-            await _forward_with_tag(bot, post_channel, msg.message_id,
-                                    main_id, s.get("post_tag"), markup)
-            log.info("forwarded %s to main channel %s", item["file_id"], main_id)
-        except Exception as exc:
-            log.warning("main-channel forward failed: %s", exc)
-            try:
-                admin = (config.ADMIN_IDS or [None])[0]
-                if admin:
-                    await bot.send_message(
-                        admin,
-                        "\u26a0\ufe0f Forward to main channel failed for "
-                        f"{item['file_id']}: {exc}\n"
-                        "(Is the bot admin in the main channel?)")
-            except Exception:
-                pass
-    return item
-
-
-async def schedule_daily(job_queue):
-    """(Re)install the daily drip job from settings.post_time in
-    settings.post_timezone. Removes the job when schedule is disabled."""
-    job_queue = getattr(job_queue, "job_queue", job_queue)  # accept Application or JobQueue
-    if job_queue is None:
-        log.warning("schedule_daily: no job_queue available; skipping")
-        return
-    import datetime as _dt
-    for j in job_queue.jobs():
-        if j.name == "daily_post":
-            j.schedule_removal()
-    s = await db.get_settings()
-    if not s.get("schedule_enabled", True):
-        log.info("daily schedule disabled")
-        return
-    hh, mm = (s.get("post_time", "18:00").split(":") + ["0"])[:2]
-    tz, label = _resolve_tz(s.get("post_timezone"))
-    job_queue.run_daily(
-        _daily_cb,
-        time=_dt.time(hour=int(hh), minute=int(mm), tzinfo=tz),
-        name="daily_post")
-    log.info("daily post scheduled at %02d:%02d %s", int(hh), int(mm), label)
-
-
-async def _daily_cb(context):
-    s = await db.get_settings()
-    if s.get("schedule_paused"):
-        log.info("schedule_paused=True; skipping today's post")
-        return
-    await do_post(context.bot)
-
-
-_EXTRA_HELP = (
-    "Scheduling and queue\n"
-    "/setschedule HH:MM TZ - set daily time (e.g. /setschedule 07:00 IST)\n"
-    "/schedule on|off - enable or disable daily posting\n"
-    "/pauseposting - pause the daily job\n"
-    "/resumeposting - resume the daily job\n"
-    "/queueinfo - next 10 queued posts (with links)\n"
-    "/queue_reset N - reset queue to post number N\n"
-    "Main channel forward\n"
-    "/setpostmainchannel id|off - forward posts to a main channel\n"
-    "/setposttag text|off - tag line sent above each forward"
-)
-try:
-    HELP_ADMIN += "\n\n" + escape_markdown(_EXTRA_HELP, version=2)
-except NameError:
-    pass
+    return ZoneInfo(IST), IST
