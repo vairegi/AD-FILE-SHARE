@@ -40,6 +40,9 @@ class FakeMessage:
     def __init__(self, text=""):
         self.text = text
         self.replies = []
+        self.chat_id = 999
+        self.message_id = 1234
+        self.reply_to_message = None
 
     async def reply_text(self, text, **kw):
         self.replies.append(text)
@@ -154,7 +157,7 @@ async def main():
           and s["verify_hours"] == 6 and s["token_ttl_minutes"] == 10)
 
     await db.update_settings({"verify_hours": 8, "token_ttl_minutes": 7,
-                              "auto_delete_minutes": 60})
+                              "auto_delete_minutes": 15})
     s = await db.get_settings()
     check("settings update", s["verify_hours"] == 8 and s["token_ttl_minutes"] == 7)
 
@@ -369,15 +372,19 @@ async def main():
     check("chooser: wrong user blocked", q2.answers and "not issued for you" in q2.answers[0][0]
           and len(fb.sent) == sent_before)
 
-    # user /setautodelete override
-    upd = FakeUpdate(999)
+    # /setautodelete is admin-only and controls the GLOBAL timer now
+    upd = FakeUpdate(uid=12345)
     await bot2.setautodelete(upd, FakeContext(args=["12hour"]))
-    check("bot2 user override 12hour",
-          (await db.get_user(999))["auto_delete_override"] == 720)
-    upd = FakeUpdate(999)
-    await bot2.setautodelete(upd, FakeContext(args=["never"]))
-    check("bot2 user override never -> 0",
-          (await db.get_user(999))["auto_delete_override"] == 0)
+    check("/setautodelete blocks non-admins",
+          "only by admins" in upd.message.replies[-1])
+    upd = FakeUpdate(uid=999)
+    await bot2.setautodelete(upd, FakeContext(args=["30min"]))
+    check("/setautodelete (admin) sets the global timer",
+          (await db.get_settings())["auto_delete_minutes"] == 30)
+    await db.set_user_autodelete(999, 720)
+    check("per-user override is ignored (global timer wins)",
+          await bot2._autodelete_minutes(999) == 30)
+    await db.update_settings({"auto_delete_minutes": 30})
 
     # deletion sweeper
     await db.add_deletion(999, [111, 222], db.now() - 5)
@@ -427,11 +434,14 @@ async def main():
                                                                 "Scan failed" in r)
     r = await run(adm.cmd_rescandb);                     check("/rescandb (no creds -> clean error)",
                                                                 "Scan failed" in r)
-    # broadcast
+    # broadcast copies the message (tags/links/quotes preserved) to all users
     bbot = FakeBot()
     r = await run(adm.cmd_broadcast, text="/broadcast hello all", bot=bbot)
-    check("/broadcast summary", "Done" in r and "Sent" in r)
-    check("/broadcast reached users", len(bbot.sent) >= 1)
+    check("/broadcast copies message to every user", "Done" in r
+          and len(bbot.copied) == len(await db.all_user_ids()))
+    check("/broadcast copies verbatim from the admin's message",
+          bbot.copied and all(c[1] == 999 and c[2] == 1234
+                              for c in bbot.copied))
 
     # non-admin blocked
     upd = FakeUpdate(uid=12345)

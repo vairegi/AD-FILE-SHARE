@@ -36,7 +36,7 @@ DEFAULT_SETTINGS = {
     "verify_msg": "✅ Verification complete! Tap below to get your file.",
     "shortener_buttons": [],
     "force_sub_channel_id": config.FORCE_SUB_CHANNEL_ID,
-    "auto_delete_minutes": 60,
+    "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
     "db_channel_id": config.DB_CHANNEL_ID,
     "post_time": "18:00",

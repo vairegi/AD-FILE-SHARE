@@ -55,7 +55,6 @@ async def _set_commands():
         await bot2.bot.set_my_commands([
             BotCommand("start", "Start the bot"),
             BotCommand("help", "Show all commands"),
-            BotCommand("setautodelete", "Set auto-delete timer"),
         ])
     except Exception as exc:
         log.warning("set_my_commands failed: %s", exc)

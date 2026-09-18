@@ -151,16 +151,26 @@ async def cmd_protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── general admin ─────────────────────────────────────────────
 @admin_only
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.partition(" ")[2].strip()
-    if not text:
-        await update.message.reply_text("Usage: /broadcast <message>")
+    """Broadcast the command message to every user via copy_message, so tags,
+    embedded links, bold/italic and quote blocks are delivered EXACTLY as
+    composed. Accepts either a reply to a message or inline text."""
+    msg = update.message
+    if not msg.reply_to_message and not msg.text.partition(" ")[2].strip():
+        await update.message.reply_text(
+            "Usage: /broadcast <message> — or reply to any message with "
+            "/broadcast to copy it exactly (tags, links, quotes kept).")
         return
     ids = await db.all_user_ids()
     sent = failed = 0
     await update.message.reply_text(f"📣 Broadcasting to {len(ids)} users…")
     for uid in ids:
         try:
-            await context.bot.send_message(uid, text)
+            # copy_message re-sends the admin's own message with all its
+            # entities (channel tags, text links, quotes) intact — no
+            # re-parsing, no plain-text flattening.
+            await context.bot.copy_message(
+                chat_id=uid, from_chat_id=msg.chat_id,
+                message_id=msg.message_id)
             sent += 1
         except Exception:
             failed += 1

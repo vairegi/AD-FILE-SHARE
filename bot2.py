@@ -54,9 +54,8 @@ def schedule_sweeper(application: Application):
 
 
 async def _autodelete_minutes(user_id):
-    record = await db.get_user(user_id)
-    if record and record.get("auto_delete_override") is not None:
-        return int(record["auto_delete_override"])
+    """Auto-delete is an admin-controlled GLOBAL setting — per-user overrides
+    are intentionally ignored so regular users cannot keep files longer."""
     settings = await db.get_settings()
     return int(settings.get("auto_delete_minutes") or 0)
 
@@ -104,10 +103,9 @@ async def send_item(bot, chat_id, item, index):
     minutes = await _autodelete_minutes(chat_id)
     if minutes and minutes > 0:
         await db.add_deletion(chat_id, [m for m in delivered if m], db.now() + minutes * 60)
-        note = (f"⏳ This file will be auto-deleted in {human_duration(minutes * 60)}.\n"
-                f"Change it with /setautodelete (e.g. /setautodelete 12hour).")
+        note = f"⏳ This file will be auto-deleted in {human_duration(minutes * 60)}."
     else:
-        note = "📌 Auto-delete is off for you, so this file will stay in the chat."
+        note = "📌 This file will stay in the chat."
     await bot.send_message(chat_id, note)
 
 
@@ -174,8 +172,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram.helpers import escape_markdown
     body = ("/start — Start the bot\n"
-            "/setautodelete <time> — how long files stay in this chat\n"
-            "  e.g. 5min · 2hour · 12hour · 7day · never\n"
             "/help — Show this list\n\n"
             "Files are delivered when you tap 📥 Get File in the main bot.")
     await update.message.reply_text(
@@ -185,19 +181,25 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setautodelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: sets the GLOBAL auto-delete timer for every delivered file."""
+    from utils import is_admin
+    if not await is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "⛔ This command can be used only by admins.")
+        return
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            "Usage: /setautodelete <time>\nExamples: 5min · 2hour · 12hour · 7day · never"
+            "Usage: /setautodelete <time>\nExamples: 5min · 15min · 2hour · 7day · never"
         )
         return
     seconds = parse_duration(args[0])
     if seconds is None:
         await update.message.reply_text("Could not parse that duration. Try 5min / 2hour / never.")
         return
-    await db.set_user_autodelete(update.effective_user.id, seconds // 60)
+    await db.update_settings({"auto_delete_minutes": seconds // 60})
     await update.message.reply_text(
-        f"✅ Your files will now be auto-deleted after {human_duration(seconds)}."
+        f"✅ All delivered files will now be auto-deleted after {human_duration(seconds)}."
     )
 
 

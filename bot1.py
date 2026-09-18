@@ -76,7 +76,7 @@ HELP_ADMIN = (
            "/shortenerbtn <label> | <url> — add extra button\n"
            "/clearshortenerbtns — remove extra buttons\n")
     + "\n*General*\n"
-    + _md2("/broadcast <message> — message all users\n"
+    + _md2("/broadcast <message> — copy to all users (tags/links/quotes kept)\n"
            "/stats — full overview + all connected channels\n"
            "/ban <user_id> · /unban <user_id>\n"
            "/addadmin <user_id> — promote an admin\n"
