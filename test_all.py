@@ -528,6 +528,13 @@ async def main():
     import main as m
     routes = {r.path for r in m.app.routes}
     check("fastapi routes", {"/health", "/bot1/webhook", "/bot2/webhook"} <= routes)
+    import inspect
+    src1 = inspect.getsource(m.bot1_webhook)
+    src2 = inspect.getsource(m.bot2_webhook)
+    check("webhooks ack instantly via background task",
+          "create_task" in src1 and "create_task" in src2
+          and "await bot1.process_update" not in src1
+          and "await bot2.process_update" not in src2)
 
     # ── 11b. posting flow: protect flag + main-channel tag ─────
     # deterministic queue state: mark everything posted, then add fresh items

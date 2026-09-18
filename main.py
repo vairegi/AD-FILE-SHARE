@@ -10,6 +10,7 @@ process. Telegram delivers updates to:
 Run locally:   uvicorn main:app --host 0.0.0.0 --port 8000
 On Render:     uvicorn main:app --host 0.0.0.0 --port $PORT
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -132,7 +133,12 @@ async def bot1_webhook(request: Request):
         return Response(status_code=403)
     data = await request.json()
     update = Update.de_json(data, bot1.bot)
-    await bot1.process_update(update)
+    # Answer Telegram INSTANTLY (200) and process in the background.
+    # Without this, a slow handler (e.g. a long /broadcast) makes Telegram
+    # retry the same update over and over - which is exactly what caused
+    # the repeated broadcasts AND blocked the event loop so no other
+    # command could get through.
+    asyncio.create_task(bot1.process_update(update))
     return Response(status_code=200)
 
 
@@ -142,7 +148,7 @@ async def bot2_webhook(request: Request):
         return Response(status_code=403)
     data = await request.json()
     update = Update.de_json(data, bot2.bot)
-    await bot2.process_update(update)
+    asyncio.create_task(bot2.process_update(update))
     return Response(status_code=200)
 
 
