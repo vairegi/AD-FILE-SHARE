@@ -311,3 +311,12 @@ distribute. Deploy it with media you hold the rights to.
 ## v3.0 — Multi-version posts deliver everything (2026-09-19)
 
 - Bot 2 no longer asks "🎬 Choose which version you want:". When a post has multiple videos in the DB channel, ALL versions are delivered in one go. Subtitle files attach once (with the first video); the auto-delete notice is posted once, after the last file. Old "dl:" buttons already sent to users still work (they deliver that single version).
+
+## v3.1 — MKV/AVI/WebM delivery fix (2026-09-19)
+
+- Videos uploaded as Telegram **documents** (`.mkv`, `.avi`, `.webm`, and `.mp4`
+  sent as files) were misclassified as subtitles, so items had no videos and
+  users got "This file is no longer available." Both classifiers (userbot scan +
+  live channel_post) now treat any `video/*` mime-type document as a video.
+- After deploying, re-scan the affected pipeline(s) (`/rescandb` or Scan now) so
+  already-uploaded MKV files are indexed correctly. New uploads work immediately.

@@ -22,7 +22,13 @@ def classify_message(msg):
     doc = getattr(msg, "document", None)
     if doc is not None:
         mime = (getattr(doc, "mime_type", "") or "")
-        return "cover" if mime.startswith("image/") else "srt"
+        if mime.startswith("image/"):
+            return "cover"
+        # .mkv/.avi/.webm/.mp4 uploaded as FILES arrive as documents, not
+        # msg.video — without this they were misread as subtitles and dropped.
+        if mime.startswith("video/"):
+            return "video"
+        return "srt"
     if getattr(msg, "animation", None):
         return "video"
     return None
@@ -37,7 +43,11 @@ def classify_from_botapi(msg):
     doc = getattr(msg, "document", None)
     if doc is not None:
         mime = (doc.mime_type or "")
-        return "cover" if mime.startswith("image/") else "srt"
+        if mime.startswith("image/"):
+            return "cover"
+        if mime.startswith("video/"):
+            return "video"
+        return "srt"
     if getattr(msg, "animation", None) is not None:
         return "video"
     return None

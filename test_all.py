@@ -983,7 +983,34 @@ async def main():
           any("Scan complete" in str(m) for m in ctx.bot.sent) or True)
     await db._db.raw.delete_many({"category": "hanime"})
 
-            # wizard parsers (addcategory step logic)
+# ── scanner: video files uploaded as documents (mkv/avi/webm) ──
+    import types as _t
+    def _doc(mime):
+        return _t.SimpleNamespace(video=None, photo=None, animation=None,
+                                  document=_t.SimpleNamespace(mime_type=mime))
+    check("scanner: .mkv document -> video",
+          scanner.classify_message(_doc("video/x-matroska")) == "video")
+    check("scanner: .avi document -> video",
+          scanner.classify_message(_doc("video/x-msvideo")) == "video")
+    check("scanner: .mp4-as-file document -> video",
+          scanner.classify_message(_doc("video/mp4")) == "video")
+    check("scanner: image document -> cover",
+          scanner.classify_message(_doc("image/jpeg")) == "cover")
+    check("scanner: .srt text document -> srt",
+          scanner.classify_message(_doc("text/plain")) == "srt")
+    check("scanner (botapi): .mkv document -> video",
+          scanner.classify_from_botapi(_doc("video/x-matroska")) == "video")
+    # end-to-end: an mkv 'document' row must produce a deliverable item
+    await db.ingest_raw({"message_id": 950, "kind": "cover", "caption": "mkv test"}, "jav")
+    await db.ingest_raw({"message_id": 951, "kind": "video", "caption": "MKV"}, "jav")
+    items = await db.rebuild_items("jav")
+    it = await db.get_item_by_file_id("jav_f950")
+    check("scanner: mkv item is deliverable (has videos)",
+          it and len(it.get("videos") or []) == 1)
+    await db._db.raw.delete_many({"message_id": {"$in": [950, 951]}})
+    await db._db.files.delete_many({"file_id": "jav_f950"})
+
+                # wizard parsers (addcategory step logic)
     ok1 = adm._p_db_channel("-100123")
     ok2 = adm._p_main_channel("skip")
     ok3 = adm._p_time("21:30")
