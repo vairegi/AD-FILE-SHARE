@@ -51,6 +51,7 @@ DEFAULT_SETTINGS = {
     "_id": "global",
     "shortener_enabled": False,
     "shortener_api_base": "https://vplink.in/api",
+    "shortener_api_key": None,   # set via /shortenerapi (DB-first, env fallback)
     "verify_hours": 6,
     "shortener_msg": "🔓 Verification required",
     "shortenerbot_msg": (

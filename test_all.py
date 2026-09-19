@@ -508,6 +508,7 @@ async def main():
 
     # ── 8. admin commands (every one) ─────────────────────────
     import bot1_admin as adm
+    import shortener
 
     async def run(cmd, args=None, text=None, uid=999, bot=None):
         upd = FakeUpdate(uid)
@@ -520,7 +521,40 @@ async def main():
     r = await run(adm.cmd_shortener, ["on"]);            check("/shortener on", "enabled" in r)
     r = await run(adm.cmd_shortener, ["status"]);        check("/shortener status", "Shortener gate" in r)
     r = await run(adm.cmd_shortener, ["off"]);           check("/shortener off", "disabled" in r)
-    r = await run(adm.cmd_shortenerapi, ["https://vplink.in/api"]); check("/shortenerapi", "vplink.in/api" in r)
+    r = await run(adm.cmd_shortenerapi, ["url", "https://vplink.in/api"]); check("/shortenerapi url", "vplink.in/api" in r)
+
+    # ── /shortenerapi key management (DB-first, env fallback) ──
+    check("mask_key helper", adm._mask_key("d068db49b6fe562727f7d6567d6f24dadfaa3e2a") == "d068...3e2a")
+    upd = FakeUpdate(uid=12345)  # non-admin
+    await adm.cmd_shortenerapi(upd, FakeContext(args=["somekey"]))
+    check("/shortenerapi blocks non-admin", "only by admins" in upd.message.replies[-1])
+    check("  -> non-admin did NOT write a key",
+          not (await db.get_settings()).get("shortener_api_key"))
+    r = await run(adm.cmd_shortenerapi, [])
+    check("/shortenerapi (no args) shows masked status + env fallback",
+          "Shortener API status" in r and "env var" in r)
+    orig_shorten = shortener.shorten
+    async def _fake_shorten(url): return "https://vplink.in/SelfTest"
+    shortener.shorten = _fake_shorten
+    r = await run(adm.cmd_shortenerapi, ["d068db49b6fe562727f7d6567d6f24dadfaa3e2a"])
+    shortener.shorten = orig_shorten
+    check("/shortenerapi <key> saves key to DB + live self-test",
+          "saved to the database" in r and "verified live" in r)
+    check("  -> key stored in DB",
+          (await db.get_settings())["shortener_api_key"] == "d068db49b6fe562727f7d6567d6f24dadfaa3e2a")
+    orig_env = config.SHORTENER_API_KEY
+    config.SHORTENER_API_KEY = "envfallbackkey000"
+    async def _probe(url): return (await db.get_settings()).get("shortener_api_key") or config.SHORTENER_API_KEY
+    shortener.shorten = _probe
+    check("shortener uses DB key over env",
+          await shortener.shorten("https://t.me/x?start=y") == "d068db49b6fe562727f7d6567d6f24dadfaa3e2a")
+    r = await run(adm.cmd_shortenerapi, ["clearkey"])
+    check("/shortenerapi clearkey removes DB key", "removed" in r
+          and not (await db.get_settings()).get("shortener_api_key"))
+    check("shortener falls back to env when DB key cleared",
+          await shortener.shorten("https://t.me/x?start=y") == "envfallbackkey000")
+    shortener.shorten = orig_shorten
+    config.SHORTENER_API_KEY = orig_env
     r = await run(adm.cmd_setverifytime, ["6"]);         check("/setverifytime", "6 hours" in r)
     r = await run(adm.cmd_settokenttl, ["15"]);          check("/settokenttl", "15 minutes" in r)
     r = await run(adm.cmd_shortenermsg, text="/shortenermsg HEADING"); check("/shortenermsg", "updated" in r)

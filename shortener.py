@@ -17,9 +17,11 @@ async def shorten(long_url: str):
     """Return a shortened URL string, or None when the API fails."""
     settings = await db.get_settings()
     base = (settings.get("shortener_api_base") or "https://vplink.in/api").strip()
-    key = config.SHORTENER_API_KEY
+    # DB-first (set via /shortenerapi, survives Render restarts); the env var
+    # SHORTENER_API_KEY is only a fallback so nothing breaks on first deploy.
+    key = (settings.get("shortener_api_key") or config.SHORTENER_API_KEY).strip()
     if not key:
-        log.warning("SHORTENER_API_KEY is not set; cannot shorten.")
+        log.warning("No shortener API key set (DB or env); cannot shorten.")
         return None
 
     params = {"api": key, "url": long_url, "format": "text"}

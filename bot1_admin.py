@@ -33,6 +33,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+import config
 import db
 import scanner
 from utils import admin_only, human_duration, parse_duration
@@ -490,6 +491,7 @@ async def cmd_shortener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Shortener gate: {'ON' if settings.get('shortener_enabled') else 'OFF'}\n"
             f"API base: {settings.get('shortener_api_base')}\n"
+            f"API key: {_mask_key(settings.get('shortener_api_key'))} (database)\n"
             f"Verify validity: {settings.get('verify_hours')} h\n"
             f"Token TTL: {settings.get('token_ttl_minutes')} min\n"
             f"Extra buttons: {len(settings.get('shortener_buttons') or [])}"
@@ -501,14 +503,80 @@ async def cmd_shortener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Shortener gate {'enabled' if enabled else 'disabled'}.")
 
 
+def _mask_key(key):
+    """Mask an API key for display: first4...last4 (handles short keys)."""
+    key = (key or "").strip()
+    if len(key) <= 8:
+        return "•••" if key else "(not set)"
+    return f"{key[:4]}...{key[-4:]}"
+
+
 @admin_only
 async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args or []
-    if not args:
-        await update.message.reply_text("Usage: /shortenerapi https://vplink.in/api")
+    """/shortenerapi — manage the shortener API (base + key, both in MongoDB).
+
+      /shortenerapi                 -> status: base, masked key, source (DB/env)
+      /shortenerapi <key>           -> save the API key to the DB (global)
+      /shortenerapi url <base>      -> set the API base (e.g. https://vplink.in/api)
+      /shortenerapi clearkey        -> remove the DB key (revert to env fallback)
+    The DB key survives Render restarts; the env var is only a fallback."""
+    import shortener as _sh
+    args = [a for a in (context.args or []) if a]
+    sub = args[0].lower() if args else "status"
+
+    if sub in ("url", "base"):
+        if len(args) < 2 or not args[1].startswith(("http://", "https://")):
+            await update.message.reply_text(
+                "Usage: /shortenerapi url https://vplink.in/api")
+            return
+        await db.update_settings({"shortener_api_base": args[1].strip()})
+        await update.message.reply_text(
+            f"✅ Shortener API base set to {args[1].strip()}")
         return
-    await db.update_settings({"shortener_api_base": args[0].strip()})
-    await update.message.reply_text(f"✅ Shortener API base set to {args[0].strip()}")
+
+    if sub in ("clearkey", "clear", "remove"):
+        await db.update_settings({"shortener_api_key": None})
+        await update.message.reply_text(
+            "🗑 Shortener API key removed from the database. "
+            "Falling back to the env var (if set).")
+        return
+
+    if sub in ("key", "setkey"):
+        args = args[1:]          # drop the 'key' word; fall through to set
+
+    if args and args[0].lower() in ("status",):
+        args = []                # bare status
+
+    if not args:
+        s = await db.get_settings()
+        dbkey = (s.get("shortener_api_key") or "").strip()
+        envkey = (config.SHORTENER_API_KEY or "").strip()
+        eff = dbkey or envkey
+        src = "database" if dbkey else ("env var" if envkey else "not set")
+        await update.message.reply_text(
+            "🔗 Shortener API status\n"
+            f"• Base: {s.get('shortener_api_base')}\n"
+            f"• Key: {_mask_key(dbkey)} (database)\n"
+            f"• Key: {_mask_key(envkey)} (env var)\n"
+            f"• Effective key: {_mask_key(eff)} → source: {src}\n\n"
+            "Set: /shortenerapi <key> · Base: /shortenerapi url <base> · "
+            "Remove: /shortenerapi clearkey")
+        return
+
+    token = args[0].strip()
+    if token.startswith(("http://", "https://")):
+        await db.update_settings({"shortener_api_base": token})
+        await update.message.reply_text(f"✅ Shortener API base set to {token}")
+        return
+    await db.update_settings({"shortener_api_key": token})
+    short = await _sh.shorten("https://example.com/self-test")
+    live = "✅ key verified live (shortener accepted it)." if short else (
+        "⚠️ saved, but the live self-test did not return a link — check the key.")
+    await update.message.reply_text(
+        f"✅ Shortener API key saved to the database (global, survives restarts).\n"
+        f"Key: {_mask_key(token)}\n"
+        f"Base: {(await db.get_settings()).get('shortener_api_base')}\n"
+        f"Live self-test: {live}")
 
 
 @admin_only
