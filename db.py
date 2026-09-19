@@ -132,6 +132,17 @@ async def connect():
         await _db.raw.drop_index("message_id_1")
     except Exception:
         pass  # index already absent
+    # Drop ALL legacy single-field unique indexes that predate multi-category —
+    # they collide across pipelines because every channel restarts message_id /
+    # db_message_id at 1 (this exact bug crashed the scan twice: first on
+    # raw.message_id, then on files.db_message_id). Self-healing on startup.
+    for coll, idx in (("raw", "message_id_1"),
+                      ("files", "db_message_id_1"),
+                      ("files", "posted_1")):
+        try:
+            await _db[coll].drop_index(idx)
+        except Exception:
+            pass  # index already absent
     await _db.raw.create_index([("category", 1), ("message_id", 1)], unique=True)
     await _db.categories.create_index("key", unique=True)
     await _db.categories.create_index("db_channel_id")

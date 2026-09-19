@@ -301,3 +301,9 @@ distribute. Deploy it with media you hold the rights to.
 
 - **DuplicateKeyError on scan**: the `raw` collection had a legacy unique index on `message_id` alone; a second pipeline's scan crashed because every DB channel restarts message_id at 1. db.connect() now drops the stale index at startup; the compound (category, message_id) unique index is the correct key.
 - **AttributeError 'NoneType' reply_text**: "Scan now" is a button callback (update.message is None) — the scan error handler crashed while reporting the failure. _run_scan now replies via context.bot.send_message and works from commands and callbacks alike.
+
+## v2.9 — Complete stale-index sweep + callback-safe scan (2026-09-19)
+
+- v2.8 dropped the legacy `raw.message_id` unique index; the SAME legacy pattern also existed on `files.db_message_id` (plus a leftover `files.posted_1`), which crashed the scan one step later with another DuplicateKeyError. db.connect() now drops ALL of them at startup. Adding any future pipeline scans cleanly.
+- `_run_scan` replies via context.bot.send_message so "Scan now" (a button callback) always reports success/failure instead of freezing.
+- `_wizard_finish` pops the reserved `key` field before `**data` (the TypeError that silently killed /addcategory) and reports failures to the admin.
