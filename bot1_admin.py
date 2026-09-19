@@ -173,7 +173,7 @@ _WIZARD_STEPS = [
     ("db_channel",   "1/5 · Send the <b>Database Channel</b> id (where raw files are uploaded).", _p_db_channel),
     ("post_channel", "2/5 · Send the <b>Posting Channel</b> id (where covers are drip-posted).", _p_post_channel),
     ("main_channel", "3/5 · Send the <b>Main Posting Channel</b> id, or <code>skip</code>.", _p_main_channel),
-    ("tag",          "4/5 · Send the <b>tag line</b> sent above each main-channel forward, or <code>skip</code>.", _p_tag),
+    ("tag",          "4/5 · Send the <b>tag line</b> — a caption shown above each forward in the Main Channel (e.g. a hashtag or @handle). Optional: <code>skip</code>.", _p_tag),
     ("time",         "5/5 · Send the <b>daily post time</b> as HH:MM (IST), or <code>skip</code> for 18:00.", _p_time),
 ]
 
@@ -232,12 +232,24 @@ async def cmd_editcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _wizard_finish(update: Update, context, session):
     key, data = session["key"], session["data"]
-    if session["mode"] == "add":
-        await db.create_category(key, data.pop("label", key), **data)
-        msg = f"✅ Pipeline <b>{_h(key)}</b> created and LIVE."
-    else:
-        await db.update_category(key, data)
-        msg = f"✅ Pipeline <b>{_h(key)}</b> updated."
+    try:
+        if session["mode"] == "add":
+            # pop BOTH reserved keys so **data can never collide with the
+            # positional `key` arg (the crash that silently killed the wizard).
+            label = data.pop("label", key)
+            data.pop("key", None)
+            await db.create_category(key, label, **data)
+            msg = f"✅ Pipeline <b>{_h(key)}</b> created and LIVE."
+        else:
+            await db.update_category(key, data)
+            msg = f"✅ Pipeline <b>{_h(key)}</b> updated."
+    except Exception as exc:
+        # NEVER die silently: report the failure so the admin sees what happened
+        # instead of the bot just "stopping responding".
+        log.exception("wizard finish failed for %s", key)
+        await update.message.reply_text(
+            f"❌ Setup failed: {exc!r}\nNothing was saved — please retry.")
+        return
     # (re)build schedules so the new/edited category gets its daily IST job now
     try:
         from bot1 import schedule_daily
@@ -282,13 +294,19 @@ async def wizard_message_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
     session["data"][field] = value
     session["step"] += 1
-    if session["step"] < len(_WIZARD_STEPS):
-        await update.message.reply_text(_WIZARD_STEPS[session["step"]][1],
-                                        parse_mode="HTML",
-                                        reply_markup=_wizard_cancel_kb())
-    else:
+    try:
+        if session["step"] < len(_WIZARD_STEPS):
+            await update.message.reply_text(_WIZARD_STEPS[session["step"]][1],
+                                            parse_mode="HTML",
+                                            reply_markup=_wizard_cancel_kb())
+        else:
+            _WIZARD.pop(user.id, None)
+            await _wizard_finish(update, context, session)
+    except Exception as exc:
+        log.exception("wizard step %s crashed", session["step"])
         _WIZARD.pop(user.id, None)
-        await _wizard_finish(update, context, session)
+        await update.message.reply_text(
+            f"❌ Something went wrong: {exc!r}\nWizard reset — start over with /addcategory.")
 
 
 @admin_only

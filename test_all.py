@@ -920,7 +920,35 @@ async def main():
     check("force-sub: cleared override falls back to global",
           await bot1._force_sub_channel_for("anime") == -100111)
 
-    # wizard parsers (addcategory step logic)
+# ── full 5-step wizard end-to-end (regression: TypeError key-collision bug) ──
+    upd = FakeUpdate(uid=999)
+    await adm.cmd_addcategory(upd, FakeContext(args=["hanime", "HAnime"]))
+    check("wizard: step 1 prompt shown", "1/5" in upd.message.replies[-1])
+    for step_text in ["-1003998574377", "-1002047977518", "skip", "skip", "skip"]:
+        upd.message.text = step_text
+        await adm.wizard_message_handler(upd, FakeContext(bot=FakeBot()))
+    check("wizard: all 5 steps complete without crashing (TypeError fixed)",
+          any("created and LIVE" in r for r in upd.message.replies),
+          extra=f"last={upd.message.replies[-1][:120]!r}")
+    cat = await db.get_category("hanime")
+    check("wizard: category created with channels + defaults",
+          cat and cat["db_channel_id"] == -1003998574377
+          and cat["post_channel_id"] == -1002047977518
+          and cat["post_main_channel_id"] is None
+          and cat["post_tag"] is None and cat["post_time"] == "18:00")
+    upd = FakeUpdate(uid=999)
+    await adm.cmd_addcategory(upd, FakeContext(args=["jav"]))
+    check("/addcategory duplicate still blocked after fix", "already exists" in upd.message.replies[-1])
+    upd = FakeUpdate(uid=999)
+    await adm.cmd_editcategory(upd, FakeContext(args=["hanime"]))
+    check("wizard: edit mode starts", "Editing pipeline" in upd.message.replies[-1])
+    upd.message.text = "/cancel"
+    await adm.wizard_message_handler(upd, FakeContext(bot=FakeBot()))
+    check("wizard: cancel clears session", "cancelled" in upd.message.replies[-1].lower())
+    await db.delete_category("hanime", purge_data=True)
+    check("wizard: cleanup removed test pipeline", await db.get_category("hanime") is None)
+
+        # wizard parsers (addcategory step logic)
     ok1 = adm._p_db_channel("-100123")
     ok2 = adm._p_main_channel("skip")
     ok3 = adm._p_time("21:30")

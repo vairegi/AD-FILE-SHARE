@@ -284,3 +284,15 @@ distribute. Deploy it with media you hold the rights to.
 
 - **Fixed the "1 hour" bug**: /setautodelete now applies the timer GLOBALLY **and** to every existing pipeline. Previously a pipeline's own older auto_delete_minutes silently overrode the global value, so a 7-day setting still showed "1 hour".
 - **New /withfilemessages [time] <text>** (Bot 2, admin-only): sets your own post-delivery notice. An optional leading time (7day / 1hour / 30min / never) also sets the auto-delete timer for all files; `{N Duration}` inside the text is replaced with the real time left before deletion.
+
+## v2.7 — /addcategory wizard crash fix (2026-09-19)
+
+- **Root cause of the silent freeze at step 5/5**: the wizard seeded `data` with
+  `"key"` and `_wizard_finish` passed it again via `**data`, crashing with
+  `TypeError: create_category() got multiple values for argument 'key'`. Fixed —
+  both reserved keys are popped before the DB call.
+- The wizard can no longer die silently: finish/step errors are caught, logged,
+  and reported to the admin ("Nothing was saved — please retry"), and the
+  session is reset instead of leaving the bot unresponsive.
+- Step 4 prompt now explains what the "tag line" is (caption above each
+  main-channel forward; optional).
