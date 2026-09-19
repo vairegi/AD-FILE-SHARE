@@ -6,8 +6,8 @@ Responsibilities
   channel -> Posting channel -> optional Main channel, time, pause state).
 * /dripnow manual posting (per category).
 * Force-subscribe gate (global default, optional per-category override).
-* Shortener verification gate (per category: one verification unlocks that
-  category only, for verify_hours).
+* Shortener verification gate (STRICT PER-POST since v2.4: every Download tap
+  requires its own shortener solve — no global/per-category skip; admins bypass).
 * Issues short-lived single-use tokens deep-linking into Bot 2.
 * Live indexing of EVERY registered Database Channel + the full admin panel.
 """
@@ -242,15 +242,19 @@ async def process_file(bot, chat_id, user_id, file_id):
     if not await gate_ok(bot, user_id, category):
         await send_force_sub(bot, chat_id, file_id, category)
         return
+    # Admin bypass (v2.4): admins receive the file immediately, no shortener.
+    # Only the shortener step is skipped — force-sub (above) still applies.
+    if await is_admin(user_id):
+        await deliver_now(bot, chat_id, user_id, item)
+        return
     settings = await db.get_settings()
     if not settings.get("shortener_enabled"):
         await deliver_now(bot, chat_id, user_id, item)
         return
-    # Per-category verification: a valid pass for THIS category skips the
-    # shortener; otherwise (or for a different category) the gate is shown.
-    if category and await db.is_verified(user_id, category):
-        await deliver_now(bot, chat_id, user_id, item)
-        return
+    # STRICT per-post verification (v2.4): solving the shortener for one post
+    # NEVER grants access to another post (or to this same post again). Every
+    # Download tap shows the shortener gate; there is no global/per-category
+    # skip. Applies automatically to all current and future categories.
     await send_shortener_gate(bot, chat_id, user_id, item, settings)
 
 

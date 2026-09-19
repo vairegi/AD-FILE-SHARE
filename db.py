@@ -10,8 +10,10 @@ admin commands (zero redeploy) and stored in the `categories` collection.
 Collections
 -----------
 users         : { user_id, verified: {category_key: until}, verified_until
-                  (legacy/global), banned, strikes, auto_delete_override,
-                  joined_at }
+                  (legacy/global) — STATS ONLY since v2.4 (strict per-post
+                  verification: these timestamps feed /stats + /categories
+                  counts but NEVER grant file access), banned, strikes,
+                  auto_delete_override, joined_at }
 categories    : { key, label, enabled, db_channel_id, post_channel_id,
                   post_main_channel_id, post_tag, post_time (HH:MM, IST),
                   schedule_enabled, schedule_paused, queue_cursor,
@@ -318,6 +320,10 @@ async def mark_verified(user_id, category, hours=None):
 
 async def is_verified(user_id, category) -> bool:
     """True when the user holds an unexpired verification for this category.
+
+    STATS/DIAGNOSTICS ONLY (v2.4+): strict per-post verification means this
+    must NEVER be used to skip the shortener gate — doing so was the
+    'verified globally' bug. Kept for admin stats and future features.
 
     Legacy users verified before the upgrade carry a bare ``verified_until``;
     that is honoured for any category so nobody is forced to re-verify."""

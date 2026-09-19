@@ -288,7 +288,7 @@ async def main():
 
     shortener.shorten = fake_shorten
     fb.sent.clear()
-    await bot1.process_file(fb, 999, 999, "f21")
+    await bot1.process_file(fb, 998, 998, "f21")   # 998 = REGULAR user
     shortener.shorten = orig_shorten
     joined = str(fb.sent[-1])
     check("gate: shortener on -> vplink button", "vplink.in/AbCdEf" in joined)
@@ -297,8 +297,13 @@ async def main():
     vtok = captured["url"].split("verify_f21_")[1]
     vdoc = await db.get_token(vtok)
     check("gate: verify token stored, kind=verify, bound to user",
-          vdoc and vdoc["kind"] == "verify" and vdoc["user_id"] == 999
+          vdoc and vdoc["kind"] == "verify" and vdoc["user_id"] == 998
           and vdoc["file_id"] == "f21")
+    await db.upsert_item({"file_id": "jav_f99", "category": "jav",
+                          "db_message_id": 99, "cover_message_id": 99,
+                          "caption": "t",
+                          "videos": [{"db_message_id": 97, "caption": "HD"}],
+                          "srts": []})
 
     # force-sub blocks when not a member
     await db.update_settings({"force_sub_channel_id": -100111})
@@ -315,6 +320,39 @@ async def main():
     check("gate: pending join request passes",
           "Join Channel" not in str(fb3.sent[-1]))
 
+    # ── 5b. admin bypass + strict per-post verification (v2.4) ──
+    fb_adm = FakeBot()
+    await bot1.process_file(fb_adm, 999, 999, "f21")   # 999 = ADMIN
+    joined = str(fb_adm.sent[-1])
+    check("admin: bypasses shortener -> Get File link",
+          "deliver_f21_" in joined and "vplink" not in joined)
+    check("admin: bypass picks up no strikes",
+          not ((await db.get_user(999)) or {}).get("strikes"))
+
+    # regular user with a FRESH solve recorded STILL gets the gate (same post)
+    await db.mark_verified(4243, "jav", 6)
+    fb4 = FakeBot()
+    shortener.shorten = fake_shorten
+    await bot1.process_file(fb4, 4243, 4243, "f21")
+    shortener.shorten = orig_shorten
+    joined = str(fb4.sent[-1])
+    check("per-post: verified user re-tapping SAME post gets shortener again",
+          "vplink.in/AbCdEf" in joined or "verify_f21_" in joined)
+
+    # ... and a DIFFERENT post in the same category needs its own solve too
+    _src = await db.get_item_by_file_id("f21")
+    _new = dict(_src); _new.pop("_id", None); _new["file_id"] = "jav_f22"
+    await db.upsert_item(_new)
+    fb5 = FakeBot()
+    shortener.shorten = fake_shorten
+    await bot1.process_file(fb5, 4243, 4243, "jav_f22")
+    shortener.shorten = orig_shorten
+    joined = str(fb5.sent[-1])
+    check("per-post: verified user on ANOTHER post gets shortener gate",
+          "vplink.in/AbCdEf" in joined or "verify_jav_f22_" in joined)
+    check("stats: count_verified still records solves",
+          await db.count_verified("jav") >= 1)
+
     # ── 6. verify return flow ─────────────────────────────────
     fb.sent.clear()
     await bot1.process_verify(fb, 999, 999, "f21", "deadbeef")
@@ -327,33 +365,39 @@ async def main():
 
     fb.sent.clear()
     await db.update_settings({"force_sub_channel_id": None})
+    vtok = await db.create_token(998, "jav_f99", 600, kind="verify")
     await db._db.tokens.update_one({"token": vtok},
-                                   {"$set": {"created_at": db.now() - 200}})
-    await bot1.process_verify(fb, 999, 999, "f21", vtok)
+            {"$set": {"created_at": db.now() - (bot1.BYPASS_MIN_SECONDS + 120)}})
+    await bot1.process_verify(fb, 998, 998, "jav_f99", vtok)
     joined = str(fb.sent[-1])
-    check("verify: success -> deliver link issued", "deliver_f21_" in joined)
+    check("verify: success -> deliver link issued", "deliver_jav_f99_" in joined,
+          extra="got=" + str(fb.sent[-3:])[:400])
     check("verify: token burned after success", (await db.get_token(vtok))["used"] is True)
+    _u998 = await db.get_user(998)
     check("verify: user marked verified",
-          (await db.get_user(999))["verified_until"] > db.now())
-    dtok = joined.split("deliver_f21_")[1].split("'")[0].split('"')[0]
+          (_u998.get("verified_until") or 0) > db.now()
+          or any(v > db.now() for v in (_u998.get("verified") or {}).values()))
+    dtok = joined.split("deliver_jav_f99_")[1].split("'")[0].split('"')[0]
     ddoc = await db.get_token(dtok)
     check("verify: deliver token bound to same user+file",
-          ddoc and ddoc["user_id"] == 999 and ddoc["file_id"] == "f21"
+          ddoc and ddoc["user_id"] == 998 and ddoc["file_id"] == "jav_f99"
           and ddoc["kind"] == "deliver")
 
     # ── 7. Bot 2 delivery flow ────────────────────────────────
     fb.sent.clear()
-    await bot2.process_delivery(fb, 999, 999, "f21", "badtoken")
+    await bot2.process_delivery(fb, 998, 998, "jav_f99", "badtoken")
     check("deliver: bad token rejected", "tap Download again" in fb.sent[-1][1])
 
-    await bot2.process_delivery(fb, 555, 555, "f21", dtok)
+    await bot2.process_delivery(fb, 555, 555, "jav_f99", dtok)
     check("deliver: wrong user rejected", "not issued for you" in fb.sent[-1][1])
     check("deliver: token intact on wrong user",
           (await db.get_token(dtok))["used"] is False)
 
     fb.sent.clear(); fb.copied.clear()
-    await db.update_settings({"db_channel_id": -100999, "auto_delete_minutes": 30})
-    await bot2.process_delivery(fb, 999, 999, "f21", dtok)
+    await db.update_category("jav", {"db_channel_id": -100999})
+    await db.update_settings({"db_channel_id": -100999,
+                              "auto_delete_minutes": 30})
+    await bot2.process_delivery(fb, 998, 998, "jav_f99", dtok)
     check("deliver: copy_message used (server-side)", len(fb.copied) == 1
           and fb.copied[0][1] == -100999)
     check("deliver: token burned", (await db.get_token(dtok))["used"] is True)

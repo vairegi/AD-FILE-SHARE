@@ -274,3 +274,8 @@ Durations accept `30min`, `2hour`, `12hour`, `1day`, `7day`, `never`
 
 This system is intended **only** for content the operator owns or is licensed to
 distribute. Deploy it with media you hold the rights to.
+
+## v2.4 — Strict per-post verification + admin shortener bypass (2026-09-19)
+
+- **Strict per-post verification**: the shortener gate is shown on EVERY Download tap. Solving the link for one post never unlocks another post — or the same post again. `users.verified` / `verified_until` are now STATS ONLY (they feed `/stats` + `/categories` counts) and never skip the gate. Applies automatically to all current AND future categories/channels.
+- **Admin bypass**: admins (env `ADMIN_IDS` + `/addadmin`) receive the file instantly without the shortener. Force-sub still applies to admins.
