@@ -124,6 +124,14 @@ async def connect():
     await _db.files.create_index("file_id", unique=True, sparse=True)
     await _db.files.create_index([("category", 1), ("posted", 1)])
     await _db.tokens.create_index("token", unique=True)
+    # Drop the legacy single-field unique index on raw.message_id — it collides
+    # across categories (every pipeline's DB channel restarts message_id at 1),
+    # which crashed the scan with DuplicateKeyError. The compound (category,
+    # message_id) index below is the correct unique key.
+    try:
+        await _db.raw.drop_index("message_id_1")
+    except Exception:
+        pass  # index already absent
     await _db.raw.create_index([("category", 1), ("message_id", 1)], unique=True)
     await _db.categories.create_index("key", unique=True)
     await _db.categories.create_index("db_channel_id")

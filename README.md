@@ -296,3 +296,8 @@ distribute. Deploy it with media you hold the rights to.
   session is reset instead of leaving the bot unresponsive.
 - Step 4 prompt now explains what the "tag line" is (caption above each
   main-channel forward; optional).
+
+## v2.8 — /addcategory "Scan now" fix (2026-09-19)
+
+- **DuplicateKeyError on scan**: the `raw` collection had a legacy unique index on `message_id` alone; a second pipeline's scan crashed because every DB channel restarts message_id at 1. db.connect() now drops the stale index at startup; the compound (category, message_id) unique index is the correct key.
+- **AttributeError 'NoneType' reply_text**: "Scan now" is a button callback (update.message is None) — the scan error handler crashed while reporting the failure. _run_scan now replies via context.bot.send_message and works from commands and callbacks alike.

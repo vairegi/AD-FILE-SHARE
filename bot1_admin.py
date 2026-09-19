@@ -1103,17 +1103,26 @@ async def cmd_queue_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── scanning (userbot) ────────────────────────────────────────
 async def _run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id, category=None):
-    async def progress(n):
+    """Run the userbot scan. Works from BOTH a command (update.message set) and
+    a button callback (update.message is None) — always reply somewhere."""
+    chat = getattr(update, "effective_chat", None)
+    chat_id = chat.id if chat else update.effective_user.id
+
+    async def _say(text):
         try:
-            await update.message.reply_text(f"…scanned {n} messages")
+            await context.bot.send_message(chat_id, text, parse_mode="HTML")
         except Exception:
             pass
+
+    async def progress(n):
+        await _say(f"…scanned {n} messages")
     try:
         result = await scanner.scan_channel(channel_id, category=category, progress=progress)
     except Exception as exc:
-        await update.message.reply_text(f"❌ Scan failed: {exc}")
+        log.exception("scan failed for category %s", category)
+        await _say(f"❌ Scan failed: {exc}")
         return
-    await update.message.reply_text(
+    await _say(
         f"✅ [{category or 'legacy'}] Scan complete. Messages indexed: {result['scanned']} · "
         f"Items in queue: {result['items']}")
 

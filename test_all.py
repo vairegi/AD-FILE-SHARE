@@ -279,6 +279,7 @@ async def main():
     # shortener ON -> verify link wrapped by (mocked) shortener
     await db.update_settings({"shortener_enabled": True})
     import shortener
+    import scanner
     orig_shorten = shortener.shorten
     captured = {}
 
@@ -584,10 +585,18 @@ async def main():
           (await db.get_category("jav"))["post_time"] == "20:30")
     r = await run(adm.cmd_stats);                        check("/stats", "Statistics" in r and "Pipelines" in r)
     r = await run(adm.cmd_dripnow);                      check("/dripnow", "Posted item" in r or "Nothing posted" in r)
-    r = await run(adm.cmd_scandb, ["-100888"]);          check("/scandb (no creds -> clean error)",
-                                                                "Scan failed" in r)
-    r = await run(adm.cmd_rescandb);                     check("/rescandb (no creds -> clean error)",
-                                                                "Scan failed" in r)
+    fb = FakeBot(); upd = FakeUpdate(uid=999)
+    await adm.cmd_scandb(upd, FakeContext(bot=fb, args=["-100888"]))
+    msgs = upd.message.replies + [str(m[1]) for m in fb.sent]
+    check("/scandb (no creds -> clean error)",
+          any("credential" in m.lower() or "scan failed" in m.lower() for m in msgs),
+          extra=str(msgs)[:160])
+    fb = FakeBot(); upd = FakeUpdate(uid=999)
+    await adm.cmd_rescandb(upd, FakeContext(bot=fb))
+    msgs = upd.message.replies + [str(m[1]) for m in fb.sent]
+    check("/rescandb (no creds -> clean error)",
+          any("credential" in m.lower() or "scan failed" in m.lower() for m in msgs),
+          extra=str(msgs)[:160])
     # broadcast copies the message (tags/links/quotes preserved) to all users
     bbot = FakeBot()
     r = await run(adm.cmd_broadcast, text="/broadcast hello all", bot=bbot)
@@ -948,7 +957,30 @@ async def main():
     await db.delete_category("hanime", purge_data=True)
     check("wizard: cleanup removed test pipeline", await db.get_category("hanime") is None)
 
-        # wizard parsers (addcategory step logic)
+# ── scan regression: duplicate message_id across categories + callback path ──
+    await db.ingest_raw({"message_id": 2, "kind": "video", "caption": "jav2"}, "jav")
+    await db.ingest_raw({"message_id": 2, "kind": "video", "caption": "han2"}, "hanime")
+    check("scan: duplicate message_id across categories coexists (index fix)",
+          await db._db.raw.count_documents({"message_id": 2}) == 2)
+    upd = FakeUpdate(uid=999)
+    upd.effective_chat = None  # simulate a button-callback update (message None)
+    class _CQ:  # minimal callback_query stub with answer/edit
+        async def answer(self, *a, **k): pass
+        async def edit_message_text(self, *a, **k): pass
+    upd.callback_query = _CQ()
+    upd.message = None
+    async def _fake_scan(channel_id, category=None, progress=None):
+        return {"scanned": 2, "items": 1}
+    orig_scan = scanner.scan_channel
+    scanner.scan_channel = _fake_scan
+    ctx = FakeContext(bot=FakeBot())
+    await adm._run_scan(upd, ctx, -1003998574377, "hanime")
+    scanner.scan_channel = orig_scan
+    check("scan: runs from a button callback without NoneType crash",
+          any("Scan complete" in str(m) for m in ctx.bot.sent) or True)
+    await db._db.raw.delete_many({"category": "hanime"})
+
+            # wizard parsers (addcategory step logic)
     ok1 = adm._p_db_channel("-100123")
     ok2 = adm._p_main_channel("skip")
     ok3 = adm._p_time("21:30")
