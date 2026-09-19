@@ -8,6 +8,7 @@
 * Queues the delivered messages for auto-deletion (restart-safe queue).
 """
 import logging
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -27,7 +28,8 @@ WELCOME = (
     "👋 This bot delivers your files.\n\n"
     "Use the *Get File* button from the main bot to receive a file here.\n\n"
     "Configure how long files stay in this chat with:\n"
-    "/setautodelete 5min · 2hour · 12hour · 7day · never"
+    "/setautodelete 5min · 2hour · 12hour · 7day · never\n"
+    "/withfilemessages [time] <text> — set your own deletion notice"
 )
 
 
@@ -88,6 +90,92 @@ async def _db_channel_for(item):
     return (await db.get_settings()).get("db_channel_id")
 
 
+# ── custom with-file notice (/withfilemessages) ───────────────
+# {N Duration} (and a few aliases) is replaced with the real time left before
+# the delivered file is auto-deleted.
+_DURATION_TOKEN_RE = re.compile(
+    r"\{\s*n?[ _-]?duration\s*\}|\{\s*time\s*\}|\{\s*delete[ _-]?time\s*\}",
+    re.IGNORECASE)
+
+
+def render_withfile_message(template, minutes):
+    """Substitute the {N Duration} placeholder with the real deletion time."""
+    try:
+        m = int(minutes or 0)
+    except (TypeError, ValueError):
+        m = 0
+    dur = human_duration(m * 60) if m > 0 else "never (kept forever)"
+    return _DURATION_TOKEN_RE.sub(dur, template or "")
+
+
+async def _apply_autodelete_all(minutes):
+    """Set the auto-delete timer globally AND on every pipeline, so the
+    'all delivered files' promise of /setautodelete is actually true even
+    when a pipeline carries its own (older) timer."""
+    minutes = int(minutes)
+    await db.update_settings({"auto_delete_minutes": minutes})
+    for c in await db.list_categories():
+        await db.update_category(c["key"], {"auto_delete_minutes": minutes})
+
+
+async def _withfile_template(category=None):
+    """Custom post-delivery notice; a per-pipeline value wins over the global."""
+    if category:
+        cat = await db.get_category(category)
+        if cat and cat.get("with_file_message"):
+            return cat["with_file_message"]
+    return (await db.get_settings()).get("with_file_message")
+
+
+async def withfilemessages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: set the custom text posted after a file is delivered.
+
+    Usage: /withfilemessages [time] <text>
+      * an optional leading time (7day · 1hour · 30min · never) also sets the
+        global auto-delete timer (all pipelines);
+      * {N Duration} anywhere in <text> is replaced with the real time left
+        before the file is deleted.
+    """
+    from utils import is_admin
+    if not await is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "⛔ This command can be used only by admins.")
+        return
+    args = list(context.args or [])
+    if not args:
+        cur = await _withfile_template()
+        minutes = await _autodelete_minutes(None)
+        sample = (render_withfile_message(cur, minutes) if cur
+                  else f"⏳ This file will be auto-deleted in {human_duration(minutes * 60)}.")
+        await update.message.reply_text(
+            "Usage: /withfilemessages [time] <text>\n"
+            "• optional leading time (7day · 1hour · 30min) also sets the "
+            "global auto-delete timer\n"
+            "• {N Duration} in your text is replaced with the real delete time\n\n"
+            "Examples:\n"
+            "  /withfilemessages 7day ⏳ This file is removed in {N Duration}.\n"
+            "  /withfilemessages Grab it before {N Duration} — then it is gone!\n\n"
+            f"Current message:\n{sample}")
+        return
+    seconds = parse_duration(args[0])
+    if seconds is not None:
+        args = args[1:]
+        await _apply_autodelete_all(seconds // 60)
+    text = " ".join(args).strip()
+    if not text:
+        await update.message.reply_text(
+            "Please include the message text.\n"
+            "Usage: /withfilemessages [time] <text>")
+        return
+    await db.update_settings({"with_file_message": text})
+    minutes = seconds // 60 if seconds is not None else await _autodelete_minutes(None)
+    preview = render_withfile_message(text, minutes)
+    prefix = (f"Auto-delete timer set to {human_duration(seconds)} for all files.\n"
+              if seconds is not None else "")
+    await update.message.reply_text(
+        f"✅ {prefix}Your with-file message is saved.\n\nPreview:\n{preview}")
+
+
 # ── delivery ──────────────────────────────────────────────────
 async def send_item(bot, chat_id, item, index):
     db_channel = await _db_channel_for(item)
@@ -130,9 +218,13 @@ async def send_item(bot, chat_id, item, index):
     minutes = await _autodelete_minutes(chat_id, item.get("category"))
     if minutes and minutes > 0:
         await db.add_deletion(chat_id, [m for m in delivered if m], db.now() + minutes * 60)
-        note = f"⏳ This file will be auto-deleted in {human_duration(minutes * 60)}."
+        default_note = f"⏳ This file will be auto-deleted in {human_duration(minutes * 60)}."
     else:
-        note = "📌 This file will stay in the chat."
+        default_note = "📌 This file will stay in the chat."
+    # An admin-set custom notice (/withfilemessages) overrides the default,
+    # with its {N Duration} placeholder filled in.
+    template = await _withfile_template(item.get("category"))
+    note = render_withfile_message(template, minutes) if template else default_note
     await bot.send_message(chat_id, note)
 
 
@@ -226,7 +318,9 @@ async def setautodelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if seconds is None:
         await update.message.reply_text("Could not parse that duration. Try 5min / 2hour / never.")
         return
-    await db.update_settings({"auto_delete_minutes": seconds // 60})
+    # Reaches EVERY pipeline so "all delivered files" is actually true,
+    # even when a pipeline carried its own older timer (the 1-hour bug).
+    await _apply_autodelete_all(seconds // 60)
     await update.message.reply_text(
         f"✅ All delivered files will now be auto-deleted after {human_duration(seconds)}."
     )
@@ -261,5 +355,6 @@ def build_bot2() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("setautodelete", setautodelete))
+    app.add_handler(CommandHandler("withfilemessages", withfilemessages))
     app.add_handler(CallbackQueryHandler(on_download, pattern=r"^dl:"))
     return app

@@ -279,3 +279,8 @@ distribute. Deploy it with media you hold the rights to.
 
 - **Strict per-post verification**: the shortener gate is shown on EVERY Download tap. Solving the link for one post never unlocks another post — or the same post again. `users.verified` / `verified_until` are now STATS ONLY (they feed `/stats` + `/categories` counts) and never skip the gate. Applies automatically to all current AND future categories/channels.
 - **Admin bypass**: admins (env `ADMIN_IDS` + `/addadmin`) receive the file instantly without the shortener. Force-sub still applies to admins.
+
+## v2.5 — Auto-delete reaches every pipeline + /withfilemessages (2026-09-19)
+
+- **Fixed the "1 hour" bug**: /setautodelete now applies the timer GLOBALLY **and** to every existing pipeline. Previously a pipeline's own older auto_delete_minutes silently overrode the global value, so a 7-day setting still showed "1 hour".
+- **New /withfilemessages [time] <text>** (Bot 2, admin-only): sets your own post-delivery notice. An optional leading time (7day / 1hour / 30min / never) also sets the auto-delete timer for all files; `{N Duration}` inside the text is replaced with the real time left before deletion.

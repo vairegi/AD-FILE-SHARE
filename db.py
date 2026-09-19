@@ -74,6 +74,7 @@ DEFAULT_SETTINGS = {
     "schedule_paused": False,
     "queue_cursor": None,
     "protect_content": False,
+    "with_file_message": None,   # custom post-delivery notice (/withfilemessages)
 }
 
 # Fields a category document always carries (defaults for /addcategory).
@@ -90,12 +91,13 @@ DEFAULT_CATEGORY = {
     "force_sub_channel_id": None,         # None -> use the global default
     "protect_content": False,
     "auto_delete_minutes": 15,
+    "with_file_message": None,   # per-pipeline override of the delivery notice
 }
 
 CATEGORY_EDITABLE = {
     "db_channel_id", "post_channel_id", "post_main_channel_id", "post_tag",
     "post_time", "force_sub_channel_id", "protect_content",
-    "auto_delete_minutes", "label", "enabled",
+    "auto_delete_minutes", "with_file_message", "label", "enabled",
 }
 
 

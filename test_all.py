@@ -454,6 +454,58 @@ async def main():
     check("sweeper deletes due messages", set(fb.deleted) == {(999, 111), (999, 222)})
     check("sweeper clears queue", len(await db.due_deletions()) == 0)
 
+    # ── 7b. auto-delete reaches EVERY pipeline + /withfilemessages ──
+    await db.update_settings({"with_file_message": None, "auto_delete_minutes": 15})
+    await db.update_category("jav", {"auto_delete_minutes": 15})
+    upd = FakeUpdate(uid=999)
+    await bot2.setautodelete(upd, FakeContext(args=["7day"]))
+    check("/setautodelete 7day -> global timer",
+          (await db.get_settings())["auto_delete_minutes"] == 10080)
+    check("/setautodelete 7day -> EVERY pipeline updated (1-hour bug fix)",
+          (await db.get_category("jav"))["auto_delete_minutes"] == 10080)
+
+    upd = FakeUpdate(uid=12345)
+    await bot2.withfilemessages(upd, FakeContext(args=["7day", "hi", "{N", "Duration}"]))
+    check("/withfilemessages blocks non-admins",
+          "only by admins" in upd.message.replies[-1])
+
+    upd = FakeUpdate(uid=999)
+    await bot2.withfilemessages(
+        upd, FakeContext(args=["File", "vanishes", "in", "{N", "Duration}", "—", "hurry!"]))
+    check("/withfilemessages (no time) keeps the timer + stores template",
+          (await db.get_settings())["with_file_message"]
+          == "File vanishes in {N Duration} — hurry!")
+    check("  -> preview fills the placeholder with the real time",
+          "File vanishes in 7 days — hurry!" in upd.message.replies[-1])
+
+    upd = FakeUpdate(uid=999)
+    await bot2.withfilemessages(
+        upd, FakeContext(args=["1hour", "Gone", "in", "{duration}.", "Save", "it!"]))
+    check("/withfilemessages (leading time) sets BOTH timer + text",
+          (await db.get_settings())["auto_delete_minutes"] == 60
+          and (await db.get_category("jav"))["auto_delete_minutes"] == 60)
+
+    check("render: {N Duration} alias", bot2.render_withfile_message("{N Duration}", 60) == "1 hour")
+    check("render: {duration} alias", bot2.render_withfile_message("gone in {duration}", 10080) == "gone in 7 days")
+    check("render: {time} alias + never at 0", bot2.render_withfile_message("{time}", 0) == "never (kept forever)")
+
+    await db.update_settings({"with_file_message": "Delivered! {N Duration} left."})
+    await db.update_category("jav", {"auto_delete_minutes": 60})
+    ftok = await db.create_token(998, "jav_f99", 10, kind="deliver")
+    fb.sent.clear(); fb.copied.clear()
+    await bot2.process_delivery(fb, 998, 998, "jav_f99", ftok)
+    check("deliver: custom with-file notice used (time substituted)",
+          bool(fb.sent) and fb.sent[-1][1] == "Delivered! 1 hour left.",
+          extra=f"got={fb.sent[-1][1] if fb.sent else None!r}")
+
+    await db.update_settings({"with_file_message": None})
+    ftok2 = await db.create_token(998, "jav_f99", 10, kind="deliver")
+    fb.sent.clear(); fb.copied.clear()
+    await bot2.process_delivery(fb, 998, 998, "jav_f99", ftok2)
+    check("deliver: default notice when no custom message",
+          "auto-deleted" in fb.sent[-1][1])
+    await db.update_settings({"auto_delete_minutes": 30})
+
     # ── 8. admin commands (every one) ─────────────────────────
     import bot1_admin as adm
 
