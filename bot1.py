@@ -525,7 +525,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if payload.startswith("verify_"):
             rest = payload[len("verify_"):]
-            file_id, _, token = rest.partition("_")
+            # rpartition: file_id may itself contain '_' (category-prefixed ids
+            # like "jav_f30"); the token is always the final '_' segment.
+            file_id, _, token = rest.rpartition("_")
             await process_verify(context.bot, user.id, user.id, file_id, token,
                                  getattr(user, "username", None))
             return

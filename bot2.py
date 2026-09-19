@@ -189,7 +189,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if args and args[0].startswith("deliver_"):
         rest = args[0][len("deliver_"):]
-        file_id, _, token = rest.partition("_")
+        # rpartition: file_id may itself contain '_' (category-prefixed ids);
+        # the token is always the final '_' segment.
+        file_id, _, token = rest.rpartition("_")
         await process_delivery(context.bot, user.id, user.id, file_id, token)
         return
 
