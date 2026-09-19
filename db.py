@@ -445,14 +445,28 @@ async def mark_posted(db_message_id, post_message_id=None, category=None):
 
 
 async def get_item_by_file_id(file_id):
-    """Look up by the (category-prefixed) file_id, with legacy fallback.
+    """Look up by file_id, tolerating BOTH id styles in either direction.
 
-    New ids look like "jav_f123"; pre-upgrade ids are bare "f123". A bare id
-    is retried against legacy documents so old channel buttons never break."""
-    item = await _db.files.find_one({"file_id": file_id})
+    Items are stored with category-prefixed ids ("jav_f123"). Buttons posted
+    before the upgrade carry legacy bare ids ("f123"). Resolve by trying, in
+    order: as-is -> add each known category prefix -> strip a category prefix.
+    Every old and new button keeps working against migrated data."""
+    s = str(file_id or "").strip()
+    if not s:
+        return None
+    # 1. exact match (new-style ids, or legacy ids on legacy docs)
+    item = await _db.files.find_one({"file_id": s})
     if item:
         return item
-    s = str(file_id or "")
+    # 2. legacy bare id -> try each category prefix (f123 -> jav_f123)
+    if s.startswith("f") and "_f" not in s and s[1:].isdigit():
+        suffix = s[1:]
+        async for cat in _db.categories.find({}, {"key": 1}):
+            item = await _db.files.find_one(
+                {"file_id": f"{cat['key']}_f{suffix}"})
+            if item:
+                return item
+    # 3. prefixed id -> strip to legacy (jav_f123 -> f123)
     if not s.startswith("f") and "_f" in s:
         legacy = "f" + s.rsplit("_f", 1)[-1]
         return await _db.files.find_one({"file_id": legacy})

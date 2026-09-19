@@ -93,6 +93,7 @@ HELP_ADMIN = (
     "/addcategory &lt;key&gt; &lt;label&gt; — guided setup wizard\n"
     "/categories — dashboard of every pipeline\n"
     "/editcategory &lt;key&gt; — edit a pipeline\n"
+    "/renamecategory &lt;key&gt; &lt;label&gt; — rename display name (links keep working)\n"
     "/delcategory &lt;key&gt; — remove a pipeline\n"
     "/use &lt;key&gt; — set the active pipeline\n"
     "\n<b>▸ Posting &amp; queue</b> (scoped to the active pipeline, or append a key)\n"

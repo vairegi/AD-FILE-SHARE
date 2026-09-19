@@ -1066,6 +1066,31 @@ async def cmd_scandb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _run_scan(update, context, cid, key)
 
 
+@admin_only
+async def cmd_renamecategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/renamecategory <key> <new label> — cosmetic rename only.
+
+    The category KEY (used in file ids and Download links) never changes, so
+    renaming the display label never breaks existing posts."""
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /renamecategory <key> <new label>\n"
+            "Only the display name changes — existing links keep working.")
+        return
+    key = args[0].lower()
+    label = " ".join(args[1:]).strip()
+    cat = await db.get_category(key)
+    if not cat:
+        await update.message.reply_text(f"❌ No pipeline named '{key}'.")
+        return
+    await db.update_category(key, {"label": label})
+    await update.message.reply_text(
+        f"✅ Pipeline '{key}' renamed to <b>{_h(label)}</b>.\n"
+        "Existing Download buttons keep working (the link key is unchanged).",
+        parse_mode="HTML")
+
+
 # Command name -> handler, registered by bot1.build_bot1()
 COMMANDS = {
     "shortener": cmd_shortener,
@@ -1105,4 +1130,5 @@ COMMANDS = {
     "delcategory": cmd_delcategory,
     "categories": cmd_categories,
     "use": cmd_use,
+    "renamecategory": cmd_renamecategory,
 }
