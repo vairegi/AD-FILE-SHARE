@@ -413,19 +413,22 @@ async def main():
                                      {"db_message_id": 52, "caption": "HD"}],
                           "srts": [{"db_message_id": 53, "caption": "subs"}]})
     mtok = await db.create_token(999, "fmulti", 10, kind="deliver")
-    fb.sent.clear()
+    fb.sent.clear(); fb.copied.clear()
     await bot2.process_delivery(fb, 999, 999, "fmulti", mtok)
-    joined = str(fb.sent[-1])
-    check("deliver: multi-version shows chooser",
-          "dl:fmulti:0:999" in joined and "dl:fmulti:1:999" in joined)
+    joined = str(fb.sent[-1]) if fb.sent else ""
+    check("deliver: multi-version delivers ALL versions (no chooser)",
+          not any("Choose which version" in str(m[1]) for m in fb.sent)
+          and [c[2] for c in fb.copied[:3]] == [51, 53, 52],
+          extra=str(fb.copied))
 
     # chooser callback delivers chosen version + srt
     fb.copied.clear(); fb.sent.clear()
-    q = FakeQuery(999, "dl:fmulti:1:999")
+    q = FakeQuery(999, "dl:fmulti:0:999")  # legacy button -> index 0 gets the srt
     upd = FakeUpdate(999); upd.callback_query = q
+    fb.copied.clear()
     await bot2.on_download(upd, FakeContext(bot=fb))
-    check("chooser: HD copied", fb.copied and fb.copied[0][2] == 52)
-    check("chooser: srt copied too", len(fb.copied) == 2 and fb.copied[1][2] == 53)
+    check("legacy chooser: version copied", fb.copied and fb.copied[0][2] == 51)
+    check("legacy chooser: srt copied too", len(fb.copied) == 2 and fb.copied[1][2] == 53)
 
     q2 = FakeQuery(555, "dl:fmulti:0:999")  # other user taps
     upd2 = FakeUpdate(555); upd2.callback_query = q2

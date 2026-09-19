@@ -177,7 +177,10 @@ async def withfilemessages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── delivery ──────────────────────────────────────────────────
-async def send_item(bot, chat_id, item, index):
+async def send_item(bot, chat_id, item, index, note=True):
+    """Deliver one version (video at `index`) + (for the first version) the
+    subtitle files. `note=False` skips the trailing auto-delete notice so a
+    multi-version delivery posts it only once, after the last file."""
     db_channel = await _db_channel_for(item)
     if not db_channel:
         await bot.send_message(chat_id, "❌ Delivery channel is not configured.")
@@ -203,8 +206,8 @@ async def send_item(bot, chat_id, item, index):
 
     delivered = [getattr(sent, "message_id", None)]
 
-    # Attach the subtitle file(s) if the item has any.
-    for srt in item.get("srts") or []:
+    # Attach the subtitle file(s) once, with the FIRST delivered version.
+    for srt in (item.get("srts") or []) if index == 0 else []:
         try:
             sent_srt = await bot.copy_message(
                 chat_id=chat_id, from_chat_id=db_channel,
@@ -215,6 +218,14 @@ async def send_item(bot, chat_id, item, index):
         except Exception as exc:
             log.warning("srt copy failed: %s", exc)
 
+    if not note:
+        # Queue deletion for this file even mid-batch (restart-safe), but the
+        # visible notice is posted only by the final call of the batch.
+        minutes = await _autodelete_minutes(chat_id, item.get("category"))
+        if minutes and minutes > 0:
+            await db.add_deletion(chat_id, [m for m in delivered if m],
+                                  db.now() + minutes * 60)
+        return
     minutes = await _autodelete_minutes(chat_id, item.get("category"))
     if minutes and minutes > 0:
         await db.add_deletion(chat_id, [m for m in delivered if m], db.now() + minutes * 60)
@@ -254,19 +265,11 @@ async def process_delivery(bot, chat_id, user_id, file_id, token):
 
     await db.mark_token_used(token)
 
+    # Deliver EVERY version straight away — no chooser question. Subtitles go
+    # with the first file; the auto-delete notice posts once, after the last.
     videos = item["videos"]
-    if len(videos) > 1:
-        rows = []
-        for i, v in enumerate(videos):
-            label = (v.get("caption") or f"Version {i + 1}").strip()[:40] or f"Version {i + 1}"
-            rows.append([InlineKeyboardButton(label, callback_data=f"dl:{file_id}:{i}:{user_id}")])
-        await bot.send_message(
-            chat_id, "🎬 Choose which version you want:",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
-        return
-
-    await send_item(bot, chat_id, item, 0)
+    for i in range(len(videos)):
+        await send_item(bot, chat_id, item, i, note=(i == len(videos) - 1))
 
 
 # ── handlers ──────────────────────────────────────────────────
