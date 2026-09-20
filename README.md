@@ -407,3 +407,22 @@ channels with their invite links), `/forcesubremove <channel_id|category|global>
 `/banmessage <text>` (or reply to a message, or `reset`), `/banlist` — each
 entry formatted `1 - @username Elapsed: 46.7s \`/unban 8416709177\`` with the
 command in inline code for one-tap copy.
+
+---
+
+## v3.6 (2026-09-20) — hotfix: custom ban message at ban moment + forcesub link backfill
+
+**Fix 1 — `/banmessage` now applies at the ban moment.** The anti-bypass
+instant-ban in bot1.py sent a hardcoded message; it now uses the custom
+`ban_message` (falling back to the default). The custom text is used in ALL
+ban spots: instant-ban, /start in both bots, Bot 2 delivery + buttons.
+
+**Fix 2 — `/forcesublist` backfills join-request links.** Channels set
+before v3.5 had no stored invite link, so the dashboard showed "(no
+join-request link stored)". The dashboard now creates the join-request link
+on the fly (create_chat_invite_link, creates_join_request=True), stores it,
+and displays it — run /forcesublist once after deploying and every channel
+gets its link. The gate button picks it up automatically.
+
+**Cosmetic:** /forcesublist and /forcesubremove moved from "General" to the
+"Access & content" section of the /admin help list.

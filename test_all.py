@@ -679,6 +679,39 @@ async def main():
     check("/banlist exact format with tap-to-copy /unban",
           "1 - @Noob7 Elapsed: 46.7s `/unban 8416709177`" in r)
     await db.set_banned(8416709177, False)
+
+    # ── v3.6: instant-ban uses the CUSTOM ban message ──
+    await db.upsert_item({"file_id": "f180", "db_message_id": 180,
+                          "cover_message_id": 180, "caption": "v36 item",
+                          "videos": [{"db_message_id": 181, "caption": ""}],
+                          "srts": []})
+    await db.update_settings({"ban_message": "CUSTOM BAN TEXT v36"})
+    fbx = FakeBot()
+    tk = await db.create_token(606060, "f180", 60, kind="verify")
+    await bot1.process_verify(fbx, 606060, 606060, "f180", tk, "Bypasser")
+    check("instant-ban sends CUSTOM ban message (not hardcoded)",
+          any("CUSTOM BAN TEXT v36" in txt for _, txt, _ in fbx.sent))
+    check("  -> hardcoded default NOT sent",
+          not any("You have been banned for bypassing" in txt for _, txt, _ in fbx.sent))
+    await db.update_settings({"ban_message": None})
+    await db.set_banned(606060, False)
+
+    # ── v3.6: /forcesublist backfills missing join-request links ──
+    class _Inv:
+        invite_link = "https://t.me/+BackfillLink123"
+    class _LinkBot(FakeBot):
+        async def create_chat_invite_link(self, chat_id, creates_join_request=False):
+            return _Inv()
+    await db.update_settings({"force_sub_channel_ids": [-100888],
+                              "force_sub_links": {}})   # pre-v3.5 state: no link stored
+    upd3 = FakeUpdate(uid=999)
+    await adm.cmd_forcesublist(upd3, FakeContext(args=[], bot=_LinkBot()))
+    check("/forcesublist backfills missing join-request link",
+          "https://t.me/+BackfillLink123" in upd3.message.replies[-1])
+    check("  -> link persisted for the gate button",
+          (await db.get_settings()).get("force_sub_links", {}).get("-100888")
+          == "https://t.me/+BackfillLink123")
+    await db.clear_force_sub(None)
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)
     check("  -> stored as minutes (per category)",
           (await db.get_category("jav"))["auto_delete_minutes"] == 10080)

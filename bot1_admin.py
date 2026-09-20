@@ -785,21 +785,40 @@ async def cmd_forcesublist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/forcesublist — dashboard of every force-sub channel (global + per-category)."""
     s = await db.get_settings()
     lines = ["📢 Force-Sub configuration\n"]
+
+    async def _ensure_link(cid, cat_key, stored):
+        """Stored join-request link, or create+save one on the fly (v3.6 —
+        so channels added before v3.5 get their link backfilled here)."""
+        if stored:
+            return stored
+        try:
+            inv = await context.bot.create_chat_invite_link(
+                int(cid), creates_join_request=True)
+            link = getattr(inv, "invite_link", None)
+            if link:
+                await db.set_force_sub_link(cid, link, cat_key)
+                return link
+        except Exception as exc:
+            return f"(could not create: {exc})"
+        return "(could not create)"
+
     gids = await db.force_sub_channels(None)
     if gids:
         for cid in gids:
-            link = (s.get("force_sub_links") or {}).get(str(cid))
+            link = await _ensure_link(cid, None,
+                                      (s.get("force_sub_links") or {}).get(str(cid)))
             lines.append(f"🌐 Global: {cid}")
-            lines.append(f"   Invite: {link or '(no join-request link stored)'}")
+            lines.append(f"   Invite: {link}")
     else:
         lines.append("🌐 Global: none")
     for cat in await db.list_categories():
         cids = cat.get("force_sub_channel_ids") or (
             [cat["force_sub_channel_id"]] if cat.get("force_sub_channel_id") else [])
         for cid in cids:
-            link = (cat.get("force_sub_links") or {}).get(str(cid))
+            link = await _ensure_link(cid, cat["key"],
+                                      (cat.get("force_sub_links") or {}).get(str(cid)))
             lines.append(f"📁 [{cat['key']}]: {cid}")
-            lines.append(f"   Invite: {link or '(no join-request link stored)'}")
+            lines.append(f"   Invite: {link}")
     lines.append("\nRemove: /forcesubremove <channel_id> · /forcesubremove <category>")
     await update.message.reply_text("\n".join(lines))
 

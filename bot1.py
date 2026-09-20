@@ -107,6 +107,7 @@ HELP_ADMIN = (
     "/protect on|off — per-category content protection\n"
     "/setautodelete &lt;time&gt; — per-category auto-delete\n"
     "/setforcesub &lt;channel_id | off&gt; [category] — force-join\n"
+    "/forcesublist · /forcesubremove &lt;channel_id|category&gt;\n"
     "\n<b>▸ Shortener gate</b> (global)\n"
     "/shortener on|off|status · /shortenerapi add|pause|resume|remove\n"
     "/setverifytime &lt;hours&gt; · /settokenttl &lt;minutes&gt;\n"
@@ -117,7 +118,6 @@ HELP_ADMIN = (
     "/stats — overview + per-pipeline breakdown\n"
     "/ban &lt;user_id&gt; · /unban &lt;user_id&gt;\n"
     "/banlist · /banmessage &lt;text|reply|reset&gt;\n"
-    "/forcesublist · /forcesubremove &lt;channel_id|category&gt;\n"
     "/addadmin &lt;user_id&gt; — promote an admin"
 )
 
@@ -299,9 +299,9 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
         await db.set_banned(user_id, True)
         await db.mark_ban_info(user_id, username, elapsed)
         uname = f"@{username}" if username else "(no username)"
-        await bot.send_message(
-            chat_id,
-            "🚫 You have been banned for bypassing the verification link.")
+        _bm = (await db.get_settings()).get("ban_message") or \
+            "🚫 You have been banned for bypassing the verification link."
+        await bot.send_message(chat_id, _bm)
         for aid in await db.list_admin_ids():
             try:
                 await bot.send_message(
