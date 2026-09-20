@@ -63,6 +63,8 @@ DEFAULT_SETTINGS = {
     "shortener_buttons": [],
     "force_sub_channel_id": config.FORCE_SUB_CHANNEL_ID,   # global default
     "force_sub_channel_ids": None,    # v3.4: plural list; None -> singular above
+    "force_sub_links": {},           # v3.5: {channel_id: join-request invite link}
+    "ban_message": None,             # v3.5: custom banned-user text (/banmessage)
     # legacy single-pipeline knobs, kept only as migration seeds:
     "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
@@ -92,6 +94,7 @@ DEFAULT_CATEGORY = {
     "queue_cursor": None,
     "force_sub_channel_id": None,         # None -> use the global default
     "force_sub_channel_ids": None,        # v3.4: plural per-category list
+    "force_sub_links": {},            # v3.5: per-category invite links
     "protect_content": False,
     "auto_delete_minutes": 15,
     "with_file_message": None,   # per-pipeline override of the delivery notice
@@ -167,7 +170,13 @@ async def connect():
     await _db.raw.create_index([("category", 1), ("message_id", 1)], unique=True)
     await _db.categories.create_index("key", unique=True)
     await _db.categories.create_index("db_channel_id")
-    await _db.join_requests.create_index("user_id", unique=True)
+    # v3.5: join requests are scoped PER CHANNEL (fixes Gate-1 bypass where any
+    # old join request passed every force-sub check). Drop the legacy index.
+    try:
+        await _db.join_requests.drop_index("user_id_1")
+    except Exception:
+        pass
+    await _db.join_requests.create_index([("user_id", 1), ("chat_id", 1)], unique=True)
     await _db.admins.create_index("user_id", unique=True)
     await _db.deletions.create_index("delete_at")
     await _db.admin_state.create_index("user_id", unique=True)
@@ -656,14 +665,17 @@ async def mark_token_used(token):
 
 
 # ── join requests ─────────────────────────────────────────────
-async def record_join_request(user_id):
+async def record_join_request(user_id, chat_id=None):
     await _db.join_requests.update_one(
-        {"user_id": user_id}, {"$set": {"user_id": user_id, "at": now()}}, upsert=True
-    )
+        {"user_id": user_id, "chat_id": chat_id},
+        {"$set": {"at": now()}}, upsert=True)
 
 
-async def has_join_request(user_id):
-    return await _db.join_requests.find_one({"user_id": user_id}) is not None
+async def has_join_request(user_id, chat_id=None):
+    q = {"user_id": user_id}
+    if chat_id is not None:
+        q["chat_id"] = chat_id
+    return await _db.join_requests.find_one(q) is not None
 
 
 # ── admins ────────────────────────────────────────────────────
@@ -851,3 +863,73 @@ async def force_sub_channels(category=None):
     if s.get("force_sub_channel_id"):
         return [int(s["force_sub_channel_id"])]
     return []
+
+
+# ── force-sub links + removal + ban data (v3.5) ───────────────
+async def set_force_sub_link(channel_id, link, category=None):
+    cid = str(int(channel_id))
+    if category:
+        await _db.categories.update_one({"key": _norm_key(category)},
+            {"$set": {f"force_sub_links.{cid}": link}})
+    else:
+        await _db.settings.update_one({"_id": "global"},
+            {"$set": {f"force_sub_links.{cid}": link}}, upsert=True)
+
+
+async def force_sub_link(channel_id, category=None):
+    cid = str(int(channel_id))
+    if category:
+        cat = await _db.categories.find_one({"key": _norm_key(category)})
+        if cat and (cat.get("force_sub_links") or {}).get(cid):
+            return cat["force_sub_links"][cid]
+    s = await get_settings()
+    return (s.get("force_sub_links") or {}).get(cid)
+
+
+async def remove_force_sub_channel(channel_id, category=None):
+    """Remove one channel from a force-sub list. True when it was present."""
+    cid = int(channel_id)
+    if category:
+        cat = await _db.categories.find_one({"key": _norm_key(category)})
+        ids = list((cat or {}).get("force_sub_channel_ids") or [])
+        if cid not in ids:
+            return False
+        ids.remove(cid)
+        await _db.categories.update_one({"key": _norm_key(category)},
+            {"$set": {"force_sub_channel_ids": ids},
+             "$unset": {f"force_sub_links.{cid}": ""}})
+        return True
+    s = await get_settings()
+    ids = [int(x) for x in (s.get("force_sub_channel_ids") or [])]
+    if cid not in ids:
+        return False
+    ids.remove(cid)
+    fields = {"force_sub_channel_ids": ids}
+    if s.get("force_sub_channel_id") == cid:
+        fields["force_sub_channel_id"] = None
+    await _db.settings.update_one({"_id": "global"},
+        {"$set": fields, "$unset": {f"force_sub_links.{cid}": ""}}, upsert=True)
+    return True
+
+
+async def clear_force_sub(category=None):
+    fields = {"force_sub_channel_ids": [], "force_sub_links": {},
+              "force_sub_channel_id": None}
+    if category:
+        await _db.categories.update_one({"key": _norm_key(category)}, {"$set": fields})
+    else:
+        await _db.settings.update_one({"_id": "global"}, {"$set": fields}, upsert=True)
+
+
+async def list_banned():
+    return await _db.users.find({"banned": True}).sort("user_id", 1).to_list(None)
+
+
+async def mark_ban_info(user_id, username=None, elapsed=None):
+    fields = {}
+    if username:
+        fields["username"] = str(username).lstrip("@")
+    if elapsed is not None:
+        fields["last_bypass_elapsed"] = float(elapsed)
+    if fields:
+        await _db.users.update_one({"user_id": user_id}, {"$set": fields}, upsert=True)

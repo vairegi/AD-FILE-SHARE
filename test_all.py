@@ -314,8 +314,9 @@ async def main():
     check("gate: non-member gets Join+Check buttons",
           "Join Channel" in joined and "checksub:f21" in joined)
 
-    # pending join request satisfies the gate
-    await db.record_join_request(4243)
+    # pending join request satisfies the gate (v3.5: scoped to the gated channel)
+    _fch = (await db.force_sub_channels()) or [None]
+    await db.record_join_request(4243, _fch[0])
     fb3 = FakeBot(); fb3.membership = False
     await bot1.process_file(fb3, 4243, 4243, "f21")
     check("gate: pending join request passes",
@@ -635,6 +636,49 @@ async def main():
     check("  -> both channels required", chans == [-100555, -100777])
     r = await run(adm.cmd_setforcesub, ["off"]);         check("/setforcesub off", "cleared" in r)
     check("  -> list cleared", await db.force_sub_channels() == [])
+
+    # ── v3.5: Gate-1 bypass fix — join requests are per-channel ──
+    await db.record_join_request(909090, -100111)
+    check("join request scoped: right channel passes",
+          await db.has_join_request(909090, -100111) is True)
+    check("join request scoped: other channel does NOT pass (bypass fixed)",
+          await db.has_join_request(909090, -100222) is False)
+    _fbx = FakeBot(); _fbx.membership = False
+    await db.update_settings({"force_sub_channel_ids": [-100999]})
+    check("gate BLOCKS user whose join request is for an unrelated channel",
+          await bot1.gate_ok(_fbx, 909090) is False)
+    await db.record_join_request(909090, -100999)
+    check("gate PASSES once request exists for the REQUIRED channel",
+          await bot1.gate_ok(_fbx, 909090) is True)
+    await db.update_settings({"force_sub_channel_ids": []})
+
+    # ── v3.5: /forcesublist + /forcesubremove ──
+    r = await run(adm.cmd_setforcesub, ["-100555"])
+    check("/setforcesub re-add for list test", "Total required channels now: 1" in r)
+    r = await run(adm.cmd_forcesublist, [])
+    check("/forcesublist shows global channel", "-100555" in r and "Global" in r)
+    r = await run(adm.cmd_forcesubremove, ["-100555"])
+    check("/forcesubremove removes the channel",
+          "removed" in r.lower() and await db.force_sub_channels() == [])
+    r = await run(adm.cmd_forcesubremove, ["-100555"])
+    check("/forcesubremove unknown channel errors cleanly", "not in the force-sub list" in r)
+
+    # ── v3.5: /banmessage + /banlist ──
+    r = await run(adm.cmd_banmessage, ["You", "are", "BLOCKED", "forever"])
+    check("/banmessage sets custom text",
+          (await db.get_settings())["ban_message"] == "You are BLOCKED forever")
+    upd2 = FakeUpdate(uid=999)
+    upd2.message.reply_to_message = FakeMessage("Reply ban text")
+    await adm.cmd_banmessage(upd2, FakeContext(args=[]))
+    check("/banmessage via reply-to", (await db.get_settings())["ban_message"] == "Reply ban text")
+    r = await run(adm.cmd_banmessage, ["reset"])
+    check("/banmessage reset restores default", (await db.get_settings())["ban_message"] is None)
+    await db.set_banned(8416709177, True)
+    await db.mark_ban_info(8416709177, "Noob7", 46.7)
+    r = await run(adm.cmd_banlist, [])
+    check("/banlist exact format with tap-to-copy /unban",
+          "1 - @Noob7 Elapsed: 46.7s `/unban 8416709177`" in r)
+    await db.set_banned(8416709177, False)
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)
     check("  -> stored as minutes (per category)",
           (await db.get_category("jav"))["auto_delete_minutes"] == 10080)

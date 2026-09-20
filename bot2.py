@@ -20,6 +20,13 @@ from telegram.ext import (
 
 import config
 import db
+
+
+async def _ban_msg():
+    """Custom ban message (v3.5 /banmessage), else the default."""
+    return (await db.get_settings()).get("ban_message") or \
+        "🚫 You are banned from using this bot."
+
 from utils import human_duration, parse_duration
 
 log = logging.getLogger("bot2")
@@ -243,7 +250,7 @@ async def process_delivery(bot, chat_id, user_id, file_id, token):
     _rec = await db.get_user(user_id)
     if _rec and _rec.get("banned"):
         await bot.send_message(
-            chat_id, "🚫 You are banned from using this bot.")
+            chat_id, await _ban_msg())
         return
     doc = await db.get_token(token)
     if (not doc or doc.get("kind") != "deliver" or doc.get("used")
@@ -278,7 +285,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.touch_user(user.id)
     record = await db.get_user(user.id)
     if record and record.get("banned"):
-        await update.message.reply_text("🚫 You are banned from using this bot.")
+        await update.message.reply_text(await _ban_msg())
         return
 
     args = context.args or []
@@ -333,7 +340,7 @@ async def on_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     _rec = await db.get_user(query.from_user.id)
     if _rec and _rec.get("banned"):
-        await query.answer("🚫 You are banned from using this bot.",
+        await query.answer(await _ban_msg(),
                            show_alert=True)
         return
     _, file_id, index, owner = (query.data or "").split(":")

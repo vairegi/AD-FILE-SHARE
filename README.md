@@ -385,3 +385,25 @@ you set the new list.
 bot bug — the base `https://vplinks.com/api` has no working TLS (connection
 fails), while `https://vplink.in/api` works with the same key. Always use
 the exact API base from your provider dashboard.
+
+---
+
+## v3.5 (2026-09-20) — force-sub gate bypass fix + admin tooling
+
+**CRITICAL FIX — Gate 1 bypass.** `gate_ok` accepted ANY join request ever
+recorded (`has_join_request(user_id)`, unscoped), so a user who once tapped
+"request to join" on any channel skipped force-sub forever. Join requests
+are now stored per-channel (`{user_id, chat_id}`) and a request only passes
+the channel it was made for. Note: pre-v3.5 request records have no channel
+id and no longer grant a pass — affected users simply re-request once.
+
+**/setforcesub auto join-request link.** Setting a channel now calls
+`create_chat_invite_link(creates_join_request=True)` and stores the link;
+the gate's Join button uses it, so every gated user lands in the channel's
+pending-requests list (backup audience if a channel is ever banned).
+
+**New admin commands:** `/forcesublist` (dashboard: global + per-category
+channels with their invite links), `/forcesubremove <channel_id|category|global>`,
+`/banmessage <text>` (or reply to a message, or `reset`), `/banlist` — each
+entry formatted `1 - @username Elapsed: 46.7s \`/unban 8416709177\`` with the
+command in inline code for one-tap copy.

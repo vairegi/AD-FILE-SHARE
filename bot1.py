@@ -116,6 +116,8 @@ HELP_ADMIN = (
     "/broadcast &lt;message&gt; — copy to all users\n"
     "/stats — overview + per-pipeline breakdown\n"
     "/ban &lt;user_id&gt; · /unban &lt;user_id&gt;\n"
+    "/banlist · /banmessage &lt;text|reply|reset&gt;\n"
+    "/forcesublist · /forcesubremove &lt;channel_id|category&gt;\n"
     "/addadmin &lt;user_id&gt; — promote an admin"
 )
 
@@ -174,7 +176,12 @@ async def gate_ok(bot, user_id, category=None) -> bool:
         member = await _is_member(bot, channel, user_id)
         if member is True:
             continue
-        if await db.has_join_request(user_id):
+        if member is None:
+            # check itself failed (bot not admin etc.) — fail open, logged in _is_member
+            continue
+        # v3.5: join request must be for THIS channel (was: any request passed
+        # every channel -> users with an old request skipped Gate 1 forever)
+        if await db.has_join_request(user_id, channel):
             continue
         return False   # missing at least one required channel
     return True
@@ -190,7 +197,8 @@ async def send_force_sub(bot, chat_id, file_id, category=None):
     channel = await _force_sub_channel_for(category)
     rows = []
     for ch in await db.force_sub_channels(category):
-        u = await _channel_link(bot, ch)
+        # prefer the stored join-request invite link (v3.5), else best-effort
+        u = await db.force_sub_link(ch, category) or await _channel_link(bot, ch)
         if u:
             rows.append([InlineKeyboardButton("📢 Join Channel", url=u)])
     rows.append([InlineKeyboardButton("✅ I've Joined", callback_data=f"checksub:{file_id}")])
@@ -289,6 +297,7 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
         # No 3-strike grace period anymore.
         await db.add_strike(user_id)   # keep a record of the attempt
         await db.set_banned(user_id, True)
+        await db.mark_ban_info(user_id, username, elapsed)
         uname = f"@{username}" if username else "(no username)"
         await bot.send_message(
             chat_id,
@@ -515,7 +524,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.touch_user(user.id)
     record = await db.get_user(user.id)
     if record and record.get("banned"):
-        await update.message.reply_text("🚫 You are banned from using this bot.")
+        _bm = (await db.get_settings()).get("ban_message") or \
+            "🚫 You are banned from using this bot."
+        await update.message.reply_text(_bm)
         return
 
     args = context.args or []
@@ -565,7 +576,7 @@ async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Record pending join requests so they also satisfy the force-sub gate."""
     req = update.chat_join_request
-    await db.record_join_request(req.from_user.id)
+    await db.record_join_request(req.from_user.id, req.chat.id)
     log.info("Recorded join request from %s", req.from_user.id)
 
 

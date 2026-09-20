@@ -781,6 +781,97 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def cmd_forcesublist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/forcesublist — dashboard of every force-sub channel (global + per-category)."""
+    s = await db.get_settings()
+    lines = ["📢 Force-Sub configuration\n"]
+    gids = await db.force_sub_channels(None)
+    if gids:
+        for cid in gids:
+            link = (s.get("force_sub_links") or {}).get(str(cid))
+            lines.append(f"🌐 Global: {cid}")
+            lines.append(f"   Invite: {link or '(no join-request link stored)'}")
+    else:
+        lines.append("🌐 Global: none")
+    for cat in await db.list_categories():
+        cids = cat.get("force_sub_channel_ids") or (
+            [cat["force_sub_channel_id"]] if cat.get("force_sub_channel_id") else [])
+        for cid in cids:
+            link = (cat.get("force_sub_links") or {}).get(str(cid))
+            lines.append(f"📁 [{cat['key']}]: {cid}")
+            lines.append(f"   Invite: {link or '(no join-request link stored)'}")
+    lines.append("\nRemove: /forcesubremove <channel_id> · /forcesubremove <category>")
+    await update.message.reply_text("\n".join(lines))
+
+
+@admin_only
+async def cmd_forcesubremove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/forcesubremove <channel_id|category|global> — remove force-sub enforcement."""
+    args = [a for a in (context.args or []) if a]
+    if not args:
+        await update.message.reply_text(
+            "Usage: /forcesubremove <channel_id> — remove one global channel\n"
+            "/forcesubremove <category> — clear a category's override\n"
+            "/forcesubremove global — clear ALL global channels")
+        return
+    target = args[0]
+    cat = await db.get_category(target.lower())
+    if cat:
+        await db.clear_force_sub(cat["key"])
+        await update.message.reply_text(
+            f"✅ Force-sub removed for [{cat['key']}] — it now uses the global default.")
+        return
+    if target.lower() in ("global", "all", "off"):
+        await db.clear_force_sub(None)
+        await update.message.reply_text("✅ All global force-sub channels cleared.")
+        return
+    if target.lstrip("-").isdigit():
+        if await db.remove_force_sub_channel(int(target)):
+            await update.message.reply_text(f"✅ Channel {target} removed from force-sub.")
+        else:
+            await update.message.reply_text(f"❌ Channel {target} is not in the force-sub list.")
+        return
+    await update.message.reply_text("❌ No category or channel id matches that.")
+
+
+@admin_only
+async def cmd_banmessage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/banmessage <text> — set custom ban text; reply to a message with
+    /banmessage to use its text; /banmessage reset restores the default."""
+    args = [a for a in (context.args or []) if a]
+    if args and args[0].lower() in ("reset", "clear", "off", "default"):
+        await db.update_settings({"ban_message": None})
+        await update.message.reply_text("✅ Ban message reset to default.")
+        return
+    text = " ".join(args).strip()
+    if not text and update.message.reply_to_message:
+        text = (update.message.reply_to_message.text or "").strip()
+    if not text:
+        await update.message.reply_text(
+            "Usage: /banmessage <text> · reply to a message with /banmessage · "
+            "/banmessage reset")
+        return
+    await db.update_settings({"ban_message": text})
+    await update.message.reply_text(f"✅ Ban message updated.\n\nPreview:\n{text}")
+
+
+@admin_only
+async def cmd_banlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/banlist — every banned user; tap the inline-code command to copy it."""
+    users = await db.list_banned()
+    if not users:
+        await update.message.reply_text("✅ No banned users.")
+        return
+    lines = [f"🚫 Banned users ({len(users)})\n"]
+    for i, u in enumerate(users, 1):
+        uname = f"@{u['username']}" if u.get("username") else f"id:{u['user_id']}"
+        el = u.get("last_bypass_elapsed")
+        part = f"Elapsed: {el:.1f}s" if el is not None else "manual ban"
+        lines.append(f"{i} - {uname} {part} `/unban {u['user_id']}`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@admin_only
 async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if not args or not args[0].lstrip("-").isdigit():
@@ -825,7 +916,7 @@ async def cmd_setforcesub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = args[0]
     if val.lower() == "off":
         if target_key:
-            await db.update_category(target_key, {"force_sub_channel_id": None})
+            await db.clear_force_sub(target_key)
             await update.message.reply_text(
                 f"✅ Force-sub override cleared for [{target_key}] (uses global default).")
         else:
@@ -861,10 +952,21 @@ async def cmd_setforcesub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         note = f"Bot status in channel: {me.status}"
     except Exception as exc:
         note = f"⚠️ Could not verify bot membership there: {exc}"
+    # v3.5: auto-create a join-request invite link for the gate button
+    link = None
+    try:
+        inv = await context.bot.create_chat_invite_link(
+            channel_id, creates_join_request=True)
+        link = getattr(inv, "invite_link", None)
+        if link:
+            await db.set_force_sub_link(channel_id, link, target_key)
+    except Exception as exc:
+        note += f"\n⚠️ Join-request link not created: {exc}"
     chans = await db.force_sub_channels(target_key)
     await update.message.reply_text(
         f"✅ Channel added to force-subscribe ({scope}).\n{note}\n"
-        f"Total required channels now: {len(chans)}")
+        f"Total required channels now: {len(chans)}"
+        + (f"\nJoin-request link: {link}" if link else ""))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1254,6 +1356,10 @@ COMMANDS = {
     "stats": cmd_stats,
     "ban": cmd_ban,
     "unban": cmd_unban,
+    "banlist": cmd_banlist,
+    "banmessage": cmd_banmessage,
+    "forcesublist": cmd_forcesublist,
+    "forcesubremove": cmd_forcesubremove,
     "addadmin": cmd_addadmin,
     "setforcesub": cmd_setforcesub,
     "setautodelete": cmd_setautodelete,
