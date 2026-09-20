@@ -108,7 +108,7 @@ HELP_ADMIN = (
     "/setautodelete &lt;time&gt; — per-category auto-delete\n"
     "/setforcesub &lt;channel_id | off&gt; [category] — force-join\n"
     "\n<b>▸ Shortener gate</b> (global)\n"
-    "/shortener on|off|status · /shortenerapi &lt;url&gt;\n"
+    "/shortener on|off|status · /shortenerapi add|pause|resume|remove\n"
     "/setverifytime &lt;hours&gt; · /settokenttl &lt;minutes&gt;\n"
     "/shortenermsg · /shortenerbotmsg · /verifymsg\n"
     "/shortenerbtn &lt;label&gt; | &lt;url&gt; · /clearshortenerbtns\n"
@@ -202,7 +202,11 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
     token = await db.create_token(user_id, item["file_id"], ttl, kind="verify")
     deep = (f"https://t.me/{config.BOT1_USERNAME}"
             f"?start=verify_{item['file_id']}_{token}")
-    short = await shortener.shorten(deep)
+    short = await shortener.shorten(deep, user_id=user_id)
+    # remember which shortener served this token (per-user rotation, v3.2)
+    _u = await db.get_user(user_id)
+    if _u and _u.get("rr_last_site"):
+        await db.set_token_shortener(token, _u["rr_last_site"])
 
     rows = [[InlineKeyboardButton("🔓 Verify & Download", url=short or deep)]]
     for b in settings.get("shortener_buttons") or []:
@@ -276,37 +280,25 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
     elapsed = db.now() - float(doc.get("created_at") or 0)
     if elapsed < BYPASS_MIN_SECONDS:
         await db.mark_token_used(token)  # burn the bypassed link
-        strikes = await db.add_strike(user_id)
-        if strikes >= 3:
-            await db.set_banned(user_id, True)
-            await db.reset_strikes(user_id)
-            uname = f"@{username}" if username else "(no username)"
-            await bot.send_message(
-                chat_id,
-                "🚫 You have been banned for repeatedly bypassing the "
-                "verification links.")
-            for aid in await db.list_admin_ids():
-                try:
-                    await bot.send_message(
-                        aid,
-                        f"🚨 User {user_id} auto-banned for 3 consecutive "
-                        f"bypass strikes.\nUsername: {uname}\n"
-                        f"Last elapsed: {elapsed:.1f}s\n"
-                        f"/unban {user_id} to reverse")
-                except Exception as exc:
-                    log.warning("admin alert to %s failed: %s", aid, exc)
-            return
+        # v3.2: ZERO TOLERANCE — a single too-fast attempt bans instantly.
+        # No 3-strike grace period anymore.
+        await db.add_strike(user_id)   # keep a record of the attempt
+        await db.set_banned(user_id, True)
+        uname = f"@{username}" if username else "(no username)"
         await bot.send_message(
             chat_id,
-            f"⚠️ UNAUTHORIZED ACTION (Strike {strikes}/3)\n\n"
-            "You tried to bypass the link to get the files.\n\n"
-            "Our server security system flagged this request. If you reach "
-            "3 strikes, you will be temporarily/permanently banned.")
-        # give them a fresh link to solve properly
-        item = await db.get_item_by_file_id(file_id)
-        if item:
-            settings = await db.get_settings()
-            await send_shortener_gate(bot, chat_id, user_id, item, settings)
+            "🚫 You have been banned for bypassing the verification link.")
+        for aid in await db.list_admin_ids():
+            try:
+                await bot.send_message(
+                    aid,
+                    f"🚨 User {user_id} auto-banned for bypassing the "
+                    f"verification link (instant ban, no warnings).\n"
+                    f"Username: {uname}\n"
+                    f"Elapsed: {elapsed:.1f}s\n"
+                    f"/unban {user_id} to reverse")
+            except Exception as exc:
+                log.warning("admin alert to %s failed: %s", aid, exc)
         return
 
     await db.mark_token_used(token)

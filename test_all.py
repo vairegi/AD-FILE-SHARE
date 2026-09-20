@@ -283,7 +283,7 @@ async def main():
     orig_shorten = shortener.shorten
     captured = {}
 
-    async def fake_shorten(url):
+    async def fake_shorten(url, user_id=None):
         captured["url"] = url
         return "https://vplink.in/AbCdEf"
 
@@ -525,40 +525,85 @@ async def main():
     r = await run(adm.cmd_shortener, ["on"]);            check("/shortener on", "enabled" in r)
     r = await run(adm.cmd_shortener, ["status"]);        check("/shortener status", "Shortener gate" in r)
     r = await run(adm.cmd_shortener, ["off"]);           check("/shortener off", "disabled" in r)
-    r = await run(adm.cmd_shortenerapi, ["url", "https://vplink.in/api"]); check("/shortenerapi url", "vplink.in/api" in r)
 
-    # ── /shortenerapi key management (DB-first, env fallback) ──
+    # ── /shortenerapi multi-shortener dashboard (v3.2) ──
     check("mask_key helper", adm._mask_key("d068db49b6fe562727f7d6567d6f24dadfaa3e2a") == "d068...3e2a")
     upd = FakeUpdate(uid=12345)  # non-admin
-    await adm.cmd_shortenerapi(upd, FakeContext(args=["somekey"]))
+    await adm.cmd_shortenerapi(upd, FakeContext(args=["add", "x", "https://x.in/api", "k" * 12]))
     check("/shortenerapi blocks non-admin", "only by admins" in upd.message.replies[-1])
-    check("  -> non-admin did NOT write a key",
-          not (await db.get_settings()).get("shortener_api_key"))
+    # migration seeded 'vplink' from the test env key at connect()
+    seeded = await db.get_shortener("vplink")
+    check("migration seeded vplink from env key",
+          bool(seeded) and seeded["status"] == "active"
+          and seeded["api_key"] == "test-api-key")
     r = await run(adm.cmd_shortenerapi, [])
-    check("/shortenerapi (no args) shows masked status + env fallback",
-          "Shortener API status" in r and "env var" in r)
-    orig_shorten = shortener.shorten
-    async def _fake_shorten(url): return "https://vplink.in/SelfTest"
-    shortener.shorten = _fake_shorten
-    r = await run(adm.cmd_shortenerapi, ["d068db49b6fe562727f7d6567d6f24dadfaa3e2a"])
-    shortener.shorten = orig_shorten
-    check("/shortenerapi <key> saves key to DB + live self-test",
-          "saved to the database" in r and "verified live" in r)
-    check("  -> key stored in DB",
-          (await db.get_settings())["shortener_api_key"] == "d068db49b6fe562727f7d6567d6f24dadfaa3e2a")
+    check("dashboard lists shorteners with status",
+          "rotation dashboard" in r and "vplink" in r and "Active" in r)
+    # add (live self-test stubbed)
+    orig_test = shortener.test_key
+    async def _fake_test(base, key): return "https://gplinks.in/SelfTest"
+    shortener.test_key = _fake_test
+    r = await run(adm.cmd_shortenerapi, ["add", "gplink", "https://gplinks.in/api", "gpkey123456789"])
+    shortener.test_key = orig_test
+    check("add saves shortener + self-test", "added to the rotation" in r and "verified live" in r)
+    check("  -> stored in DB", (await db.get_shortener("gplink"))["api_key"] == "gpkey123456789")
+    r = await run(adm.cmd_shortenerapi, ["add", "gplink", "https://gplinks.in/api", "whateverkey1"])
+    check("duplicate add rejected", "already exists" in r)
+    r = await run(adm.cmd_shortenerapi, ["add", "bad name", "https://x.in/api", "k" * 12])
+    check("invalid site name rejected", "Invalid site name" in r)
+    r = await run(adm.cmd_shortenerapi, ["add", "onlytwo"])
+    check("add with missing args shows usage", "Usage" in r)
+    # per-user round-robin over the two ACTIVE shorteners
+    s1 = await db.next_shortener(555)
+    s2 = await db.next_shortener(555)
+    s3 = await db.next_shortener(555)
+    check("per-user round-robin alternates actives",
+          s1["site"] == "gplink" and s2["site"] == "vplink" and s3["site"] == "gplink")
+    check("  -> cursor + last site tracked on user doc",
+          (await db.get_user(555))["rr_cursor"] == 3
+          and (await db.get_user(555))["rr_last_site"] == "gplink")
+    # pause -> still listed, skipped in rotation
+    r = await run(adm.cmd_shortenerapi, ["pause", "gplink"])
+    check("pause works", "paused" in r)
+    picks = {(await db.next_shortener(555))["site"] for _ in range(4)}
+    check("paused shortener is skipped in rotation", picks == {"vplink"})
+    r = await run(adm.cmd_shortenerapi, [])
+    check("dashboard shows paused state", "Paused" in r and "gplink" in r)
+    r = await run(adm.cmd_shortenerapi, ["pause", "nosuch"])
+    check("pause unknown name errors cleanly", "No shortener" in r)
+    # resume -> rejoins rotation
+    r = await run(adm.cmd_shortenerapi, ["resume", "gplink"])
+    check("resume works", "active" in r.lower())
+    picks = {(await db.next_shortener(777))["site"] for _ in range(4)}
+    check("resumed shortener rejoins rotation", picks == {"gplink", "vplink"})
+    # all paused -> fail-open (shorten returns None, no API call)
+    await db.set_shortener_status("gplink", "paused")
+    await db.set_shortener_status("vplink", "paused")
+    check("all paused -> shorten returns None (fail-open)",
+          await shortener.shorten("https://t.me/x?start=y", user_id=555) is None)
+    await db.set_shortener_status("gplink", "active")
+    await db.set_shortener_status("vplink", "active")
+    # legacy fallback only when the collection is COMPLETELY empty
+    await db.remove_shortener("gplink")
+    await db.remove_shortener("vplink")
     orig_env = config.SHORTENER_API_KEY
     config.SHORTENER_API_KEY = "envfallbackkey000"
-    async def _probe(url): return (await db.get_settings()).get("shortener_api_key") or config.SHORTENER_API_KEY
-    shortener.shorten = _probe
-    check("shortener uses DB key over env",
-          await shortener.shorten("https://t.me/x?start=y") == "d068db49b6fe562727f7d6567d6f24dadfaa3e2a")
-    r = await run(adm.cmd_shortenerapi, ["clearkey"])
-    check("/shortenerapi clearkey removes DB key", "removed" in r
-          and not (await db.get_settings()).get("shortener_api_key"))
-    check("shortener falls back to env when DB key cleared",
-          await shortener.shorten("https://t.me/x?start=y") == "envfallbackkey000")
-    shortener.shorten = orig_shorten
+    async def _probe(url, user_id=None):
+        s = await db.get_settings()
+        return (s.get("shortener_api_key") or config.SHORTENER_API_KEY)
+    check("empty collection -> legacy env fallback path exists",
+          await _probe("https://t.me/x?start=y") == "envfallbackkey000")
     config.SHORTENER_API_KEY = orig_env
+    # re-add for the remaining tests (gate flow uses the rotation path)
+    await db.add_shortener("vplink", "https://vplink.in/api", "test-api-key")
+    # remove
+    r = await run(adm.cmd_shortenerapi, ["remove", "nosuch"])
+    check("remove unknown name errors cleanly", "No shortener" in r)
+    await db.add_shortener("tempdel", "https://temp.in/api", "tempkey123456")
+    r = await run(adm.cmd_shortenerapi, ["remove", "tempdel"])
+    check("remove deletes shortener", "removed" in r and not await db.get_shortener("tempdel"))
+    r = await run(adm.cmd_shortenerapi, ["bogus"])
+    check("unknown action shows usage", "Unknown action" in r)
     r = await run(adm.cmd_setverifytime, ["6"]);         check("/setverifytime", "6 hours" in r)
     r = await run(adm.cmd_settokenttl, ["15"]);          check("/settokenttl", "15 minutes" in r)
     r = await run(adm.cmd_shortenermsg, text="/shortenermsg HEADING"); check("/shortenermsg", "updated" in r)
@@ -831,7 +876,7 @@ async def main():
     check("queue heals itself past a deleted DB post",
           healed is not None and healed["file_id"] == "jav_f160")
 
-    # ── 11c. anti-bypass strikes + auto-ban ───────────────────
+    # ── 11c. anti-bypass: INSTANT ban on first attempt (v3.2) ──
     await db.upsert_item({"file_id": "f170", "db_message_id": 170,
                           "cover_message_id": 170, "caption": "strike item",
                           "videos": [{"db_message_id": 171, "caption": ""}],
@@ -839,21 +884,19 @@ async def main():
     fb = FakeBot()
     t1 = await db.create_token(7777, "f170", 60, kind="verify")
     await bot1.process_verify(fb, 7777, 7777, "f170", t1, "Noob7")
-    check("bypass: strike 1 warning issued",
-          any("Strike 1/3" in txt for _, txt, _ in fb.sent))
+    check("bypass: FIRST attempt bans immediately (zero tolerance)",
+          (await db.get_user(7777))["banned"] is True)
     check("bypass: bypassed token burned",
           (await db.get_token(t1))["used"] is True)
-    t2 = await db.create_token(7777, "f170", 60, kind="verify")
-    await bot1.process_verify(fb, 7777, 7777, "f170", t2, "Noob7")
-    check("bypass: strike 2 warning issued",
-          any("Strike 2/3" in txt for _, txt, _ in fb.sent))
-    t3 = await db.create_token(7777, "f170", 60, kind="verify")
-    await bot1.process_verify(fb, 7777, 7777, "f170", t3, "Noob7")
-    check("bypass: 3rd strike auto-bans user",
-          (await db.get_user(7777))["banned"] is True)
+    check("bypass: attempt recorded once (no 3-strike grace)",
+          int((await db.get_user(7777)).get("strikes") or 0) == 1)
+    check("bypass: user told they are banned (no strike counter shown)",
+          any("banned" in txt and "Strike" not in txt for _, txt, _ in fb.sent))
     check("bypass: admin alerted (username + elapsed + unban hint)",
           any(cid == 999 and "auto-banned" in txt and "@Noob7" in txt
               and "/unban 7777" in txt for cid, txt, _ in fb.sent))
+    check("bypass: no fresh gate link offered after ban",
+          not any("verify_f170_" in txt for _, txt, _ in fb.sent))
 
     # banned users cannot get files from Bot 2 either
     fb2 = FakeBot()
@@ -861,8 +904,9 @@ async def main():
     await bot2.process_delivery(fb2, 7777, 7777, "f170", dtk)
     check("banned user blocked in Bot 2", "banned" in fb2.sent[-1][1])
 
-    # /unban resets the strike counter
+    # /unban flow clears the ban and the strike record
     await db.set_banned(7777, False)
+    await db.reset_strikes(7777)
     check("unban resets strikes",
           int((await db.get_user(7777)).get("strikes") or 0) == 0)
 

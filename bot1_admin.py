@@ -510,6 +510,8 @@ async def cmd_shortener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Shortener gate: {'ON' if settings.get('shortener_enabled') else 'OFF'}\n"
             f"API base: {settings.get('shortener_api_base')}\n"
             f"API key: {_mask_key(settings.get('shortener_api_key'))} (database)\n"
+            f"Shorteners in rotation: {len(await db.list_shorteners())} "
+            f"(manage with /shortenerapi)\n"
             f"Verify validity: {settings.get('verify_hours')} h\n"
             f"Token TTL: {settings.get('token_ttl_minutes')} min\n"
             f"Extra buttons: {len(settings.get('shortener_buttons') or [])}"
@@ -531,70 +533,100 @@ def _mask_key(key):
 
 @admin_only
 async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/shortenerapi — manage the shortener API (base + key, both in MongoDB).
+    """/shortenerapi — multi-shortener round-robin dashboard (v3.2).
 
-      /shortenerapi                 -> status: base, masked key, source (DB/env)
-      /shortenerapi <key>           -> save the API key to the DB (global)
-      /shortenerapi url <base>      -> set the API base (e.g. https://vplink.in/api)
-      /shortenerapi clearkey        -> remove the DB key (revert to env fallback)
-    The DB key survives Render restarts; the env var is only a fallback."""
+      /shortenerapi                              -> list all shorteners
+      /shortenerapi add <site> <api_base> <key>  -> add to the rotation
+      /shortenerapi pause <site>                 -> skip it in rotation
+      /shortenerapi resume <site>                -> back into rotation
+      /shortenerapi remove <site>                -> delete it completely
+    Paused shorteners stay listed but are NEVER used for user links.
+    The old single-key syntax (bare key / url / clearkey) was removed."""
     import shortener as _sh
-    args = [a for a in (context.args or []) if a]
-    sub = args[0].lower() if args else "status"
+    args = [x for x in (context.args or []) if x]
+    sub = args[0].lower() if args else ""
 
-    if sub in ("url", "base"):
-        if len(args) < 2 or not args[1].startswith(("http://", "https://")):
+    if sub == "add":
+        if len(args) < 4 or not args[2].startswith(("http://", "https://")):
             await update.message.reply_text(
-                "Usage: /shortenerapi url https://vplink.in/api")
+                "Usage: /shortenerapi add <site> <api_base> <api_key>\n"
+                "Example: /shortenerapi add gplink https://gplinks.in/api abc123key")
             return
-        await db.update_settings({"shortener_api_base": args[1].strip()})
+        try:
+            doc = await db.add_shortener(args[1], args[2], args[3])
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Invalid site name — letters, numbers and _ only.")
+            return
+        if not doc:
+            await update.message.reply_text(
+                f"⚠️ '{args[1].lower()}' already exists. "
+                "Remove it first or pick another name.")
+            return
+        short = await _sh.test_key(doc["api_base"], doc["api_key"])
+        live = "✅ key verified live (shortener accepted it)." if short else (
+            "⚠️ saved, but the live self-test did not return a link — check the key.")
         await update.message.reply_text(
-            f"✅ Shortener API base set to {args[1].strip()}")
+            f"✅ Shortener '{doc['site']}' added to the rotation.\n"
+            f"Base: {doc['api_base']}\nKey: {_mask_key(doc['api_key'])}\n"
+            f"Live self-test: {live}")
         return
 
-    if sub in ("clearkey", "clear", "remove"):
-        await db.update_settings({"shortener_api_key": None})
+    if sub in ("pause", "resume"):
+        if len(args) < 2:
+            await update.message.reply_text(f"Usage: /shortenerapi {sub} <site>")
+            return
+        target = "paused" if sub == "pause" else "active"
+        if not await db.set_shortener_status(args[1], target):
+            await update.message.reply_text(
+                f"❌ No shortener named '{args[1].lower()}'.")
+            return
+        icon = "⏸" if sub == "pause" else "🟢"
+        extra = (" It stays in the list but is skipped in the rotation."
+                 if sub == "pause" else " It is back in the rotation.")
         await update.message.reply_text(
-            "🗑 Shortener API key removed from the database. "
-            "Falling back to the env var (if set).")
+            f"{icon} '{args[1].lower()}' is now {target}.{extra}")
         return
 
-    if sub in ("key", "setkey"):
-        args = args[1:]          # drop the 'key' word; fall through to set
-
-    if args and args[0].lower() in ("status",):
-        args = []                # bare status
-
-    if not args:
-        s = await db.get_settings()
-        dbkey = (s.get("shortener_api_key") or "").strip()
-        envkey = (config.SHORTENER_API_KEY or "").strip()
-        eff = dbkey or envkey
-        src = "database" if dbkey else ("env var" if envkey else "not set")
+    if sub in ("remove", "delete"):
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /shortenerapi remove <site>")
+            return
+        if not await db.remove_shortener(args[1]):
+            await update.message.reply_text(
+                f"❌ No shortener named '{args[1].lower()}'.")
+            return
         await update.message.reply_text(
-            "🔗 Shortener API status\n"
-            f"• Base: {s.get('shortener_api_base')}\n"
-            f"• Key: {_mask_key(dbkey)} (database)\n"
-            f"• Key: {_mask_key(envkey)} (env var)\n"
-            f"• Effective key: {_mask_key(eff)} → source: {src}\n\n"
-            "Set: /shortenerapi <key> · Base: /shortenerapi url <base> · "
-            "Remove: /shortenerapi clearkey")
+            f"🗑 '{args[1].lower()}' removed from the database and rotation.")
         return
 
-    token = args[0].strip()
-    if token.startswith(("http://", "https://")):
-        await db.update_settings({"shortener_api_base": token})
-        await update.message.reply_text(f"✅ Shortener API base set to {token}")
+    if sub and sub not in ("status", "list"):
+        await update.message.reply_text(
+            "Unknown action. Use:\n"
+            "/shortenerapi — dashboard\n"
+            "/shortenerapi add <site> <api_base> <api_key>\n"
+            "/shortenerapi pause <site> · resume <site> · remove <site>")
         return
-    await db.update_settings({"shortener_api_key": token})
-    short = await _sh.shorten("https://example.com/self-test")
-    live = "✅ key verified live (shortener accepted it)." if short else (
-        "⚠️ saved, but the live self-test did not return a link — check the key.")
-    await update.message.reply_text(
-        f"✅ Shortener API key saved to the database (global, survives restarts).\n"
-        f"Key: {_mask_key(token)}\n"
-        f"Base: {(await db.get_settings()).get('shortener_api_base')}\n"
-        f"Live self-test: {live}")
+
+    rows = await db.list_shorteners()
+    if not rows:
+        await update.message.reply_text(
+            "🔗 No shorteners configured yet.\n"
+            "Add one: /shortenerapi add <site> <api_base> <api_key>\n"
+            "Example: /shortenerapi add vplink https://vplink.in/api YOURKEY")
+        return
+    lines = ["🔗 Shortener rotation dashboard\n"]
+    for i, r in enumerate(rows, 1):
+        icon = "🟢" if r.get("status") == "active" else "⏸"
+        state = "Active" if r.get("status") == "active" else "Paused"
+        lines.append(f"{i}. {icon} {r['site']} — {state}")
+        lines.append(f"   Base: {r['api_base']}")
+        lines.append(f"   Key: {_mask_key(r.get('api_key'))}")
+    act = sum(1 for r in rows if r.get("status") == "active")
+    lines.append(f"\n{len(rows)} total · {act} active · {len(rows) - act} paused")
+    lines.append("Users rotate per-person through the ACTIVE ones only.")
+    lines.append("Manage: add · pause · resume · remove")
+    await update.message.reply_text("\n".join(lines))
 
 
 @admin_only

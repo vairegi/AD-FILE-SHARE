@@ -155,7 +155,7 @@ curl "https://api.telegram.org/bot<BOT2_TOKEN>/setWebhook" \
    /addcategory jav Jav           (guided wizard: DB channel -> posting
                                    channel -> main channel -> tag -> time)
    /setforcesub <channel_id>      (or /setforcesub off)
-   /shortenerapi https://vplink.in/api
+   /shortenerapi add vplink https://vplink.in/api YOUR_KEY
    /shortener on
    /setverifytime 6
    /setautodelete 7day jav
@@ -232,7 +232,7 @@ automatically.
 | Command | Effect |
 |---|---|
 | `/shortener on\|off\|status` | toggle or inspect the gate |
-| `/shortenerapi <url>` | set the shortener API base |
+| `/shortenerapi` | rotation dashboard — `add`/`pause`/`resume`/`remove` shorteners |
 | `/setverifytime <hours>` | verification validity (default 6) — per category |
 | `/settokenttl <minutes>` | Bot 1 → Bot 2 handoff token TTL |
 | `/shortenermsg <text>` | landing/overlay heading |
@@ -320,3 +320,36 @@ distribute. Deploy it with media you hold the rights to.
   live channel_post) now treat any `video/*` mime-type document as a video.
 - After deploying, re-scan the affected pipeline(s) (`/rescandb` or Scan now) so
   already-uploaded MKV files are indexed correctly. New uploads work immediately.
+
+---
+
+## v3.2 (2026-09-20) — multi-shortener round-robin + instant anti-bypass ban
+
+**Multi-shortener rotation.** `/shortenerapi` is now a management dashboard
+for MULTIPLE shorteners instead of one global key:
+
+- `/shortenerapi` — lists every saved shortener: site name, masked key,
+  API base, 🟢 Active / ⏸ Paused.
+- `/shortenerapi add <site> <api_base> <api_key>` — add to the rotation
+  (validates the URL, rejects duplicate names, then runs a live self-test).
+  Example: `/shortenerapi add gplink https://gplinks.in/api YOURKEY`
+- `/shortenerapi pause <site>` — stays in the list but is SKIPPED in rotation.
+- `/shortenerapi resume <site>` — back into rotation.
+- `/shortenerapi remove <site>` — deleted from the database completely.
+- The old single-key syntax (bare key / `url` / `clearkey`) was REMOVED.
+
+How rotation works: every Download tap advances THAT USER'S own round-robin
+cursor (stored on the user doc) and picks from the ACTIVE shorteners only —
+paused entries are filtered out before the pick, so they can never serve a
+link. Fail-open: if EVERY shortener is paused, the user gets the file
+directly (same as today's disabled-gate behavior; logged as a warning).
+Each verify token records which shortener served it (`shortener_site`).
+
+Storage: new `shorteners` MongoDB collection (unique index on `site`). On
+first startup the legacy single key (settings.shortener_api_key, else the
+SHORTENER_API_KEY env var) is migrated in as `vplink` — no key needs to be
+re-entered, and the old settings fields stay untouched as a safety net.
+
+**Instant anti-bypass ban.** The verify timing gate no longer gives 3
+strikes: ONE too-fast attempt burns the token and bans the user immediately.
+The admin alert (username, elapsed seconds, /unban hint) is unchanged.

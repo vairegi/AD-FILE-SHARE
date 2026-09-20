@@ -120,6 +120,21 @@ async def connect():
         {"_id": "global"}, {"$setOnInsert": DEFAULT_SETTINGS}, upsert=True
     )
     await _db.users.create_index("user_id", unique=True)
+    await _db.shorteners.create_index("site", unique=True)
+    # v3.2 migration: seed the shorteners collection from the legacy
+    # single-key setup (settings field, else the SHORTENER_API_KEY env var)
+    # on first startup after deploy — the owner never re-enters a key.
+    if await _db.shorteners.count_documents({}) == 0:
+        _legacy = await _db.settings.find_one({"_id": "global"}) or {}
+        _lkey = (_legacy.get("shortener_api_key")
+                 or config.SHORTENER_API_KEY or "").strip()
+        if _lkey:
+            await _db.shorteners.insert_one({
+                "site": "vplink",
+                "api_base": (_legacy.get("shortener_api_base")
+                             or "https://vplink.in/api").strip(),
+                "api_key": _lkey, "status": "active",
+                "added_at": now(), "updated_at": now()})
     await _db.files.create_index([("category", 1), ("db_message_id", 1)], unique=True)
     await _db.files.create_index("file_id", unique=True, sparse=True)
     await _db.files.create_index([("category", 1), ("posted", 1)])
@@ -740,3 +755,75 @@ async def clear_queue_cursor(category=None):
     else:
         await _db.settings.update_one(
             {"_id": "global"}, {"$unset": {"queue_cursor": ""}})
+
+
+# ── shorteners (multi-shortener round-robin, v3.2) ────────────
+async def list_shorteners():
+    """Every configured shortener, sorted by site name (stable order)."""
+    return await _db.shorteners.find({}).sort("site", 1).to_list(None)
+
+
+async def get_shortener(site):
+    return await _db.shorteners.find_one({"site": _norm_key(site)})
+
+
+async def add_shortener(site, api_base, api_key):
+    """Insert a shortener. Returns the doc, or None if site already exists."""
+    site = _norm_key(site)
+    if not site or not site.replace("_", "").isalnum():
+        raise ValueError("invalid site name")
+    if await _db.shorteners.find_one({"site": site}):
+        return None
+    doc = {"site": site, "api_base": api_base.strip(),
+           "api_key": api_key.strip(), "status": "active",
+           "added_at": now(), "updated_at": now()}
+    await _db.shorteners.insert_one(doc)
+    return doc
+
+
+async def set_shortener_status(site, status):
+    """'active' or 'paused'. Returns True when the site exists."""
+    res = await _db.shorteners.update_one(
+        {"site": _norm_key(site)},
+        {"$set": {"status": status, "updated_at": now()}})
+    return res.matched_count > 0
+
+
+async def remove_shortener(site):
+    res = await _db.shorteners.delete_one({"site": _norm_key(site)})
+    return res.deleted_count > 0
+
+
+async def count_shorteners():
+    return await _db.shorteners.count_documents({})
+
+
+async def next_shortener(user_id):
+    """Per-user round-robin over ACTIVE shorteners only (v3.2).
+
+    Paused shorteners are filtered out BEFORE the modulo pick, so they can
+    never be selected. The user's own cursor advances atomically on every
+    call; the chosen site is remembered on the user doc (rr_last_site).
+    Returns the shortener doc, or None when every shortener is paused
+    (caller fails open and delivers the file directly)."""
+    active = await _db.shorteners.find(
+        {"status": "active"}).sort("site", 1).to_list(None)
+    if not active:
+        return None
+    udoc = await _db.users.find_one_and_update(
+        {"user_id": user_id},
+        {"$inc": {"rr_cursor": 1}},
+        upsert=True,
+        return_document=True,
+    )
+    cursor = int(udoc.get("rr_cursor") or 1)
+    chosen = active[(cursor - 1) % len(active)]
+    await _db.users.update_one({"user_id": user_id},
+                               {"$set": {"rr_last_site": chosen["site"]}})
+    return chosen
+
+
+async def set_token_shortener(token, site):
+    """Record which shortener served a verify token (stats/debugging)."""
+    await _db.tokens.update_one({"token": token},
+                                {"$set": {"shortener_site": site}})
