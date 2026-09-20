@@ -353,3 +353,18 @@ re-entered, and the old settings fields stay untouched as a safety net.
 **Instant anti-bypass ban.** The verify timing gate no longer gives 3
 strikes: ONE too-fast attempt burns the token and bans the user immediately.
 The admin alert (username, elapsed seconds, /unban hint) is unchanged.
+
+---
+
+## v3.3 (2026-09-20) — hotfix: shortener re-add after remove
+
+**Bug:** after `/shortenerapi remove <site>` removed the LAST entry, the
+v3.2 migration (which runs whenever the collection is empty) re-seeded
+`vplink` from the legacy/env key on the next process start — so re-adding
+the same name with a different base failed with "already exists".
+**Fix:** migration now runs exactly ONCE (guard flag
+`settings.shorteners_migrated`); an empty rotation stays empty forever.
+The SHORTENER_API_KEY env var is no longer read at runtime — the
+`shorteners` collection (managed only via /shortenerapi) is the single
+source of truth. `add` now also tells you the existing entry's base when
+a name is taken, and how to replace it.

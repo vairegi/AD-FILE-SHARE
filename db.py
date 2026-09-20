@@ -124,17 +124,21 @@ async def connect():
     # v3.2 migration: seed the shorteners collection from the legacy
     # single-key setup (settings field, else the SHORTENER_API_KEY env var)
     # on first startup after deploy — the owner never re-enters a key.
-    if await _db.shorteners.count_documents({}) == 0:
-        _legacy = await _db.settings.find_one({"_id": "global"}) or {}
-        _lkey = (_legacy.get("shortener_api_key")
-                 or config.SHORTENER_API_KEY or "").strip()
-        if _lkey:
-            await _db.shorteners.insert_one({
-                "site": "vplink",
-                "api_base": (_legacy.get("shortener_api_base")
-                             or "https://vplink.in/api").strip(),
-                "api_key": _lkey, "status": "active",
-                "added_at": now(), "updated_at": now()})
+    _legacy = await _db.settings.find_one({"_id": "global"}) or {}
+    if not _legacy.get("shorteners_migrated"):
+        if await _db.shorteners.count_documents({}) == 0:
+            _lkey = (_legacy.get("shortener_api_key")
+                     or config.SHORTENER_API_KEY or "").strip()
+            if _lkey:
+                await _db.shorteners.insert_one({
+                    "site": "vplink",
+                    "api_base": (_legacy.get("shortener_api_base")
+                                 or "https://vplink.in/api").strip(),
+                    "api_key": _lkey, "status": "active",
+                    "added_at": now(), "updated_at": now()})
+        await _db.settings.update_one(
+            {"_id": "global"},
+            {"$set": {"shorteners_migrated": True}}, upsert=True)
     await _db.files.create_index([("category", 1), ("db_message_id", 1)], unique=True)
     await _db.files.create_index("file_id", unique=True, sparse=True)
     await _db.files.create_index([("category", 1), ("posted", 1)])

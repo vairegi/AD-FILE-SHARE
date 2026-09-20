@@ -559,9 +559,12 @@ async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Invalid site name — letters, numbers and _ only.")
             return
         if not doc:
+            ex = await db.get_shortener(args[1])
             await update.message.reply_text(
-                f"⚠️ '{args[1].lower()}' already exists. "
-                "Remove it first or pick another name.")
+                f"⚠️ '{args[1].lower()}' already exists with base "
+                f"{(ex or {}).get('api_base')}.\n"
+                f"To change it: /shortenerapi remove {args[1].lower()} "
+                f"then add it again.")
             return
         short = await _sh.test_key(doc["api_base"], doc["api_key"])
         live = "✅ key verified live (shortener accepted it)." if short else (

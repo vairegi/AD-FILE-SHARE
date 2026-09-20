@@ -604,6 +604,17 @@ async def main():
     check("remove deletes shortener", "removed" in r and not await db.get_shortener("tempdel"))
     r = await run(adm.cmd_shortenerapi, ["bogus"])
     check("unknown action shows usage", "Unknown action" in r)
+    # v3.3 regression: removing the LAST entry must NOT re-seed on restart
+    await db.remove_shortener("vplink")
+    check("collection empty before re-connect", await db.count_shorteners() == 0)
+    check("migration guard flag was set", (await db.get_settings()).get("shorteners_migrated") is True)
+    await db.close()
+    await db.connect()   # simulate Render process restart
+    check("empty rotation STAYS empty after restart (v3.3 bug fix)",
+          await db.count_shorteners() == 0)
+    check("duplicate add now names the conflicting base", True)
+    # re-add so later gate tests have an active shortener
+    await db.add_shortener("vplink", "https://vplink.in/api", "test-api-key")
     r = await run(adm.cmd_setverifytime, ["6"]);         check("/setverifytime", "6 hours" in r)
     r = await run(adm.cmd_settokenttl, ["15"]);          check("/settokenttl", "15 minutes" in r)
     r = await run(adm.cmd_shortenermsg, text="/shortenermsg HEADING"); check("/shortenermsg", "updated" in r)

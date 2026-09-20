@@ -68,7 +68,7 @@ async def shorten(long_url: str, user_id=None):
         # Legacy fallback: no shorteners collection entries at all (fresh
         # deploy before migration, or migration found no key anywhere).
         settings = await db.get_settings()
-        key = (settings.get("shortener_api_key") or config.SHORTENER_API_KEY or "").strip()
+        key = (settings.get("shortener_api_key") or "").strip()
         if not key:
             log.warning("No shortener API key set (DB or env); cannot shorten.")
             return None
