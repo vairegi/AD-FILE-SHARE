@@ -368,3 +368,20 @@ The SHORTENER_API_KEY env var is no longer read at runtime — the
 `shorteners` collection (managed only via /shortenerapi) is the single
 source of truth. `add` now also tells you the existing entry's base when
 a name is taken, and how to replace it.
+
+---
+
+## v3.4 (2026-09-20) — multiple force-sub channels + shortener note
+
+**Force-sub now supports MULTIPLE channels.** `/setforcesub <channel_id>`
+APPENDS to the required list instead of replacing the previous one (global
+default), `/setforcesub <channel_id> <category>` appends per-category, and
+`/setforcesub off` clears the list. Users must be members of ALL required
+channels; the gate message shows one Join button per channel. Backward
+compatible: the old single `force_sub_channel_id` value is honoured until
+you set the new list.
+
+**Shortener self-test clarification:** the ⚠️ on adding `vplink` was NOT a
+bot bug — the base `https://vplinks.com/api` has no working TLS (connection
+fails), while `https://vplink.in/api` works with the same key. Always use
+the exact API base from your provider dashboard.

@@ -62,6 +62,7 @@ DEFAULT_SETTINGS = {
     "verify_msg": "✅ Verification complete! Tap below to get your file.",
     "shortener_buttons": [],
     "force_sub_channel_id": config.FORCE_SUB_CHANNEL_ID,   # global default
+    "force_sub_channel_ids": None,    # v3.4: plural list; None -> singular above
     # legacy single-pipeline knobs, kept only as migration seeds:
     "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
@@ -90,6 +91,7 @@ DEFAULT_CATEGORY = {
     "schedule_paused": False,
     "queue_cursor": None,
     "force_sub_channel_id": None,         # None -> use the global default
+    "force_sub_channel_ids": None,        # v3.4: plural per-category list
     "protect_content": False,
     "auto_delete_minutes": 15,
     "with_file_message": None,   # per-pipeline override of the delivery notice
@@ -831,3 +833,21 @@ async def set_token_shortener(token, site):
     """Record which shortener served a verify token (stats/debugging)."""
     await _db.tokens.update_one({"token": token},
                                 {"$set": {"shortener_site": site}})
+
+
+# ── force-sub channel lists (v3.4) ────────────────────────────
+async def force_sub_channels(category=None):
+    """Resolved list of force-sub channel ids for a category (never None)."""
+    if category:
+        cat = await _db.categories.find_one({"key": category})
+        if cat:
+            if cat.get("force_sub_channel_ids"):
+                return [int(x) for x in cat["force_sub_channel_ids"] if x]
+            if cat.get("force_sub_channel_id"):
+                return [int(cat["force_sub_channel_id"])]
+    s = await get_settings()
+    if s.get("force_sub_channel_ids"):
+        return [int(x) for x in s["force_sub_channel_ids"] if x]
+    if s.get("force_sub_channel_id"):
+        return [int(s["force_sub_channel_id"])]
+    return []

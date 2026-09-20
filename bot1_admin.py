@@ -829,25 +829,42 @@ async def cmd_setforcesub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Force-sub override cleared for [{target_key}] (uses global default).")
         else:
-            await db.update_settings({"force_sub_channel_id": None})
-            await update.message.reply_text("✅ Force-subscribe disabled (global).")
+            await db.update_settings({"force_sub_channel_ids": []})
+            await update.message.reply_text("✅ All force-subscribe channels cleared (global).")
         return
     channel_id = _parse_channel_id(val)
     if channel_id is None:
         await update.message.reply_text("Provide a numeric channel id or 'off'.")
         return
     if target_key:
-        await db.update_category(target_key, {"force_sub_channel_id": channel_id})
+        cat = await db.get_category(target_key)
+        cur = [int(x) for x in (cat.get("force_sub_channel_ids")
+               or ([cat["force_sub_channel_id"]] if cat.get("force_sub_channel_id") else []))]
+        if channel_id in cur:
+            await update.message.reply_text(f"ℹ️ Channel already required for [{target_key}].")
+            return
+        cur.append(channel_id)
+        await db.update_category(target_key, {"force_sub_channel_ids": cur})
         scope = f"[{target_key}]"
     else:
-        await db.update_settings({"force_sub_channel_id": channel_id})
+        s = await db.get_settings()
+        cur = [int(x) for x in (s.get("force_sub_channel_ids")
+               or ([s["force_sub_channel_id"]] if s.get("force_sub_channel_id") else []))]
+        if channel_id in cur:
+            await update.message.reply_text("ℹ️ Channel already required (global).")
+            return
+        cur.append(channel_id)
+        await db.update_settings({"force_sub_channel_ids": cur})
         scope = "global default"
     try:
         me = await context.bot.get_chat_member(channel_id, context.bot.id)
         note = f"Bot status in channel: {me.status}"
     except Exception as exc:
         note = f"⚠️ Could not verify bot membership there: {exc}"
-    await update.message.reply_text(f"✅ Force-subscribe channel set ({scope}).\n{note}")
+    chans = await db.force_sub_channels(target_key)
+    await update.message.reply_text(
+        f"✅ Channel added to force-subscribe ({scope}).\n{note}\n"
+        f"Total required channels now: {len(chans)}")
 
 
 # ══════════════════════════════════════════════════════════════

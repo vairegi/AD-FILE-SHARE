@@ -628,8 +628,13 @@ async def main():
     r = await run(adm.cmd_ban, ["4242"]);                check("/ban", "Banned" in r)
     r = await run(adm.cmd_unban, ["4242"]);              check("/unban", "Unbanned" in r)
     r = await run(adm.cmd_addadmin, ["31337"]);          check("/addadmin", "now an admin" in r)
-    r = await run(adm.cmd_setforcesub, ["-100555"]);     check("/setforcesub", "Force-subscribe channel set" in r)
-    r = await run(adm.cmd_setforcesub, ["off"]);         check("/setforcesub off", "disabled" in r)
+    r = await run(adm.cmd_setforcesub, ["-100555"]);     check("/setforcesub", "force-subscribe" in r)
+    r = await run(adm.cmd_setforcesub, ["-100777"]);     check("/setforcesub second channel appends",
+          "Total required channels now: 2" in r)
+    chans = await db.force_sub_channels()
+    check("  -> both channels required", chans == [-100555, -100777])
+    r = await run(adm.cmd_setforcesub, ["off"]);         check("/setforcesub off", "cleared" in r)
+    check("  -> list cleared", await db.force_sub_channels() == [])
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)
     check("  -> stored as minutes (per category)",
           (await db.get_category("jav"))["auto_delete_minutes"] == 10080)

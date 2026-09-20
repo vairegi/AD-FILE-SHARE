@@ -167,13 +167,17 @@ async def _force_sub_channel_for(category):
 async def gate_ok(bot, user_id, category=None) -> bool:
     """Force-subscribe gate: active member OR a pending join request passes."""
     channel = await _force_sub_channel_for(category)
-    if not channel:
-        return True
-    member = await _is_member(bot, channel, user_id)
-    if member is True:
-        return True
-    if await db.has_join_request(user_id):
-        return True
+    channels = await db.force_sub_channels(category)
+    for channel in channels or ([channel] if channel else []):
+        if not channel:
+            continue
+        member = await _is_member(bot, channel, user_id)
+        if member is True:
+            continue
+        if await db.has_join_request(user_id):
+            continue
+        return False   # missing at least one required channel
+    return True
     if member is None:
         # Misconfiguration (bot not admin / wrong id) — fail open so real users
         # are not locked out. Log it so the admin can fix the setup.
@@ -184,10 +188,11 @@ async def gate_ok(bot, user_id, category=None) -> bool:
 
 async def send_force_sub(bot, chat_id, file_id, category=None):
     channel = await _force_sub_channel_for(category)
-    url = await _channel_link(bot, channel) if channel else None
     rows = []
-    if url:
-        rows.append([InlineKeyboardButton("📢 Join Channel", url=url)])
+    for ch in await db.force_sub_channels(category):
+        u = await _channel_link(bot, ch)
+        if u:
+            rows.append([InlineKeyboardButton("📢 Join Channel", url=u)])
     rows.append([InlineKeyboardButton("✅ I've Joined", callback_data=f"checksub:{file_id}")])
     await bot.send_message(
         chat_id,
