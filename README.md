@@ -426,3 +426,16 @@ gets its link. The gate button picks it up automatically.
 
 **Cosmetic:** /forcesublist and /forcesubremove moved from "General" to the
 "Access & content" section of the /admin help list.
+
+---
+
+## v3.7 (2026-09-22) — /banlist as a native rich-message table
+
+`/banlist` now renders as a real table using Bot API 10.1+ Rich Messages
+(`sendRichMessage` -> `InputRichBlockTable`, `is_compact: true`): columns
+# / User / Detail / Tap-to-copy, with the `/unban <id>` cell in code style
+so one tap copies only the command. Long lists (70-80+) are split into
+45-row table pages automatically (rich-message limits: 32k chars / 500
+blocks / 20 columns). If Telegram rejects the rich payload on any client
+or rollout stage, the bot automatically falls back to paged inline-code
+text messages (40 rows each) — the list can never fail to display.

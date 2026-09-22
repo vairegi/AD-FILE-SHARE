@@ -712,6 +712,31 @@ async def main():
           (await db.get_settings()).get("force_sub_links", {}).get("-100888")
           == "https://t.me/+BackfillLink123")
     await db.clear_force_sub(None)
+
+    # ── v3.7: /banlist rich table payload + fallback paging ──
+    many = [{"user_id": 1000 + i, "username": f"user{i}",
+             "last_bypass_elapsed": 10.0 + i} for i in range(120)]
+    pages = adm._banlist_table_payload(many)
+    check("banlist table paginates 120 users into 3 pages", len(pages) == 3)
+    check("  -> page 1 has header + 45 rows", len(pages[0]["rich_message"]["blocks"][0]["rows"]) == 46)
+    check("  -> last page has header + 30 rows", len(pages[-1]["rich_message"]["blocks"][0]["rows"]) == 31)
+    blk = pages[0]["rich_message"]["blocks"][0]
+    check("  -> compact table block", blk["type"] == "table" and blk["is_compact"] is True)
+    r1c4 = blk["rows"][1][3]
+    check("  -> unban cell is tap-to-copy code",
+          r1c4["text"] == "/unban 1000" and r1c4["entities"][0]["type"] == "code")
+    class _NoRichBot(FakeBot):
+        async def _post(self, *a2, **k):
+            raise RuntimeError("400 Bad Request: rich messages unsupported")
+    for i in range(3):
+        await db.set_banned(500000 + i, True)
+        await db.mark_ban_info(500000 + i, f"rich{i}", 5.0 + i)
+    upd4 = FakeUpdate(uid=999)
+    await adm.cmd_banlist(upd4, FakeContext(args=[], bot=_NoRichBot()))
+    check("banlist falls back to paged inline-code text when rich fails",
+          any("`/unban 500000`" in txt for txt in upd4.message.replies))
+    for i in range(3):
+        await db.set_banned(500000 + i, False)
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)
     check("  -> stored as minutes (per category)",
           (await db.get_category("jav"))["auto_delete_minutes"] == 10080)

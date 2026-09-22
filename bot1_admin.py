@@ -874,20 +874,65 @@ async def cmd_banmessage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Ban message updated.\n\nPreview:\n{text}")
 
 
+def _banlist_table_payload(users):
+    """Build the Bot API 10.1+ rich-message table payload for /banlist.
+
+    Structure: InputRichMessage{blocks:[InputRichBlockTable{...}]}.
+    Cells are plain-text rich blocks; the unban command cell is monospace
+    (code) so one tap copies ONLY the command. 45 rows per table page keeps
+    us far under the 32k-char / 500-block rich-message limits even with
+    long usernames. Pure function -> fully unit-testable."""
+    def cell(text, code=False):
+        fmt = [{"type": "code", "offset": 0, "length": len(text)}] if code else []
+        return {"type": "paragraph", "text": text, "entities": fmt}
+    header = [cell("#"), cell("User"), cell("Detail"), cell("Tap to copy")]
+    rows, pages = [], []
+    for i, u in enumerate(users, 1):
+        uname = f"@{u['username']}" if u.get("username") else f"id:{u['user_id']}"
+        el = u.get("last_bypass_elapsed")
+        part = f"Elapsed: {el:.1f}s" if el is not None else "manual ban"
+        rows.append([cell(str(i)), cell(uname), cell(part),
+                     cell(f"/unban {u['user_id']}", code=True)])
+        if len(rows) == 45:
+            pages.append(rows); rows = []
+    if rows:
+        pages.append(rows)
+    return [{"chat_id": None,   # filled by caller
+             "rich_message": {"blocks": [
+                 {"type": "table", "is_compact": True,
+                  "rows": ([header] + page)}]},
+             "disable_notification": False} for page in pages]
+
+
 @admin_only
 async def cmd_banlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/banlist — every banned user; tap the inline-code command to copy it."""
+    """/banlist — banned users as a native rich-message table (Bot API 10.1+).
+    Long lists are split into multiple tables automatically. If Telegram
+    rejects the rich payload (older rollout), falls back to paged inline-code
+    messages so the command is always one-tap-copyable."""
     users = await db.list_banned()
     if not users:
         await update.message.reply_text("✅ No banned users.")
         return
-    lines = [f"🚫 Banned users ({len(users)})\n"]
+    payloads = _banlist_table_payload(users)
+    try:
+        for p in payloads:
+            p["chat_id"] = update.effective_chat.id
+            await context.bot._post("sendRichMessage", data=p)
+        return
+    except Exception as exc:
+        log.warning("rich banlist failed (%s); falling back to paged text", exc)
+    lines = [f"🚫 Banned users ({len(users)})"]
     for i, u in enumerate(users, 1):
         uname = f"@{u['username']}" if u.get("username") else f"id:{u['user_id']}"
         el = u.get("last_bypass_elapsed")
         part = f"Elapsed: {el:.1f}s" if el is not None else "manual ban"
         lines.append(f"{i} - {uname} {part} `/unban {u['user_id']}`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        if len(lines) >= 41:      # page: header + 40 rows
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            lines = []
+    if lines:
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 @admin_only
