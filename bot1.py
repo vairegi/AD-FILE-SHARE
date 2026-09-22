@@ -226,12 +226,21 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
     for b in settings.get("shortener_buttons") or []:
         rows.append([InlineKeyboardButton(b["label"], url=b["url"])])
 
-    heading = settings.get("shortener_msg") or "Verification required"
     body = settings.get("shortenerbot_msg") or ""
+    _html = settings.get("shortener_msg_html")
+    if _html:
+        # v3.9: rich heading (set via /shortenermsg with entities / reply)
+        _text = f"{_html}\n\n{body}" if body else _html
+        _pm = "HTML"
+    else:
+        heading = settings.get("shortener_msg") or "Verification required"
+        _text = f"{heading}\n\n{body}"
+        _pm = None
     await bot.send_message(
-        chat_id, f"{heading}\n\n{body}",
+        chat_id, _text,
         reply_markup=InlineKeyboardMarkup(rows),
         disable_web_page_preview=True,
+        parse_mode=_pm,
     )
 
 
@@ -633,7 +642,11 @@ def build_bot1() -> Application:
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     from bot1_admin import sticker_intake
     from telegram.ext import MessageHandler, filters as _flt
-    app.add_handler(MessageHandler(_flt.ALL & ~_flt.COMMAND, sticker_intake))
+    # v3.9 FIX: group=1 and STICKER-only filter. As group-0 filters.ALL it ran
+    # AFTER nothing (same group as catch-all text below) and, worse, swallowed
+    # every non-command message silently — the forwarded sticker never got a
+    # reply and was never saved. Now: dedicated later group, stickers only.
+    app.add_handler(MessageHandler(_flt.Sticker.ALL, sticker_intake), group=1)
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
     # conversational /addcategory + /editcategory wizard (free-text answers)
     from bot1_admin import wizard_message_handler

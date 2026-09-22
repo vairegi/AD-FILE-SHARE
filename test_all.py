@@ -755,6 +755,7 @@ async def main():
           == "1 - @x manual <code>/unban 7</code>")
 
     # ── v3.8: /addsticker flow + sticker posted after channel post ──
+    import types as _t
     r = await run(adm.cmd_addsticker, [])
     check("/addsticker asks for the sticker", "sticker" in r.lower())
     check("  -> waiting flag set", await db.is_sticker_waiting(999))
@@ -788,6 +789,61 @@ async def main():
     r = await run(adm.cmd_removesticker, [])
     check("/removesticker clears it",
           (await db.get_settings()).get("post_sticker_id") is None)
+
+    # ── v3.9: rich /shortenermsg (entities -> HTML, reply mode) ──
+    class _Ent:
+        def __init__(self, type_, offset, length, url=None):
+            self.type, self.offset, self.length, self.url = type_, offset, length, url
+    # entities_to_html: code block + bold preserved, quotes escaped safely
+    html1 = adm._entities_to_html('say "hi" NOW', [_Ent("bold", 9, 3),
+                                                   _Ent("code", 0, 3)])
+    check("entities->html: bold + code + quote-safe",
+          html1 == '<code>say</code> &quot;hi&quot; <b>NOW</b>')
+    html2 = adm._entities_to_html("```test``` plain", [_Ent("pre", 0, 11)])
+    check("entities->html: pre block (```test```)",
+          html2 == "<pre>```test``` plain</pre>" or "<pre>" in html2)
+    # /shortenermsg with entities (arg mode)
+    upd7 = FakeUpdate(uid=999, text="/shortenermsg READY now")
+    upd7.message.text = "/shortenermsg READY now"
+    upd7.message.entities = [_Ent("bold", 14, 5)]
+    upd7.message.reply_to_message = None
+    await adm.cmd_shortenermsg(upd7, FakeContext(args=["READY", "now"]))
+    s39 = await db.get_settings()
+    check("/shortenermsg stores rich html",
+          s39.get("shortener_msg_html") and "<b>READY</b>" in s39["shortener_msg_html"])
+    # reply mode: copy rich text from the replied message
+    rep = FakeMessage("Quoted **heading**")
+    rep.text = "Quoted heading"
+    rep.entities = [_Ent("bold", 7, 7)]
+    upd8 = FakeUpdate(uid=999, text="/shortenermsg")
+    upd8.message.text = "/shortenermsg"
+    upd8.message.entities = []
+    upd8.message.reply_to_message = rep
+    await adm.cmd_shortenermsg(upd8, FakeContext(args=[]))
+    s39b = await db.get_settings()
+    check("/shortenermsg reply mode copies rich text",
+          s39b.get("shortener_msg") == "Quoted heading"
+          and "<b>heading</b>" in s39b["shortener_msg_html"])
+    # gate uses the rich html heading
+    class _HtmlBot(FakeBot):
+        def __init__(self):
+            super().__init__(); self.last_pm = None
+        async def send_message(self, chat_id, text, **kw):
+            self.last_pm = kw.get("parse_mode"); self.sent.append((chat_id, text, kw))
+    await db.upsert_item({"file_id": "f190", "db_message_id": 190,
+                          "cover_message_id": 190, "caption": "v39",
+                          "videos": [{"db_message_id": 191, "caption": ""}], "srts": []})
+    fbh = _HtmlBot()
+    orig_sh = shortener.shorten
+    async def _sh(u, user_id=None): return "https://x.in/abc"
+    shortener.shorten = _sh
+    await bot1.send_shortener_gate(fbh, 999, 4242,
+                                   {"file_id": "f190"}, await db.get_settings())
+    shortener.shorten = orig_sh
+    check("gate sends HTML heading with rich formatting",
+          fbh.last_pm == "HTML" and "<b>heading</b>" in fbh.sent[-1][1])
+    await db.update_settings({"shortener_msg_html": None,
+                              "shortener_msg": "🔓 Verification required"})
     await db._db.raw.delete_many({"message_id": {"$in": [700, 701]}})
     await db._db.files.delete_many({"file_id": "jav_f700"})
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)

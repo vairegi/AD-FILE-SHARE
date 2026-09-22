@@ -654,12 +654,76 @@ async def cmd_settokenttl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_shortenermsg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.partition(" ")[2].strip()
-    if not text:
-        await update.message.reply_text("Usage: /shortenermsg <heading text>")
-        return
-    await db.update_settings({"shortener_msg": text})
-    await update.message.reply_text("✅ Heading updated.")
+    """/shortenermsg <text> — set the gate heading. Rich input supported:
+    Markdown and ```code blocks``` in the argument are kept verbatim
+    (message entities are converted to HTML and stored), or REPLY to any
+    message with /shortenermsg to copy that message's rich text. Quotes
+    and formatting survive exactly."""
+    from telegram.helpers import mention_html  # noqa: F401  (ptb present)
+    import html as _html
+
+    src = update.message
+    rep = getattr(update.message, "reply_to_message", None)
+    if rep and getattr(rep, "text", None):
+        src = rep
+        raw_text, entities = src.text, list(getattr(src, "entities", None) or [])
+    else:
+        arg_text = update.message.text.partition(" ")[2]
+        if not arg_text.strip():
+            await update.message.reply_text(
+                "Usage: /shortenermsg <heading text>\n"
+                "or reply to a formatted message with /shortenermsg")
+            return
+        # entities of the command message shifted by the command itself
+        off = len(update.message.text) - len(arg_text)
+        raw_text = arg_text
+        entities = []
+        for e in (getattr(update.message, "entities", None) or []):
+            end = e.offset + e.length
+            if e.offset >= off:
+                entities.append(type(e)(type=e.type, offset=e.offset - off,
+                                        length=e.length, url=getattr(e, "url", None),
+                                        user=getattr(e, "user", None),
+                                        language=getattr(e, "language", None)))
+    html_body = _entities_to_html(raw_text, entities)
+    await db.update_settings({"shortener_msg": raw_text,
+                              "shortener_msg_html": html_body})
+    await update.message.reply_text(
+        "✅ Heading updated (rich formatting saved).\n\nPreview:\n"
+        + html_body, parse_mode="HTML")
+
+
+def _entities_to_html(text, entities):
+    """Minimal Telegram-entity -> HTML converter (bold/italic/code/pre/
+    underline/strikethrough/spoiler/link/blockquote). Unknown entities are
+    ignored; overlapping entities are applied in offset order."""
+    if not entities:
+        import html as _h
+        return _h.escape(text)
+    import html as _h
+    tag = {"bold": ("<b>", "</b>"), "italic": ("<i>", "</i>"),
+           "underline": ("<u>", "</u>"), "strikethrough": ("<s>", "</s>"),
+           "spoiler": ("<tg-spoiler>", "</tg-spoiler>"), "code": ("<code>", "</code>"),
+           "blockquote": ("<blockquote>", "</blockquote>")}
+    points = {}
+    for e in entities:
+        if e.type == "pre":
+            o, c = "<pre>", "</pre>"
+        elif e.type == "text_link" and getattr(e, "url", None):
+            o, c = f'<a href="{_h.escape(e.url)}">', "</a>"
+        elif e.type in tag:
+            o, c = tag[e.type]
+        else:
+            continue
+        points.setdefault(e.offset, []).append(o)
+        points.setdefault(e.offset + e.length, []).insert(0, c)
+    out, last = [], 0
+    for pos in sorted(points):
+        out.append(_h.escape(text[last:pos]))
+        out.extend(points[pos])
+        last = pos
+    out.append(_h.escape(text[last:]))
+    return "".join(out)
 
 
 @admin_only
@@ -978,7 +1042,8 @@ async def sticker_intake(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await db.is_sticker_waiting(uid):
         return
-    if not await is_admin(uid):
+    _admins = set(config.ADMIN_IDS or []) | set(await db.list_admin_ids())
+    if uid not in _admins:
         await db.set_sticker_waiting(uid, False)
         return
     stk = update.message.sticker

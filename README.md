@@ -455,3 +455,21 @@ sticker; the bot saves it and posts it immediately after every channel
 post in every pipeline (a tap-able tag sticker under each post).
 `/removesticker` turns it off. Non-admin stickers are ignored; the intake
 auto-aborts if the next message isn't a sticker.
+
+---
+
+## v3.9 (2026-09-22) — /addsticker fix + rich /shortenermsg
+
+**Fix — /addsticker never captured the sticker.** The intake handler was
+registered in handler group 0 with a catch-all filter, so forwarded
+stickers were silently swallowed and never saved. It now lives in its own
+later group with a stickers-only filter — sticker captured, confirmed, and
+posted after every channel post.
+
+**Enhancement — /shortenermsg accepts rich input.** Plain text, Markdown
+styles (bold/italic/underline/strike/spoiler), ```pre blocks```, inline
+`code`, links, quotes and blockquotes all survive: message entities are
+converted to HTML and stored (shortener_msg_html). Reply to any formatted
+message with /shortenermsg to copy its rich text. The gate sends the
+heading with parse_mode=HTML when a rich version exists; the plain-text
+fallback path is unchanged.
