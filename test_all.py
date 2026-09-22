@@ -676,8 +676,10 @@ async def main():
     await db.set_banned(8416709177, True)
     await db.mark_ban_info(8416709177, "Noob7", 46.7)
     r = await run(adm.cmd_banlist, [])
-    check("/banlist exact format with tap-to-copy /unban",
-          "1 - @Noob7 Elapsed: 46.7s `/unban 8416709177`" in r)
+    # rich send fails on FakeBot (no _post) -> HTML fallback text
+    check("/banlist format with tap-to-copy /unban (fallback)",
+          "@Noob7 Elapsed: 46.7s" in r and "/unban 8416709177" in r
+          and ("<code>/unban 8416709177</code>" in r or "`/unban 8416709177`" in r))
     await db.set_banned(8416709177, False)
 
     # ── v3.6: instant-ban uses the CUSTOM ban message ──
@@ -718,11 +720,11 @@ async def main():
              "last_bypass_elapsed": 10.0 + i} for i in range(120)]
     pages = adm._banlist_table_payload(many)
     check("banlist table paginates 120 users into 3 pages", len(pages) == 3)
-    check("  -> page 1 has header + 45 rows", len(pages[0]["rich_message"]["blocks"][0]["rows"]) == 46)
-    check("  -> last page has header + 30 rows", len(pages[-1]["rich_message"]["blocks"][0]["rows"]) == 31)
+    check("  -> page 1 has header + 45 rows", len(pages[0]["rich_message"]["blocks"][0]["cells"]) == 46)
+    check("  -> last page has header + 30 rows", len(pages[-1]["rich_message"]["blocks"][0]["cells"]) == 31)
     blk = pages[0]["rich_message"]["blocks"][0]
     check("  -> compact table block", blk["type"] == "table" and blk["is_compact"] is True)
-    r1c4 = blk["rows"][1][3]
+    r1c4 = blk["cells"][1][3]
     check("  -> unban cell is tap-to-copy code",
           r1c4["text"] == "/unban 1000" and r1c4["entities"][0]["type"] == "code")
     class _NoRichBot(FakeBot):
@@ -734,9 +736,60 @@ async def main():
     upd4 = FakeUpdate(uid=999)
     await adm.cmd_banlist(upd4, FakeContext(args=[], bot=_NoRichBot()))
     check("banlist falls back to paged inline-code text when rich fails",
-          any("`/unban 500000`" in txt for txt in upd4.message.replies))
+          any("<code>/unban 500000</code>" in txt for txt in upd4.message.replies))
     for i in range(3):
         await db.set_banned(500000 + i, False)
+
+    # ── v3.8: table schema uses cells + InputRichText (Telegram's exact error) ──
+    one = adm._banlist_table_payload([{"user_id": 7, "username": "x",
+                                       "last_bypass_elapsed": 1.0}])
+    blk = one[0]["rich_message"]["blocks"][0]
+    check("table uses 'cells' field (Telegram: can't find field cells)",
+          "cells" in blk and "rows" not in blk)
+    check("cell is InputRichText (text+entities, no paragraph wrapper)",
+          blk["cells"][1][3] == {"text": "/unban 7",
+                                 "entities": [{"type": "code", "offset": 0,
+                                               "length": 8}]})
+    check("_md_to_html converts backticks to <code> safely",
+          adm._md_to_html("1 - @x manual `/unban 7`")
+          == "1 - @x manual <code>/unban 7</code>")
+
+    # ── v3.8: /addsticker flow + sticker posted after channel post ──
+    r = await run(adm.cmd_addsticker, [])
+    check("/addsticker asks for the sticker", "sticker" in r.lower())
+    check("  -> waiting flag set", await db.is_sticker_waiting(999))
+    upd5 = FakeUpdate(uid=999)
+    upd5.message.sticker = _t.SimpleNamespace(file_id="STICKER_FILE_ID_1")
+    await adm.sticker_intake(upd5, FakeContext(args=[]))
+    check("sticker captured and saved",
+          (await db.get_settings()).get("post_sticker_id") == "STICKER_FILE_ID_1")
+    check("  -> waiting flag cleared", not await db.is_sticker_waiting(999))
+    upd6 = FakeUpdate(uid=999)
+    upd6.message.sticker = None
+    await adm.sticker_intake(upd6, FakeContext(args=[]))
+    check("non-sticker intake ignored when not waiting",
+          (await db.get_settings()).get("post_sticker_id") == "STICKER_FILE_ID_1")
+    # do_post sends the sticker after the channel post
+    class _StkBot(FakeBot):
+        def __init__(self):
+            super().__init__(); self.stickers = []
+        async def send_sticker(self, chat_id=None, sticker=None, **kw):
+            self.stickers.append((chat_id, sticker))
+    fb_s = _StkBot()
+    await db.ingest_raw({"message_id": 700, "kind": "cover", "caption": "stk"}, "jav")
+    await db.ingest_raw({"message_id": 701, "kind": "video", "caption": "v"}, "jav")
+    await db.rebuild_items("jav")
+    cat = await db.get_category("jav")
+    cat = dict(cat); cat["post_channel_id"] = -100999
+    await bot1.do_post(fb_s, "jav_f700", cat)
+    check("sticker posted to channel right after the post",
+          fb_s.stickers and fb_s.stickers[-1][1] == "STICKER_FILE_ID_1"
+          and fb_s.stickers[-1][0] == -100999)
+    r = await run(adm.cmd_removesticker, [])
+    check("/removesticker clears it",
+          (await db.get_settings()).get("post_sticker_id") is None)
+    await db._db.raw.delete_many({"message_id": {"$in": [700, 701]}})
+    await db._db.files.delete_many({"file_id": "jav_f700"})
     r = await run(adm.cmd_setautodelete, ["7day"]);      check("/setautodelete 7day", "7 days" in r)
     check("  -> stored as minutes (per category)",
           (await db.get_category("jav"))["auto_delete_minutes"] == 10080)

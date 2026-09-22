@@ -118,6 +118,7 @@ HELP_ADMIN = (
     "/stats — overview + per-pipeline breakdown\n"
     "/ban &lt;user_id&gt; · /unban &lt;user_id&gt;\n"
     "/banlist · /banmessage &lt;text|reply|reset&gt;\n"
+    "/addsticker · /removesticker — sticker after every post\n"
     "/addadmin &lt;user_id&gt; — promote an admin"
 )
 
@@ -463,6 +464,16 @@ async def do_post(bot, category=None, _depth=0):
         return None
     await db.mark_posted(item["db_message_id"], post_message_id=getattr(msg, "message_id", None),
                          category=category)
+    # v3.8: post the saved sticker right after the channel post (all pipelines)
+    _sid = (await db.get_settings()).get("post_sticker_id")
+    if _sid:
+        try:
+            await bot.send_sticker(
+                chat_id=cat.get("post_channel_id") or settings.get("post_channel_id"),
+                sticker=_sid)
+        except Exception as exc:
+            log.warning("post sticker failed: %s", exc)
+
     log.info("posted %s (db id %s) -> %s [%s]", item["file_id"],
              item["db_message_id"], post_channel, category)
     main_id = (cat or {}).get("post_main_channel_id")
@@ -620,6 +631,9 @@ def build_bot1() -> Application:
     from bot1_admin import on_category_action
     app.add_handler(CallbackQueryHandler(on_category_action, pattern=r"^cat:"))
     app.add_handler(ChatJoinRequestHandler(on_join_request))
+    from bot1_admin import sticker_intake
+    from telegram.ext import MessageHandler, filters as _flt
+    app.add_handler(MessageHandler(_flt.ALL & ~_flt.COMMAND, sticker_intake))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
     # conversational /addcategory + /editcategory wizard (free-text answers)
     from bot1_admin import wizard_message_handler

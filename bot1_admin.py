@@ -884,7 +884,7 @@ def _banlist_table_payload(users):
     long usernames. Pure function -> fully unit-testable."""
     def cell(text, code=False):
         fmt = [{"type": "code", "offset": 0, "length": len(text)}] if code else []
-        return {"type": "paragraph", "text": text, "entities": fmt}
+        return {"text": text, "entities": fmt}   # InputRichText (cell content)
     header = [cell("#"), cell("User"), cell("Detail"), cell("Tap to copy")]
     rows, pages = [], []
     for i, u in enumerate(users, 1):
@@ -900,7 +900,7 @@ def _banlist_table_payload(users):
     return [{"chat_id": None,   # filled by caller
              "rich_message": {"blocks": [
                  {"type": "table", "is_compact": True,
-                  "rows": ([header] + page)}]},
+                  "cells": ([header] + page)}]},
              "disable_notification": False} for page in pages]
 
 
@@ -929,10 +929,67 @@ async def cmd_banlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         part = f"Elapsed: {el:.1f}s" if el is not None else "manual ban"
         lines.append(f"{i} - {uname} {part} `/unban {u['user_id']}`")
         if len(lines) >= 41:      # page: header + 40 rows
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            await update.message.reply_text(
+                "\n".join(lines).replace("`", "<code>", 1).replace("`", "</code>", 1)
+                if False else _md_to_html("\n".join(lines)), parse_mode="HTML")
             lines = []
     if lines:
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text(_md_to_html("\n".join(lines)), parse_mode="HTML")
+
+
+def _md_to_html(text):
+    """Convert our one-element Markdown (`code`) lines to HTML so fallback
+    pages never break on @usernames (the v3.7 Markdown crash)."""
+    out = []
+    for line in text.split("\n"):
+        if "`" in line:
+            pre, _, rest = line.partition("`")
+            code, _, post = rest.partition("`")
+            import html as _h
+            line = (f"{_h.escape(pre)}<code>{_h.escape(code)}</code>{_h.escape(post)}")
+        else:
+            import html as _h
+            line = _h.escape(line)
+        out.append(line)
+    return "\n".join(out)
+
+
+@admin_only
+async def cmd_addsticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addsticker — next sticker you forward/send becomes the post sticker:
+    it is sent right after every channel post in every pipeline."""
+    await db.set_sticker_waiting(update.effective_user.id, True)
+    await update.message.reply_text(
+        "🎴 Send or forward the sticker now — I'll save it and post it after "
+        "every channel post (all pipelines).\n"
+        "Cancel: /removesticker keeps the current one; send any text to abort.")
+
+
+@admin_only
+async def cmd_removesticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/removesticker — stop posting the sticker after channel posts."""
+    await db.update_settings({"post_sticker_id": None, "sticker_waiting": []})
+    await update.message.reply_text("🗑 Post sticker removed — nothing will be sent after posts.")
+
+
+async def sticker_intake(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """MessageHandler (non-command): captures the sticker an admin sends after
+    /addsticker. Not in COMMANDS — registered separately in bot1."""
+    uid = update.effective_user.id
+    if not await db.is_sticker_waiting(uid):
+        return
+    if not await is_admin(uid):
+        await db.set_sticker_waiting(uid, False)
+        return
+    stk = update.message.sticker
+    if not stk:
+        await db.set_sticker_waiting(uid, False)
+        await update.message.reply_text("❌ That wasn't a sticker — aborted.")
+        return
+    await db.set_post_sticker(stk.file_id)
+    await update.message.reply_text(
+        "✅ Sticker saved! It will be posted right after every channel post "
+        "in every pipeline.\nRemove anytime: /removesticker")
 
 
 @admin_only
@@ -1424,6 +1481,8 @@ COMMANDS = {
     "banmessage": cmd_banmessage,
     "forcesublist": cmd_forcesublist,
     "forcesubremove": cmd_forcesubremove,
+    "addsticker": cmd_addsticker,
+    "removesticker": cmd_removesticker,
     "addadmin": cmd_addadmin,
     "setforcesub": cmd_setforcesub,
     "setautodelete": cmd_setautodelete,

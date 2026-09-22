@@ -65,6 +65,8 @@ DEFAULT_SETTINGS = {
     "force_sub_channel_ids": None,    # v3.4: plural list; None -> singular above
     "force_sub_links": {},           # v3.5: {channel_id: join-request invite link}
     "ban_message": None,             # v3.5: custom banned-user text (/banmessage)
+    "post_sticker_id": None,         # v3.8: sticker sent after every post (/addsticker)
+    "sticker_waiting": [],           # v3.8: admin ids currently expected to send a sticker
     # legacy single-pipeline knobs, kept only as migration seeds:
     "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
@@ -933,3 +935,20 @@ async def mark_ban_info(user_id, username=None, elapsed=None):
         fields["last_bypass_elapsed"] = float(elapsed)
     if fields:
         await _db.users.update_one({"user_id": user_id}, {"$set": fields}, upsert=True)
+
+
+# ── post sticker (v3.8) ───────────────────────────────────────
+async def set_sticker_waiting(user_id, waiting: bool):
+    op = "$addToSet" if waiting else "$pull"
+    await _db.settings.update_one({"_id": "global"},
+        {op: {"sticker_waiting": user_id}}, upsert=True)
+
+
+async def is_sticker_waiting(user_id):
+    s = await get_settings()
+    return user_id in (s.get("sticker_waiting") or [])
+
+
+async def set_post_sticker(file_id):
+    await update_settings({"post_sticker_id": file_id,
+                           "sticker_waiting": []})

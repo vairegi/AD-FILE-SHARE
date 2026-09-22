@@ -439,3 +439,19 @@ so one tap copies only the command. Long lists (70-80+) are split into
 blocks / 20 columns). If Telegram rejects the rich payload on any client
 or rollout stage, the bot automatically falls back to paged inline-code
 text messages (40 rows each) — the list can never fail to display.
+
+---
+
+## v3.8 (2026-09-22) — rich-table fix + /addsticker
+
+**Fix — rich banlist table.** Telegram rejected the v3.7 payload
+("can't find field cells"): `InputRichBlockTable` takes `cells` of
+`InputRichText` ({text, entities}), not block rows. Corrected. The text
+fallback also moved from Markdown to HTML so @usernames can never break
+parsing on long lists (the "byte offset 1460" crash).
+
+**New — /addsticker.** Admin sends `/addsticker`, then forwards/sends any
+sticker; the bot saves it and posts it immediately after every channel
+post in every pipeline (a tap-able tag sticker under each post).
+`/removesticker` turns it off. Non-admin stickers are ignored; the intake
+auto-aborts if the next message isn't a sticker.
