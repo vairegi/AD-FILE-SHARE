@@ -123,7 +123,8 @@ HELP_ADMIN = (
     "/buttons · /removebutton &lt;n&gt; · /clearbuttons — manage extra buttons\n"
     "/addcovercaption &lt;text|off&gt; — appended to every posted cover caption\n"
     "/addfilecaption &lt;text|off&gt; — appended to every delivered file caption\n"
-    "/addadmin &lt;user_id&gt; — promote an admin"
+    "/addadmin &lt;user_id&gt; — promote an admin\n"
+    "/verified_users [yesterday] — today's verifications as a table"
 )
 
 
@@ -355,6 +356,24 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
 
     await db.mark_token_used(token)
     await db.reset_strikes(user_id)  # consecutive strikes only
+    # v4.3: record this successful verification for /verified_users.
+    # Link type: the shortener that served the token, or the v4.1 outage
+    # bypass labelled "Direct (outage)".
+    _lt = doc.get("shortener_site") or (
+        "Direct (outage)" if doc.get("shortener_state") == "down" else None)
+    try:
+        _u = await bot.get_chat(user_id)
+        _name = getattr(_u, "full_name", None) or getattr(_u, "first_name", None)
+    except Exception:
+        _name = None
+    _item0 = await db.get_item_by_file_id(file_id)
+    _cat0 = (_item0 or {}).get("category") or await db.resolve_category(file_id)
+    try:
+        await db.record_verification(
+            user_id, name=_name, username=username, elapsed=elapsed,
+            category=_cat0, link_type=_lt)
+    except Exception as exc:
+        log.warning("verification log failed (never blocks delivery): %s", exc)
     settings = await db.get_settings()
     item = await db.get_item_by_file_id(file_id)
     category = (item or {}).get("category") or await db.resolve_category(file_id)
@@ -643,6 +662,13 @@ async def sweep_broadcast_deletions(context: ContextTypes.DEFAULT_TYPE):
         await db.remove_deletion(entry["_id"])
 
 
+async def reset_verification_logs(context):
+    """v4.3: midnight-IST hygiene — drop logs older than today+yesterday.
+    The report reads today's date key only, so the new day starts fresh by
+    design; this job just keeps the collection clean."""
+    await db.purge_old_verifications()
+
+
 def schedule_broadcast_sweeper(application):
     """Install the repeating broadcast-deletion sweeper on Bot 1's job queue."""
     jq = getattr(application, "job_queue", application)  # Application or JobQueue
@@ -652,6 +678,15 @@ def schedule_broadcast_sweeper(application):
         job.schedule_removal()
     jq.run_repeating(sweep_broadcast_deletions, interval=60, first=20,
                      name="broadcast_sweep")
+    # v4.3: daily reset of the verified-users log at 00:00 IST
+    from zoneinfo import ZoneInfo
+    import datetime as _dt
+    for job in jq.get_jobs_by_name("verified_reset"):
+        job.schedule_removal()
+    jq.run_daily(reset_verification_logs,
+                 time=_dt.time(hour=0, minute=0,
+                               tzinfo=ZoneInfo("Asia/Kolkata")),
+                 name="verified_reset")
 
 
 # ── command / update handlers ─────────────────────────────────

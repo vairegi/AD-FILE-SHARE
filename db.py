@@ -131,6 +131,8 @@ async def connect():
     )
     await _db.users.create_index("user_id", unique=True)
     await _db.shorteners.create_index("site", unique=True)
+    await _db.verification_logs.create_index(
+        [("date", 1), ("user_id", 1)], unique=True)
     # v3.2 migration: seed the shorteners collection from the legacy
     # single-key setup (settings field, else the SHORTENER_API_KEY env var)
     # on first startup after deploy — the owner never re-enters a key.
@@ -858,6 +860,68 @@ async def next_shortener(user_id):
     await _db.users.update_one({"user_id": user_id},
                                {"$set": {"rr_last_site": chosen["site"]}})
     return chosen
+
+
+# ── daily verified-users log (v4.3, /verified_users) ─────────
+def ist_today(offset_days=0):
+    """Today's date key in IST (Asia/Kolkata), e.g. '2026-09-25'."""
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    d = _dt.datetime.now(ZoneInfo("Asia/Kolkata")).date() \
+        - _dt.timedelta(days=offset_days)
+    return d.isoformat()
+
+
+async def record_verification(user_id, name=None, username=None,
+                              elapsed=None, category=None, link_type=None,
+                              date=None):
+    """One successful verification -> ONE row per user per IST day.
+    Repeat verifications the same day UPDATE the row: count bumps, latest
+    elapsed wins, and new categories / link types are appended (never
+    duplicated)."""
+    date = date or ist_today()
+    key = {"date": date, "user_id": user_id}
+    doc = await _db.verification_logs.find_one(key)
+    if doc:
+        upd = {"$inc": {"count": 1}}
+        setf = {}
+        if name:
+            setf["name"] = name
+        if username:
+            setf["username"] = str(username).lstrip("@")
+        if elapsed is not None:
+            setf["elapsed"] = float(elapsed)
+        if setf:
+            upd["$set"] = setf
+        addto = {}
+        if category and category not in (doc.get("categories") or []):
+            addto.setdefault("categories", category)
+        if link_type and link_type not in (doc.get("link_types") or []):
+            addto.setdefault("link_types", link_type)
+        if addto:
+            upd["$addToSet"] = {k: v for k, v in addto.items()}
+        await _db.verification_logs.update_one(key, upd)
+    else:
+        await _db.verification_logs.insert_one({
+            "date": date, "user_id": user_id,
+            "name": name, "username": (str(username).lstrip("@")
+                                       if username else None),
+            "elapsed": float(elapsed) if elapsed is not None else None,
+            "categories": [category] if category else [],
+            "link_types": [link_type] if link_type else [],
+            "count": 1, "at": now()})
+
+
+async def list_verified_today(offset_days=0):
+    cur = _db.verification_logs.find(
+        {"date": ist_today(offset_days)}).sort("count", -1)
+    return [d async for d in cur]
+
+
+async def purge_old_verifications():
+    """Midnight hygiene: keep only today + yesterday (per owner's keep-1-day)."""
+    await _db.verification_logs.delete_many(
+        {"date": {"$nin": [ist_today(0), ist_today(1)]}})
 
 
 async def set_token_shortener(token, site, state=None):

@@ -1664,6 +1664,81 @@ async def main():
     check("v4.2: blocked users count as failed, loop survives",
           f2 == nusers and s2 == 0)
 
+    # ── 15. v4.3: /verified_users — capture, merge, midnight, table ──
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    # live capture: a successful verify logs a row (link type from the token)
+    tokv = await db.create_token(880001, "jav_f600", 60, kind="verify")
+    await db.set_token_shortener(tokv, "vplink", state="active")
+    await db._db.tokens.update_one({"token": tokv},
+        {"$set": {"created_at": db.now() - 400}})   # solved in 400s (legit)
+    fbv = FakeBot()
+    await bot1.process_verify(fbv, 880001, 880001, "jav_f600", tokv, "verifyuser")
+    rows = await db.list_verified_today()
+    check("v4.3: successful verification is captured",
+          any(r["user_id"] == 880001 and "vplink" in r["link_types"] for r in rows))
+    # outage token -> 'Direct (outage)' link type
+    tokd = await db.create_token(880002, "jav_f600", 60, kind="verify")
+    await db.set_token_shortener(tokd, None, state="down")
+    await db._db.tokens.update_one({"token": tokd},
+        {"$set": {"created_at": db.now() - 5}})
+    fbv2 = FakeBot()
+    await bot1.process_verify(fbv2, 880002, 880002, "jav_f600", tokd, "downuser2")
+    rows = await db.list_verified_today()
+    check("v4.3: outage verification logged as Direct (outage)",
+          any(r["user_id"] == 880002 and "Direct (outage)" in r["link_types"]
+              for r in rows))
+    # same-user merge: count bumps, no duplicate row, elapsed = latest
+    await db.record_verification(880001, name="Verify User", elapsed=400,
+                                 category="jav", link_type="vplink")
+    await db.record_verification(880001, name="Verify User", elapsed=250,
+                                 category="hanime", link_type="arolink")
+    rows = await db.list_verified_today()
+    u1 = [r for r in rows if r["user_id"] == 880001]
+    check("v4.3: repeat verification stays ONE row",
+          len(u1) == 1)
+    check("v4.3: count bumped (1 live + 2 manual = 3)",
+          u1[0]["count"] == 3)
+    check("v4.3: elapsed shows the LATEST time (250s)",
+          abs(u1[0]["elapsed"] - 250) < 1)
+    check("v4.3: categories + link types appended, not duplicated",
+          set(u1[0]["categories"]) == {"jav", "hanime"}
+          and set(u1[0]["link_types"]) == {"vplink", "arolink"})
+    # midnight rollover: yesterday's rows are separate, today stays fresh
+    yday = db.ist_today(1)
+    await db.record_verification(880003, name="Old User", elapsed=100,
+                                 category="jav", link_type="vplink",
+                                 date=yday)
+    check("v4.3: today view excludes yesterday",
+          all(r["user_id"] != 880003 for r in await db.list_verified_today()))
+    check("v4.3: /verified_users yesterday still works",
+          any(r["user_id"] == 880003 for r in await db.list_verified_today(1)))
+    # midnight purge keeps only today + yesterday
+    await db.record_verification(880004, name="Ancient", elapsed=1,
+                                 category="jav", link_type="vplink",
+                                 date="2020-01-01")
+    await bot1.reset_verification_logs(FakeContext(bot=FakeBot()))
+    check("v4.3: midnight purge deletes data older than yesterday",
+          len(await db._db.verification_logs.find({"date": "2020-01-01"}).to_list(None)) == 0)
+    check("v4.3: purge keeps today + yesterday",
+          any(r["user_id"] == 880001 for r in await db.list_verified_today())
+          and any(r["user_id"] == 880003 for r in await db.list_verified_today(1)))
+    # table payload: compact, right columns, command runs
+    pl = adm._verified_table_payload(rows)
+    check("v4.3: table is compact InputRichBlockTable with 6 columns",
+          pl[0]["rich_message"]["blocks"][0]["is_compact"] is True
+          and pl[0]["rich_message"]["blocks"][0]["type"] == "table"
+          and [c["text"] for c in pl[0]["rich_message"]["blocks"][0]["cells"][0]]
+          == ["#", "Name", "Elapsed", "Category", "Link Type", "Count"])
+    updv = FakeUpdate(uid=999)
+    class _NoRich(FakeBot):
+        async def _post(self, *a, **k):
+            raise RuntimeError("rich unsupported")
+    await adm.cmd_verified_users(updv, FakeContext(args=[], bot=_NoRich()))
+    check("v4.3: rich rejection falls back to paged text table",
+          any("Verified users" in r and "<pre>" in r
+              for r in updv.message.replies))
+
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")
     await db.close()

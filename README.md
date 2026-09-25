@@ -582,3 +582,27 @@ message. Only users who still fail after all retries (they blocked the bot
 or deactivated) count as failures. Before starting, the bot now tells the
 admin the approximate duration; the webhook already answers Telegram
 instantly, so the bot stays fully responsive during a long broadcast.
+
+---
+
+## v4.3 (2026-09-25) — /verified_users daily report
+
+**New — `/verified_users` (admin).** A native compact rich-message table
+(`InputRichBlockTable`, `is_compact=True` — same proven shape as `/banlist`)
+of everyone who verified SINCE MIDNIGHT IST, one row per user:
+
+| # | Name | Elapsed | Category | Link Type | Count |
+
+- **Live capture**: `process_verify` records every successful verification
+  (name, username, elapsed seconds, pipeline category, serving shortener).
+- **Same user = one row**: repeat verifications bump `Count`, show the
+  LATEST elapsed time, and append new categories / link types.
+- **Link Type**: the provider that served their link (`vplink`, `arolink`);
+  files delivered during a shortener outage (v4.1 failsafe) appear as
+  `Direct (outage)`.
+- **Daily session, IST**: rows are keyed by IST date; the report always
+  reads "today", so midnight starts fresh automatically. A daily 00:00 IST
+  job deletes anything older than today+yesterday.
+- **`/verified_users yesterday`** shows the previous day's table.
+- Falls back to a paged monospace table if Telegram rejects the rich
+  payload — the report can never fail to display.

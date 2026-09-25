@@ -1294,6 +1294,91 @@ async def cmd_banlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(_md_to_html("\n".join(lines)), parse_mode="HTML")
 
 
+# ══════════════════════════════════════════════════════════════
+#  /verified_users (v4.3) — today's verifications as a rich table
+# ══════════════════════════════════════════════════════════════
+def _verified_table_payload(users):
+    """Bot API 10.1+ InputRichBlockTable payload — SAME proven shape as
+    /banlist (compact cells of InputRichText), is_compact=True so Telegram
+    renders it tight/small. 40 rows per page stays well under limits."""
+    def cell(text, code=False):
+        fmt = [{"type": "code", "offset": 0, "length": len(text)}] if code else []
+        return {"text": text, "entities": fmt}
+    header = [cell("#"), cell("Name"), cell("Elapsed"), cell("Category"),
+              cell("Link Type"), cell("Count")]
+    rows, pages = [], []
+    for i, u in enumerate(users, 1):
+        name = (u.get("name") or
+                (f"@{u['username']}" if u.get("username") else None)
+                or str(u.get("user_id")))
+        el = u.get("elapsed")
+        elapsed = f"{el:.0f}s" if el is not None else "—"
+        cat = ", ".join(u.get("categories") or []) or "—"
+        link = ", ".join(u.get("link_types") or []) or "—"
+        rows.append([cell(str(i)), cell(str(name)[:20]), cell(elapsed),
+                     cell(cat), cell(link), cell(str(u.get("count") or 1))])
+        if len(rows) == 40:
+            pages.append(rows); rows = []
+    if rows:
+        pages.append(rows)
+    return [{"chat_id": None,
+             "rich_message": {"blocks": [
+                 {"type": "table", "is_compact": True,
+                  "cells": ([header] + page)}]},
+             "disable_notification": False} for page in pages]
+
+
+@admin_only
+async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/verified_users [today|yesterday] — everyone who verified since
+    midnight IST, one row per user (repeat verifications merge: count bumps,
+    categories/link types append). Native compact rich table; falls back to
+    paged monospace text if Telegram rejects the rich payload."""
+    args = [a.lower() for a in (context.args or []) if a]
+    offset = 1 if args and args[0] in ("yesterday", "yday", "-1") else 0
+    users = await db.list_verified_today(offset)
+    day = db.ist_today(offset)
+    if not users:
+        await update.message.reply_text(
+            f"📭 No verifications recorded for {day} "
+            f"({'yesterday' if offset else 'today so far'}).")
+        return
+    total_verifs = sum(int(u.get("count") or 1) for u in users)
+    header_txt = (f"✅ Verified users — {day} "
+                  f"({'yesterday' if offset else 'since midnight IST'}): "
+                  f"{len(users)} users · {total_verifs} verifications")
+    payloads = _verified_table_payload(users)
+    try:
+        await update.message.reply_text(header_txt)
+        for pl in payloads:
+            pl["chat_id"] = update.effective_chat.id
+            await context.bot._post("sendRichMessage", data=pl)
+        return
+    except Exception as exc:
+        log.warning("rich verified table failed (%s); text fallback", exc)
+    # fallback: paged monospace table
+    lines = [f"<b>{_h(header_txt)}</b>", "<pre>",
+             f"{'#':<4}{'Name':<20}{'Time':<8}{'Category':<10}{'Link':<10}{'Cnt':<4}"]
+    for i, u in enumerate(users, 1):
+        name = (u.get("name") or
+                (f"@{u['username']}" if u.get("username") else None)
+                or str(u.get("user_id")))
+        el = u.get("elapsed")
+        lines.append(f"{i:<4}{str(name)[:19]:<20}"
+                     f"{(f'{el:.0f}s' if el is not None else '—'):<8}"
+                     f"{(','.join(u.get('categories') or []) or '—')[:9]:<10}"
+                     f"{(','.join(u.get('link_types') or []) or '—')[:9]:<10}"
+                     f"{u.get('count') or 1:<4}")
+        if len(lines) >= 42:
+            lines.append("</pre>")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            lines = ["<pre>"]
+    if len(lines) > 1:
+        if not lines[-1].endswith("</pre>"):
+            lines.append("</pre>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 def _md_to_html(text):
     """Convert our one-element Markdown (`code`) lines to HTML so fallback
     pages never break on @usernames (the v3.7 Markdown crash)."""
@@ -1871,4 +1956,5 @@ COMMANDS = {
     "categories": cmd_categories,
     "use": cmd_use,
     "renamecategory": cmd_renamecategory,
+    "verified_users": cmd_verified_users,
 }
