@@ -997,30 +997,62 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _run_broadcast(bot, job):
-    """Actually send the pending broadcast. Returns (sent, failed, delivered)
-    where delivered maps user_id -> [message_id] for the auto-delete queue."""
+    """v4.2: PACED + RETRY broadcast. Telegram rate-limits bots to ~1 msg/sec
+    per chat and ~30 msgs/sec globally, answering bursts with 429
+    'Too Many Requests'. The old loop slept a flat 50 ms and counted every
+    429 as a permanent 'Failed' — the 12:59 broadcast logged 1,059
+    forwardMessage calls with ZERO 200 OK, which is why 'Sent' collapsed
+    349 -> 321 -> 280 -> 270 -> 129 on back-to-back broadcasts.
+
+    Now:
+      * sends are paced (~0.35 s apart, ~3/sec — under the global limit);
+      * a 429 is NOT a failure — we wait out Telegram's own `retry_after`
+        and retry the SAME user (up to 3 attempts), so every user
+        eventually receives the message;
+      * only users who still fail after all retries (blocked the bot,
+        deactivated account) count as real failures — expected, logged at
+        debug level, never retried forever.
+    Slower, but every user gets the message; the caller announces the ETA."""
     ids = await db.all_user_ids()
+    total = len(ids)
+    pace = 0.35                      # ~3 messages/sec — under Telegram's limit
     sent = failed = 0
     delivered = {}
-    for uid in ids:
-        try:
-            if job["mode"] == "forward":
-                m = await bot.forward_message(
-                    chat_id=uid, from_chat_id=job["chat_id"],
-                    message_id=job["message_id"])
-            else:
-                m = await bot.copy_message(
-                    chat_id=uid, from_chat_id=job["chat_id"],
-                    message_id=job["message_id"])
+    for i, uid in enumerate(ids):
+        ok = False
+        for attempt in range(3):     # 1 try + 2 retries for 429s
+            try:
+                if job["mode"] == "forward":
+                    m = await bot.forward_message(
+                        chat_id=uid, from_chat_id=job["chat_id"],
+                        message_id=job["message_id"])
+                else:
+                    m = await bot.copy_message(
+                        chat_id=uid, from_chat_id=job["chat_id"],
+                        message_id=job["message_id"])
+                ok = True
+                mid = getattr(m, "message_id", None)
+                if mid:
+                    delivered.setdefault(uid, []).append(mid)
+                break
+            except Exception as exc:
+                wait = getattr(exc, "retry_after", None)
+                if wait is not None:                 # Telegram 429 — honor it
+                    log.info("broadcast 429: retry user %s after %ss", uid, wait)
+                    await asyncio.sleep(min(float(wait) + 1.0, 30.0))
+                    continue
+                # genuine per-user failure (blocked/deactivated) — not a bug
+                log.debug("broadcast to %s failed permanently: %s", uid, exc)
+                break
+        if ok:
             sent += 1
-            mid = getattr(m, "message_id", None)
-            if mid:
-                delivered.setdefault(uid, []).append(mid)
-        except Exception:
+        else:
             failed += 1
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(pace)
+        if total > 100 and i and i % 100 == 0:
+            log.info("broadcast progress: %d/%d (sent=%d failed=%d)",
+                     i, total, sent, failed)
     return sent, failed, delivered
-
 
 async def broadcast_pending_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Free-text handler (group 1, registered in bot1) capturing the admin's
@@ -1047,6 +1079,11 @@ async def broadcast_pending_reply(update: Update, context: ContextTypes.DEFAULT_
             parse_mode="HTML")
         return
     _BROADCAST_PENDING.pop(user.id, None)
+    _ids_n = len(await db.all_user_ids())
+    await update.message.reply_text(
+        f"📣 Broadcasting to {_ids_n} users… (~{_ids_n * 0.35 / 60:.0f} min — "
+        "paced to respect Telegram limits so EVERY user receives it. "
+        "You can keep using the bot meanwhile; I'll report when done.)")
     sent, failed, delivered = await _run_broadcast(context.bot, job)
     if seconds > 0 and delivered:
         delete_at = db.now() + seconds

@@ -1631,6 +1631,39 @@ async def main():
     await db.set_banned(555002, False)
     await db.update_settings({"shortener_enabled": False})
 
+    # ── 14. v4.2: broadcast honors 429 retry_after, retries every user ──
+    class _Flood(Exception):
+        def __init__(self, retry_after):
+            super().__init__("Too Many Requests")
+            self.retry_after = retry_after
+    class _FlakeyBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.attempts = {}
+        async def forward_message(self, chat_id=None, from_chat_id=None,
+                                  message_id=None, **kw):
+            self.attempts[chat_id] = self.attempts.get(chat_id, 0) + 1
+            if self.attempts[chat_id] == 1:      # first try always 429s
+                raise _Flood(0)                  # retry_after=0 -> fast test
+            return await super().forward_message(
+                chat_id=chat_id, from_chat_id=from_chat_id,
+                message_id=message_id, **kw)
+    fbb = _FlakeyBot()
+    sent, failed, delivered = await adm._run_broadcast(
+        fbb, {"mode": "forward", "chat_id": 999, "message_id": 5})
+    nusers = len(await db.all_user_ids())
+    check("v4.2: 429 on first try is RETRIED, user still gets the message",
+          sent == nusers and failed == 0 and len(delivered) == nusers)
+    check("v4.2: every user re-attempted after the 429",
+          all(a >= 2 for a in fbb.attempts.values()))
+    class _DeadBot(FakeBot):
+        async def forward_message(self, chat_id=None, **kw):
+            raise Exception("Forbidden: bot was blocked by the user")
+    s2, f2, d2 = await adm._run_broadcast(
+        _DeadBot(), {"mode": "forward", "chat_id": 999, "message_id": 5})
+    check("v4.2: blocked users count as failed, loop survives",
+          f2 == nusers and s2 == 0)
+
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")
     await db.close()

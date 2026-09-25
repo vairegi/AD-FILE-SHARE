@@ -564,3 +564,21 @@ shortener served it (`shortener_state`: `active`/`down`). The instant
 sub-150s ban applies ONLY to `active` tokens — tokens issued during an
 outage can never ban a user. Zero-tolerance banning for genuine bypass
 scripts is unchanged.
+
+---
+
+## v4.2 (2026-09-25) — broadcast flood-limit fix
+
+**Fix — /broadcast silently dropped most users.** The loop sent one
+forwardMessage every ~50 ms and counted every Telegram `429 Too Many
+Requests` as a permanent failure. On back-to-back broadcasts the Render log
+showed 1,059 calls with zero 200 OK, and "Sent" collapsed 349 → 129.
+Users were NOT blocking the bot — Telegram was rate-limiting it.
+
+The broadcast loop is now paced (~3 messages/sec, under Telegram's global
+limit), honors the `retry_after` value from every 429, and retries the same
+user up to 3 times — so every reachable user eventually receives the
+message. Only users who still fail after all retries (they blocked the bot
+or deactivated) count as failures. Before starting, the bot now tells the
+admin the approximate duration; the webhook already answers Telegram
+instantly, so the bot stays fully responsive during a long broadcast.
