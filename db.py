@@ -67,6 +67,9 @@ DEFAULT_SETTINGS = {
     "ban_message": None,             # v3.5: custom banned-user text (/banmessage)
     "post_sticker_id": None,         # v3.8: sticker sent after every post (/addsticker)
     "sticker_waiting": [],           # v3.8: admin ids currently expected to send a sticker
+    "post_buttons": [],              # v4.0: extra channel-post buttons (/addbutton) — {label, url, color}
+    "cover_caption_extra": None,     # v4.0: appended to every posted cover caption (/addcovercaption)
+    "file_caption_extra": None,      # v4.0: appended to every delivered file caption (/addfilecaption)
     # legacy single-pipeline knobs, kept only as migration seeds:
     "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
@@ -701,14 +704,28 @@ async def list_admin_ids():
 
 
 # ── auto-delete queue (restart-safe) ──────────────────────────
-async def add_deletion(chat_id, message_ids, delete_at):
-    await _db.deletions.insert_one({
-        "chat_id": chat_id, "message_ids": list(message_ids), "delete_at": delete_at
-    })
+async def add_deletion(chat_id, message_ids, delete_at, bot=None):
+    """Queue messages for deletion. v4.0: optional `bot` tag ('bot1' for
+    broadcasts; legacy/Bot-2 deliveries stay untagged) so each bot's sweeper
+    only touches messages IT sent — Telegram only lets the sending bot delete
+    a message it sent."""
+    doc = {"chat_id": chat_id, "message_ids": list(message_ids),
+           "delete_at": delete_at}
+    if bot:
+        doc["bot"] = bot
+    await _db.deletions.insert_one(doc)
 
 
-async def due_deletions():
-    cur = _db.deletions.find({"delete_at": {"$lte": now()}})
+async def due_deletions(bot=None):
+    """Due deletion entries. v4.0: `bot` scopes by the `bot` field so Bot 1's
+    broadcast sweeper only picks up Bot 1 messages (bot='bot1') and Bot 2's
+    delivery sweeper only Bot 2's. bot=None returns everything (legacy)."""
+    q = {"delete_at": {"$lte": now()}}
+    if bot == "bot1":
+        q["bot"] = "bot1"
+    elif bot == "bot2":
+        q["bot"] = {"$ne": "bot1"}   # includes legacy docs with no bot field
+    cur = _db.deletions.find(q)
     return [d async for d in cur]
 
 
@@ -952,3 +969,26 @@ async def is_sticker_waiting(user_id):
 async def set_post_sticker(file_id):
     await update_settings({"post_sticker_id": file_id,
                            "sticker_waiting": []})
+
+
+# ── extra channel-post buttons (v4.0, /addbutton) ─────────────
+async def add_post_button(label, url, color=None):
+    """Append one extra button under every channel post. color is a Bot API
+    9.4 InlineKeyboardButton 'style' value (success/primary/danger) or None
+    (Telegram default / transparent)."""
+    s = await get_settings()
+    buttons = list(s.get("post_buttons") or [])
+    buttons.append({"label": label, "url": url, "color": color})
+    await update_settings({"post_buttons": buttons})
+    return len(buttons)
+
+
+async def remove_post_button(index):
+    """Remove the Nth extra button (1-based). True when it existed."""
+    s = await get_settings()
+    buttons = list(s.get("post_buttons") or [])
+    if not (1 <= index <= len(buttons)):
+        return False
+    buttons.pop(index - 1)
+    await update_settings({"post_buttons": buttons})
+    return True

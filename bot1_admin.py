@@ -22,6 +22,8 @@ Global (unaffected by /use):
   /shortener* /verifymsg /setverifytime /settokenttl /broadcast /stats
   /ban /unban /addadmin /setforcesub (supports a trailing category key for
   per-category overrides)
+  /addbutton /buttons /removebutton /clearbuttons /addcovercaption
+  /addfilecaption (v4.0 — channel-post buttons & captions, all global)
 
 NOTE: do_post / schedule_daily are imported lazily inside the commands that
 need them — importing them here at module level creates a circular import
@@ -771,39 +773,252 @@ async def cmd_clearshortenerbtns(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ══════════════════════════════════════════════════════════════
+#  CHANNEL-POST BUTTONS + CAPTIONS (v4.0, global)
+# ══════════════════════════════════════════════════════════════
+_BUTTON_COLORS = {
+    "green": "success", "success": "success",
+    "blue": "primary", "primary": "primary",
+    "red": "danger", "danger": "danger",
+}
+_BUTTON_COLOR_LABELS = {"success": "green", "primary": "blue", "danger": "red"}
+
+
+def _button_color_label(color):
+    return _BUTTON_COLOR_LABELS.get(color or "", "default")
+
+
+@admin_only
+async def cmd_addbutton(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addbutton <label> | <link> [| <color>] — add an extra button under the
+    green Download button of EVERY new channel post (all pipelines, global).
+    Colors (Bot API 9.4 button styles): green / blue / red; omit the color
+    for the default transparent look."""
+    raw = update.message.text.partition(" ")[2]
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        await update.message.reply_text(
+            "Usage: /addbutton <label> | <link> [| <color>]\n"
+            "Example: /addbutton Join us | https://t.me/ourgroup | blue\n"
+            "Colors: green · blue · red (omit for the default look).")
+        return
+    label, url = parts[0], parts[1]
+    if not url.startswith(("http://", "https://", "tg://")):
+        await update.message.reply_text(
+            "❌ The link must start with http://, https:// or tg://")
+        return
+    color = None
+    if len(parts) >= 3 and parts[2]:
+        color = _BUTTON_COLORS.get(parts[2].lower())
+        if color is None:
+            await update.message.reply_text(
+                "❌ Unknown color. Use green, blue or red — or omit it.")
+            return
+    n = await db.add_post_button(label, url, color)
+    await update.message.reply_text(
+        f"✅ Button #{n} added: “{_h(label)}” → {_h(url)} "
+        f"({_button_color_label(color)})\n"
+        "It appears under every new channel post. Manage: /buttons · "
+        "/removebutton <n> · /clearbuttons",
+        parse_mode="HTML", disable_web_page_preview=True)
+
+
+@admin_only
+async def cmd_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/buttons — list the extra channel-post buttons in display order."""
+    buttons = (await db.get_settings()).get("post_buttons") or []
+    if not buttons:
+        await update.message.reply_text(
+            "No extra buttons set. Add one with "
+            "/addbutton <label> | <link> [| <color>]")
+        return
+    lines = ["🔘 <b>Extra post buttons</b> (under the green Download button)\n"]
+    for i, b in enumerate(buttons, 1):
+        lines.append(f"{i}. {_h(b.get('label'))} — {_h(b.get('url'))} "
+                     f"({_button_color_label(b.get('color'))})")
+    lines.append("\nRemove one: /removebutton <number> · all: /clearbuttons")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+                                    disable_web_page_preview=True)
+
+
+@admin_only
+async def cmd_removebutton(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/removebutton <n> — remove the Nth extra button (see /buttons)."""
+    args = [a for a in (context.args or []) if a]
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /removebutton <number>  (see /buttons)")
+        return
+    if await db.remove_post_button(int(args[0])):
+        await update.message.reply_text(f"🗑 Button #{args[0]} removed.")
+    else:
+        await update.message.reply_text(f"❌ No button #{args[0]}. See /buttons.")
+
+
+@admin_only
+async def cmd_clearbuttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/clearbuttons — remove ALL extra channel-post buttons."""
+    await db.update_settings({"post_buttons": []})
+    await update.message.reply_text(
+        "🗑 All extra post buttons removed — posts show only the green "
+        "Download button.")
+
+
+@admin_only
+async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addcovercaption <text|off> — extra text APPENDED after the original
+    caption of every posted cover photo (all pipelines, global)."""
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "Usage: /addcovercaption <text>\n"
+            "Appended after the original caption of every posted cover.\n"
+            "/addcovercaption off removes it.")
+        return
+    if text.lower() in ("off", "none", "reset", "clear", "-"):
+        await db.update_settings({"cover_caption_extra": None})
+        await update.message.reply_text(
+            "✅ Cover caption extra removed — covers post with their original "
+            "caption only.")
+        return
+    await db.update_settings({"cover_caption_extra": text})
+    await update.message.reply_text(
+        "✅ Cover caption extra saved. Every new channel post caption becomes:\n\n"
+        f"<i>original caption</i>\n{_h(text)}", parse_mode="HTML")
+
+
+@admin_only
+async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addfilecaption <text|off> — extra text APPENDED after the original
+    caption of every file Bot 2 delivers to users (global)."""
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "Usage: /addfilecaption <text>\n"
+            "Appended after the original caption of every delivered file.\n"
+            "/addfilecaption off removes it.")
+        return
+    if text.lower() in ("off", "none", "reset", "clear", "-"):
+        await db.update_settings({"file_caption_extra": None})
+        await update.message.reply_text(
+            "✅ File caption extra removed — delivered files keep their "
+            "original caption only.")
+        return
+    await db.update_settings({"file_caption_extra": text})
+    await update.message.reply_text(
+        "✅ File caption extra saved. Every delivered file caption becomes:\n\n"
+        f"<i>original caption</i>\n{_h(text)}", parse_mode="HTML")
+
+
+# ══════════════════════════════════════════════════════════════
 #  GENERAL (global)
 # ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#  BROADCAST WITH AUTO-DELETE TIMER (v4.0)
+# ══════════════════════════════════════════════════════════════
+# Admins waiting to answer "after how long should this broadcast be deleted?"
+# {admin_user_id: {"mode": "forward"|"copy", "chat_id", "message_id"}}
+_BROADCAST_PENDING = {}
+
+
 @admin_only
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reply mode: FORWARD the replied-to message to every user — a real
     forward keeps the 'Forwarded from @channel' tag, quote blocks and media
     exactly as they are. Inline mode (/broadcast <text>): copy the command
-    message itself so its own formatting (links, bold, quotes) is kept."""
+    message itself so its own formatting (links, bold, quotes) is kept.
+
+    v4.0: no longer sends immediately — the bot first asks for an auto-delete
+    timer ('2h', '30m', '1h 2m', 'never'), THEN broadcasts and queues every
+    delivered copy for deletion via Bot 1's sweeper (restart-safe)."""
     msg = update.message
     target = msg.reply_to_message
     if target is None and not msg.text.partition(" ")[2].strip():
         await update.message.reply_text(
             "Usage: reply to any message with /broadcast to forward it to "
-            "all users (channel tag & quotes kept) — or /broadcast <text>.")
+            "all users (channel tag & quotes kept) — or /broadcast <text>.\n"
+            "The bot then asks after how long the broadcast should be "
+            "deleted from users.")
         return
+    if target is not None:
+        _BROADCAST_PENDING[update.effective_user.id] = {
+            "mode": "forward", "chat_id": msg.chat_id,
+            "message_id": target.message_id}
+    else:
+        _BROADCAST_PENDING[update.effective_user.id] = {
+            "mode": "copy", "chat_id": msg.chat_id,
+            "message_id": msg.message_id}
+    await update.message.reply_text(
+        "⏳ After how many hours or minutes should this broadcast message be "
+        "deleted from users?\n\n"
+        "Reply with e.g. <code>2h</code>, <code>30m</code>, <code>1h 2m</code> "
+        "— or <code>never</code> to keep it forever.\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML")
+
+
+async def _run_broadcast(bot, job):
+    """Actually send the pending broadcast. Returns (sent, failed, delivered)
+    where delivered maps user_id -> [message_id] for the auto-delete queue."""
     ids = await db.all_user_ids()
     sent = failed = 0
-    await update.message.reply_text(f"📣 Broadcasting to {len(ids)} users…")
+    delivered = {}
     for uid in ids:
         try:
-            if target is not None:
-                await context.bot.forward_message(
-                    chat_id=uid, from_chat_id=msg.chat_id,
-                    message_id=target.message_id)
+            if job["mode"] == "forward":
+                m = await bot.forward_message(
+                    chat_id=uid, from_chat_id=job["chat_id"],
+                    message_id=job["message_id"])
             else:
-                await context.bot.copy_message(
-                    chat_id=uid, from_chat_id=msg.chat_id,
-                    message_id=msg.message_id)
+                m = await bot.copy_message(
+                    chat_id=uid, from_chat_id=job["chat_id"],
+                    message_id=job["message_id"])
             sent += 1
+            mid = getattr(m, "message_id", None)
+            if mid:
+                delivered.setdefault(uid, []).append(mid)
         except Exception:
             failed += 1
         await asyncio.sleep(0.05)
-    await update.message.reply_text(f"✅ Done. Sent: {sent} · Failed: {failed}")
+    return sent, failed, delivered
+
+
+async def broadcast_pending_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Free-text handler (group 1, registered in bot1) capturing the admin's
+    answer to the broadcast auto-delete question. Ignores everyone else."""
+    user = update.effective_user
+    if not user:
+        return
+    job = _BROADCAST_PENDING.get(user.id)
+    if not job:
+        return
+    from utils import is_admin
+    if not await is_admin(user.id):
+        return
+    text = (update.message.text or "").strip()
+    if text.lower() in ("/cancel", "cancel"):
+        _BROADCAST_PENDING.pop(user.id, None)
+        await update.message.reply_text("✖️ Broadcast cancelled — nothing was sent.")
+        return
+    seconds = parse_duration(text)
+    if seconds is None:
+        await update.message.reply_text(
+            "⚠️ Could not understand that time. Try <code>2h</code>, "
+            "<code>30m</code>, <code>1h 2m</code> — or <code>never</code>.",
+            parse_mode="HTML")
+        return
+    _BROADCAST_PENDING.pop(user.id, None)
+    sent, failed, delivered = await _run_broadcast(context.bot, job)
+    if seconds > 0 and delivered:
+        delete_at = db.now() + seconds
+        for uid, mids in delivered.items():
+            await db.add_deletion(uid, mids, delete_at, bot="bot1")
+        tail = (f"🗑 Auto-delete scheduled — the broadcast disappears from "
+                f"every user in {human_duration(seconds)}.")
+    elif seconds > 0:
+        tail = "⚠️ Nothing was delivered, so no auto-delete was scheduled."
+    else:
+        tail = "📌 Kept forever — this broadcast will NOT be auto-deleted."
+    await update.message.reply_text(
+        f"✅ Done. Sent: {sent} · Failed: {failed}\n{tail}")
 
 
 @admin_only
@@ -1548,6 +1763,12 @@ COMMANDS = {
     "forcesubremove": cmd_forcesubremove,
     "addsticker": cmd_addsticker,
     "removesticker": cmd_removesticker,
+    "addbutton": cmd_addbutton,
+    "buttons": cmd_buttons,
+    "removebutton": cmd_removebutton,
+    "clearbuttons": cmd_clearbuttons,
+    "addcovercaption": cmd_addcovercaption,
+    "addfilecaption": cmd_addfilecaption,
     "addadmin": cmd_addadmin,
     "setforcesub": cmd_setforcesub,
     "setautodelete": cmd_setautodelete,

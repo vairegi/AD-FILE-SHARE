@@ -23,32 +23,41 @@ def parse_duration(text: str):
     """Parse flexible durations into SECONDS.
 
     Accepts: '5min', '2hour', '12hour', '7day', '1day', '30m', '90s',
-             'never'/'0' (-> 0 = no auto-delete).
+             'never'/'0' (-> 0 = no auto-delete), and v4.0 COMPOUND forms
+             like '1h 2m', '2h30m', '1day 12hour' (units simply add up).
     A bare number is interpreted as MINUTES ('30' -> 1800).
     Returns None when the string cannot be understood.
     """
     if text is None:
         return None
-    t = str(text).strip().lower().replace(" ", "")
+    t = str(text).strip().lower()
     if not t:
         return None
     if t in ("0", "off", "never", "none"):
         return 0
     if t.isdigit():
         return int(t) * 60  # bare number = minutes
-    m = re.fullmatch(r"(\d+)([a-z]+)", t)
-    if not m:
-        return None
-    value, unit = int(m.group(1)), m.group(2)
-    if unit not in _UNITS:
-        return None
-    return value * _UNITS[unit]
+    # v4.0: compound durations — one or more <number><unit> segments.
+    total, matched = 0, 0
+    for value, unit in re.findall(r"(\d+)\s*([a-z]+)", t):
+        if unit not in _UNITS:
+            return None
+        total += int(value) * _UNITS[unit]
+        matched += 1
+    # Reject strings that only PARTIALLY match ('1h banana', 'abc 2m').
+    if matched and "".join(re.findall(r"\d+|[a-z]+", t)) == "".join(
+            re.findall(r"\d+|[a-z]+", " ".join(
+                f"{v}{u}" for v, u in re.findall(r"(\d+)\s*([a-z]+)", t)))):
+        return total
+    return None
 
 
 def human_duration(seconds: int) -> str:
-    """Turn a seconds count into a readable string like '2 hours 5 minutes'."""
+    """Turn a seconds count into a readable string like '2 hours 5 minutes'.
+    v4.0: returns 'never' (not the longer kept-forever phrasing) so broadcast
+    confirmations read naturally ('Deleted after: never')."""
     if not seconds or seconds <= 0:
-        return "never (kept forever)"
+        return "never"
     parts = []
     for label, size in (("day", 86400), ("hour", 3600), ("minute", 60), ("second", 1)):
         if seconds >= size:

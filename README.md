@@ -23,8 +23,9 @@ Telegram ──► /bot2/webhook ──┤  single FastAPI + uvicorn process
    (`cover → 1-2 videos → optional .srt` posts).
 2. `/scandb <channel_id>` (Telethon userbot) indexes the whole channel into
    MongoDB, grouped into items, oldest first, `posted: false`.
-3. Every day at `post_time`, a cover (thumbnail + caption + **Download** button)
-   is posted to the public **Posting Channel**; the item is flipped to `posted: true`.
+3. Every day at `post_time`, a cover (thumbnail + caption + a green full-width
+   **Download** button, plus any `/addbutton` extras) is posted to the public
+   **Posting Channel**; the item is flipped to `posted: true`.
 4. User taps **Download** → Bot 1 DM (`/start file_<id>`).
 5. **Gate 1 — force-subscribe**: not a member → *Join Channel* + *I've Joined ✅*.
 6. **Gate 2 — shortener**: sends a VPLinks-wrapped `verify_…` deep link back to Bot 1.
@@ -206,7 +207,7 @@ automatically.
 
 | Command | Effect |
 |---|---|
-| `/broadcast <message>` | message every known user |
+| `/broadcast` (reply) · `/broadcast <text>` | asks for a delete timer (`2h`, `30m`, `1h 2m`, `never`), then broadcasts; copies auto-delete from every user when due |
 | `/stats` | users, verified, banned + per-pipeline breakdown |
 | `/ban <id>` · `/unban <id>` | toggle a ban |
 | `/addadmin <id>` | promote an admin without redeploying |
@@ -241,6 +242,16 @@ automatically.
 | `/shortenerbtn <label> \| <url>` | add a secondary button |
 | `/clearshortenerbtns` | remove all secondary buttons |
 
+**Channel posts & captions (global, v4.0)**
+
+| Command | Effect |
+|---|---|
+| `/addbutton <label> \| <link> [| green\|blue\|red]` | extra button under every new channel post (omit the color for the default transparent look) |
+| `/buttons` · `/removebutton <n>` · `/clearbuttons` | list / remove one / remove all extra buttons |
+| `/addcovercaption <text\|off>` | text appended after every posted cover caption |
+| `/addfilecaption <text\|off>` | text appended after every delivered file caption |
+| `/addsticker` · `/removesticker` | sticker posted to the MAIN channel after each post (skipped when no main channel) |
+
 ### Bot 2 — user
 
 | Command | Effect |
@@ -249,7 +260,7 @@ automatically.
 | `/setautodelete <time>` | personal auto-delete override |
 
 Durations accept `30min`, `2hour`, `12hour`, `1day`, `7day`, `never`
-(a bare number means minutes).
+(a bare number means minutes). Compound forms like `1h 2m` also work (v4.0).
 
 ---
 
@@ -473,3 +484,45 @@ converted to HTML and stored (shortener_msg_html). Reply to any formatted
 message with /shortenermsg to copy its rich text. The gate sends the
 heading with parse_mode=HTML when a rich version exists; the plain-text
 fallback path is unchanged.
+
+---
+
+## v4.0 (2026-09-25) — colored post buttons, sticker→main channel, caption commands, timed broadcasts
+
+**Colored channel-post buttons (Bot API 9.4 `InlineKeyboardButton.style`).**
+The default `#N 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱` button is now always GREEN (`style=success`)
+and full-width. New global commands:
+
+- `/addbutton <label> | <link> [| green|blue|red]` — add an extra button
+  under the Download button of EVERY new channel post (all pipelines).
+  Omit the color for the default transparent look.
+- `/buttons` — list extras · `/removebutton <n>` — remove one ·
+  `/clearbuttons` — remove all.
+
+Layout: the Download row stays full-width; extras sit TWO per row (a single
+extra takes the whole row). Colors ride through PTB's `api_kwargs`
+passthrough because python-telegram-bot 21.x predates the Bot API 9.4
+`style` field. If Telegram ever rejects a styled post, the bot automatically
+reposts the same message with unstyled buttons — a post is never lost.
+Main-channel forwards carry the same buttons (colorless on a real forward —
+Telegram forwards cannot carry a custom markup).
+
+**Fix — /addsticker destination.** The post sticker now goes to the
+pipeline's MAIN posting channel (`post_main_channel_id`) instead of the
+base posting channel; pipelines without a main channel skip the sticker.
+(This also removes a latent NameError — the old line referenced an
+undefined `settings` variable.)
+
+**New — /addcovercaption · /addfilecaption (global).** Extra text APPENDED
+after the original caption: cover captions apply to the posted cover photo,
+file captions to every file Bot 2 delivers. `<cmd> off` clears it.
+
+**Timed /broadcast.** `/broadcast` (reply mode AND inline text) no longer
+sends immediately: the bot asks "After how many hours or minutes should
+this broadcast message be deleted from users?", accepts `2h`, `30m`,
+`1h 2m` or `never` (utils.parse_duration now understands compound
+durations), then broadcasts. Every delivered copy is queued in the existing
+`deletions` collection tagged `bot: "bot1"` — only the sending bot can
+delete its messages — and removed by a new Bot-1 sweeper job
+(restart-safe, non-blocking). `never` keeps the broadcast forever;
+`/cancel` aborts a pending broadcast.

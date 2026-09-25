@@ -19,7 +19,7 @@ from telegram import Update
 
 import config
 import db
-from bot1 import build_bot1, schedule_daily
+from bot1 import build_bot1, schedule_daily, schedule_broadcast_sweeper
 from bot2 import build_bot2, schedule_sweeper
 
 logging.basicConfig(
@@ -92,6 +92,7 @@ async def lifespan(app: FastAPI):
 
     # 3. Background jobs
     await schedule_daily(bot1.job_queue)
+    schedule_broadcast_sweeper(bot1)   # v4.0: deletes timed /broadcast copies
     schedule_sweeper(bot2)
     await _set_commands()
     log.info("Both bots are up.")

@@ -42,8 +42,10 @@ WELCOME = (
 
 # ── auto-delete queue ─────────────────────────────────────────
 async def sweep_deletions(context: ContextTypes.DEFAULT_TYPE):
-    """Delete any delivered messages whose timer has elapsed."""
-    due = await db.due_deletions()
+    """Delete any delivered messages whose timer has elapsed.
+    v4.0: scoped to Bot 2's own messages — broadcasts are sent by Bot 1 and
+    can only be deleted by Bot 1 (its own sweeper handles those)."""
+    due = await db.due_deletions(bot="bot2")
     for entry in due:
         for message_id in entry.get("message_ids", []):
             try:
@@ -197,11 +199,20 @@ async def send_item(bot, chat_id, item, index, note=True):
     protect = await _protect_flag(item.get("category"))
 
     video = item["videos"][index]
+    # v4.0: the /addfilecaption extra is APPENDED after the file's own caption.
+    _fc_extra = (await db.get_settings()).get("file_caption_extra")
+    _fc = None
+    if _fc_extra:
+        _fc = ((video.get("caption") or "").strip()
+               + "\n" + _fc_extra.strip()).strip()[:1024]
     try:
+        copy_kwargs = {"protect_content": protect}
+        if _fc:
+            copy_kwargs["caption"] = _fc
         sent = await bot.copy_message(
             chat_id=chat_id, from_chat_id=db_channel,
             message_id=video["db_message_id"],
-            protect_content=protect,
+            **copy_kwargs,
         )
     except Exception as exc:
         log.error("copy_message failed: %s", exc)

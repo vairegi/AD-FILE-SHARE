@@ -118,7 +118,11 @@ HELP_ADMIN = (
     "/stats — overview + per-pipeline breakdown\n"
     "/ban &lt;user_id&gt; · /unban &lt;user_id&gt;\n"
     "/banlist · /banmessage &lt;text|reply|reset&gt;\n"
-    "/addsticker · /removesticker — sticker after every post\n"
+    "/addsticker · /removesticker — sticker after every post (main channel)\n"
+    "/addbutton &lt;label&gt; | &lt;link&gt; [| green|blue|red] — extra button under every post\n"
+    "/buttons · /removebutton &lt;n&gt; · /clearbuttons — manage extra buttons\n"
+    "/addcovercaption &lt;text|off&gt; — appended to every posted cover caption\n"
+    "/addfilecaption &lt;text|off&gt; — appended to every delivered file caption\n"
     "/addadmin &lt;user_id&gt; — promote an admin"
 )
 
@@ -347,6 +351,43 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
 
 
 # ── posting logic (shared by the scheduler and /dripnow) ──────
+def _btn(text, url, color=None):
+    """One inline button. `color` maps to the Bot API 9.4 button `style`
+    (success=green / primary=blue / danger=red). PTB 21.x has no `style`
+    field yet, so it rides through api_kwargs (merged verbatim into the
+    outgoing payload by TelegramObject.to_dict). color=None keeps the
+    default transparent look (no style key at all)."""
+    ak = {}
+    if color:
+        ak["style"] = color
+    return InlineKeyboardButton(text, url=url, api_kwargs=ak)
+
+
+def build_post_markup(link, post_no, extra_buttons):
+    """Channel-post keyboard (v4.0): row 1 is always the GREEN, full-width
+    Download button; /addbutton extras follow TWO per row (a single extra
+    takes the whole row). Pure -> unit-tested in test_all.py."""
+    rows = [[_btn(f"#{post_no} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱", link, "success")]]
+    extras = list(extra_buttons or [])
+    for i in range(0, len(extras), 2):
+        rows.append([_btn(b["label"], b["url"], b.get("color"))
+                     for b in extras[i:i + 2]])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_styled_markup(markup, clean=False):
+    """Copy of a markup whose buttons carry their style via api_kwargs —
+    passed as a RAW reply_markup dict through api_kwargs on send. With
+    clean=True every style is stripped (fallback when Telegram rejects the
+    styled payload: the post itself must never be lost)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            b.text, url=b.url,
+            api_kwargs={} if clean else dict(getattr(b, "api_kwargs", None) or {}))
+         for b in row]
+        for row in markup.inline_keyboard])
+
+
 async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
                             markup=None):
     """FORWARD the just-published post to the Main Posting Channel, then send
@@ -375,9 +416,13 @@ async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
     return fwd
 
 
-async def _post_cover(bot, post_channel, db_channel, item, markup):
+async def _post_cover(bot, post_channel, db_channel, item, markup, styled=False):
     """Post the cover image BLURRED (has_spoiler) so only the IMAGE is hidden;
     the caption text stays normal.
+
+    v4.0: the /addcovercaption extra is APPENDED after the original caption.
+    With styled=True the reply markup is rebuilt with Bot API 9.4 button
+    styles (green Download etc.) and sent as a raw dict through api_kwargs.
 
     copy_message cannot apply a spoiler, so when the cover's Bot API file_id
     was captured at scan/index time we re-send the photo with
@@ -388,15 +433,26 @@ async def _post_cover(bot, post_channel, db_channel, item, markup):
     cover_id = item.get("cover_message_id")
     if not cover_id and item.get("videos"):
         cover_id = item["videos"][0]["db_message_id"]
-    caption = item.get("caption") or ""
+    caption = (item.get("caption") or "").strip()
+    _cc_extra = (await db.get_settings()).get("cover_caption_extra")
+    if _cc_extra:
+        caption = (caption + "\n" + str(_cc_extra).strip()).strip()
     photo_fid = item.get("cover_file_id")
+    api_kwargs = ({"reply_markup": _build_styled_markup(markup).to_dict()}
+                  if styled else None)
     if photo_fid and len(caption) <= 1024:
-        return await bot.send_photo(
-            chat_id=post_channel, photo=photo_fid,
-            caption=caption or None, reply_markup=markup, has_spoiler=True)
+        kwargs = {"caption": caption or None, "reply_markup": markup,
+                  "has_spoiler": True}
+        if api_kwargs:
+            kwargs["api_kwargs"] = api_kwargs
+        return await bot.send_photo(chat_id=post_channel, photo=photo_fid,
+                                    **kwargs)
+    kwargs = {"reply_markup": markup}
+    if api_kwargs:
+        kwargs["api_kwargs"] = api_kwargs
     return await bot.copy_message(
         chat_id=post_channel, from_chat_id=db_channel,
-        message_id=cover_id, reply_markup=markup)
+        message_id=cover_id, **kwargs)
 
 
 async def do_post(bot, category=None, _depth=0):
@@ -448,13 +504,15 @@ async def do_post(bot, category=None, _depth=0):
 
     link = f"https://t.me/{config.BOT1_USERNAME}?start=file_{item['file_id']}"
     post_no = await db.count_posted(category) + 1
-    markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"#{post_no} 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱", url=link)]])
-    caption = item.get("caption") or None
+    # v4.0: green full-width Download button + any global /addbutton extras.
+    settings = await db.get_settings()
+    markup = build_post_markup(link, post_no, settings.get("post_buttons") or [])
     try:
         # Channel posts are NEVER protected - /protect only applies to the
-        # files Bot 2 delivers to users.
-        msg = await _post_cover(bot, post_channel, db_channel, item, markup)
+        # files Bot 2 delivers to users. styled=True attaches the button
+        # colors via a raw reply_markup passthrough (api_kwargs).
+        msg = await _post_cover(bot, post_channel, db_channel, item, markup,
+                                styled=True)
     except Exception as exc:
         if _is_gone(exc):
             # Source message genuinely deleted: skip the dead item, keep going.
@@ -462,26 +520,36 @@ async def do_post(bot, category=None, _depth=0):
                         item["db_message_id"], exc, item["file_id"])
             await db.mark_posted(item["db_message_id"], category=category)
             return await do_post(bot, category, _depth + 1)
-        # Any OTHER error: do NOT mark posted. Abort and report to the admin.
-        log.error("do_post: failed to post %s: %s", item["file_id"], exc)
-        await _notify_admin(
-            bot,
-            f"⚠️ [{category}] Daily post FAILED on {item['file_id']}\n"
-            f"Error: {exc}\n"
-            "Nothing was posted and the queue was NOT advanced. Fix the cause, "
-            f"then /dripnow {category}.")
-        return None
+        # v4.0: if the styled (colored-button) payload itself was rejected,
+        # retry ONCE with the same buttons but no styles — the daily post
+        # must never be lost over a cosmetic feature.
+        try:
+            log.warning("do_post: retrying %s without button styles",
+                        item["file_id"])
+            msg = await _post_cover(bot, post_channel, db_channel, item,
+                                    markup, styled=False)
+        except Exception:
+            # Any OTHER error: do NOT mark posted. Abort and report the admin.
+            log.error("do_post: failed to post %s: %s", item["file_id"], exc)
+            await _notify_admin(
+                bot,
+                f"⚠️ [{category}] Daily post FAILED on {item['file_id']}\n"
+                f"Error: {exc}\n"
+                "Nothing was posted and the queue was NOT advanced. Fix the "
+                f"cause, then /dripnow {category}.")
+            return None
     await db.mark_posted(item["db_message_id"], post_message_id=getattr(msg, "message_id", None),
                          category=category)
-    # v3.8: post the saved sticker right after the channel post (all pipelines)
-    _sid = (await db.get_settings()).get("post_sticker_id")
-    if _sid:
+    # v4.0: the saved sticker goes to the pipeline's MAIN posting channel
+    # (used to go to the base posting channel — and that old line referenced
+    # an undefined `settings`, a latent NameError). No main channel -> skip.
+    _sid = settings.get("post_sticker_id")
+    _main_ch = (cat or {}).get("post_main_channel_id")
+    if _sid and _main_ch:
         try:
-            await bot.send_sticker(
-                chat_id=cat.get("post_channel_id") or settings.get("post_channel_id"),
-                sticker=_sid)
+            await bot.send_sticker(chat_id=_main_ch, sticker=_sid)
         except Exception as exc:
-            log.warning("post sticker failed: %s", exc)
+            log.warning("post sticker to main channel failed: %s", exc)
 
     log.info("posted %s (db id %s) -> %s [%s]", item["file_id"],
              item["db_message_id"], post_channel, category)
@@ -536,6 +604,30 @@ def _make_daily_cb(key):
             return
         await do_post(context.bot, category=key)
     return _cb
+
+
+# ── v4.0: timed-/broadcast deletion sweeper (Bot 1's own messages) ──
+async def sweep_broadcast_deletions(context: ContextTypes.DEFAULT_TYPE):
+    """Delete broadcast copies whose auto-delete timer has elapsed. Scoped to
+    entries tagged bot='bot1' — only the sending bot can delete a message."""
+    for entry in await db.due_deletions(bot="bot1"):
+        for message_id in entry.get("message_ids", []):
+            try:
+                await context.bot.delete_message(entry["chat_id"], message_id)
+            except Exception:
+                pass
+        await db.remove_deletion(entry["_id"])
+
+
+def schedule_broadcast_sweeper(application):
+    """Install the repeating broadcast-deletion sweeper on Bot 1's job queue."""
+    jq = getattr(application, "job_queue", application)  # Application or JobQueue
+    if jq is None:
+        return
+    for job in jq.get_jobs_by_name("broadcast_sweep"):
+        job.schedule_removal()
+    jq.run_repeating(sweep_broadcast_deletions, interval=60, first=20,
+                     name="broadcast_sweep")
 
 
 # ── command / update handlers ─────────────────────────────────
@@ -650,8 +742,14 @@ def build_bot1() -> Application:
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
     # conversational /addcategory + /editcategory wizard (free-text answers)
     from bot1_admin import wizard_message_handler
+    # v4.0: captures the admin's time answer after /broadcast (runs BEFORE the
+    # wizard handler; both are keyed by user id and never active together)
+    from bot1_admin import broadcast_pending_reply
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                   broadcast_pending_reply), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                    wizard_message_handler), group=1)
+    schedule_broadcast_sweeper(app)
     return app
 
 

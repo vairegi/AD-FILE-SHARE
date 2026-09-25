@@ -69,6 +69,7 @@ class FakeBot:
         self.forwarded = []     # (chat_id, from_chat_id, message_id)
         self.photos = []        # (chat_id, photo_file_id, kwargs) send_photo
         self.deleted = []
+        self.stickers = []      # (chat_id, file_id) send_sticker
         self.membership = True  # get_chat_member result control
 
     async def send_message(self, chat_id, text, **kw):
@@ -90,6 +91,10 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
+
+    async def send_sticker(self, chat_id=None, sticker=None, **kw):
+        self.stickers.append((chat_id, sticker))
+        return types.SimpleNamespace(message_id=5500 + len(self.stickers))
 
     async def get_chat(self, channel_id):
         return types.SimpleNamespace(username="forcechannel")
@@ -132,7 +137,14 @@ async def main():
     check("parse bare 30 -> 30min", utils.parse_duration("30") == 1800)
     check("parse never -> 0", utils.parse_duration("never") == 0)
     check("parse junk -> None", utils.parse_duration("banana") is None)
+    # v4.0: compound durations (broadcast auto-delete answers)
+    check("parse '2h'", utils.parse_duration("2h") == 7200)
+    check("parse '1m'", utils.parse_duration("1m") == 60)
+    check("parse '1h 2m' compound", utils.parse_duration("1h 2m") == 3720)
+    check("parse '2h30m' compound", utils.parse_duration("2h30m") == 9000)
+    check("parse compound junk -> None", utils.parse_duration("1h banana") is None)
     check("human 3700", "hour" in utils.human_duration(3700))
+    check("human 0 -> never", utils.human_duration(0) == "never")
 
     # ── 2. grouping logic (pure) ──────────────────────────────
     raw = [
@@ -493,6 +505,8 @@ async def main():
     check("render: {N Duration} alias", bot2.render_withfile_message("{N Duration}", 60) == "1 hour")
     check("render: {duration} alias", bot2.render_withfile_message("gone in {duration}", 10080) == "gone in 7 days")
     check("render: {time} alias + never at 0", bot2.render_withfile_message("{time}", 0) == "never (kept forever)")
+    check("utils.human_duration(0) is short 'never' (broadcast copy)",
+          utils.human_duration(0) == "never")
 
     await db.update_settings({"with_file_message": "Delivered! {N Duration} left."})
     await db.update_category("jav", {"auto_delete_minutes": 60})
@@ -780,20 +794,29 @@ async def main():
     await db.ingest_raw({"message_id": 700, "kind": "cover", "caption": "stk"}, "jav")
     await db.ingest_raw({"message_id": 701, "kind": "video", "caption": "v"}, "jav")
     await db.rebuild_items("jav")
-    cat = await db.get_category("jav")
-    cat = dict(cat); cat["post_channel_id"] = -100999
-    await bot1.do_post(fb_s, "jav_f700", cat)
-    check("sticker posted to channel right after the post",
-          fb_s.stickers and fb_s.stickers[-1][1] == "STICKER_FILE_ID_1"
-          and fb_s.stickers[-1][0] == -100999)
+    # v4.0: the sticker destination changed to the MAIN channel; the jav
+    # pipeline has NO main channel set here, so no sticker may be sent at all
+    # (and never to a posting channel — the old behaviour).
+    await db.update_settings({"post_buttons": []})
+    await db.clear_queue_cursor("jav")
+    await bot1.do_post(fb_s, category="jav")
+    check("v4.0: no sticker sent without a main channel",
+          not fb_s.stickers or all(c != -100999 for c, _ in fb_s.stickers))
     r = await run(adm.cmd_removesticker, [])
     check("/removesticker clears it",
           (await db.get_settings()).get("post_sticker_id") is None)
 
     # ── v3.9: rich /shortenermsg (entities -> HTML, reply mode) ──
     class _Ent:
-        def __init__(self, type_, offset, length, url=None):
-            self.type, self.offset, self.length, self.url = type_, offset, length, url
+        def __init__(self, type_=None, offset=None, length=None, url=None,
+                     user=None, language=None, **kw):
+            # v3.9 cmd_shortenermsg rebuilds entities via type(e)(type=..., …)
+            self.type = type_ if type_ is not None else kw.get("type")
+            self.offset = offset if offset is not None else kw.get("offset")
+            self.length = length if length is not None else kw.get("length")
+            self.url = url if url is not None else kw.get("url")
+            self.user = user if user is not None else kw.get("user")
+            self.language = language if language is not None else kw.get("language")
     # entities_to_html: code block + bold preserved, quotes escaped safely
     html1 = adm._entities_to_html('say "hi" NOW', [_Ent("bold", 9, 3),
                                                    _Ent("code", 0, 3)])
@@ -872,26 +895,21 @@ async def main():
     check("/rescandb (no creds -> clean error)",
           any("credential" in m.lower() or "scan failed" in m.lower() for m in msgs),
           extra=str(msgs)[:160])
-    # broadcast copies the message (tags/links/quotes preserved) to all users
+    # v4.0: /broadcast asks for the auto-delete timer FIRST (nothing sent yet)
     bbot = FakeBot()
     r = await run(adm.cmd_broadcast, text="/broadcast hello all", bot=bbot)
-    check("/broadcast copies message to every user", "Done" in r
-          and len(bbot.copied) == len(await db.all_user_ids()))
-    check("/broadcast copies verbatim from the admin's message",
-          bbot.copied and all(c[1] == 999 and c[2] == 1234
-                              for c in bbot.copied))
+    check("/broadcast (inline) asks for the delete timer, sends nothing yet",
+          "deleted from users" in r and not bbot.copied and not bbot.forwarded)
 
-    # reply mode: REAL forward -> the original channel tag & quote survive
+    # reply mode also asks first; the full timed flow is tested in section 12
     upd2 = FakeUpdate()
     upd2.message.reply_to_message = types.SimpleNamespace(message_id=777)
     bbot2 = FakeBot()
     ctx2 = FakeContext(args=[])
     ctx2.bot = bbot2
     await adm.cmd_broadcast(upd2, ctx2)
-    check("/broadcast reply mode FORWARDS the replied message to all users",
-          len(bbot2.forwarded) == len(await db.all_user_ids())
-          and all(f[1] == 999 and f[2] == 777 for f in bbot2.forwarded)
-          and not bbot2.copied)
+    check("/broadcast reply mode asks first too (no immediate forward)",
+          not bbot2.forwarded and not bbot2.copied)
 
     # non-admin blocked
     upd = FakeUpdate(uid=12345)
@@ -1291,6 +1309,217 @@ async def main():
           and ok2 == ("post_main_channel_id", None)
           and ok3 == ("post_time", "21:30"))
     check("wizard parsers reject junk", bad[0] is None)
+
+    # ── 12. v4.0: colored buttons, sticker->main, captions, timed broadcast ──
+    # (a) button layout engine -------------------------------------------
+    mk = bot1.build_post_markup("https://t.me/gatebot_test?start=file_jav_f1", 1, [])
+    check("buttons: only the Download row when no extras",
+          len(mk.inline_keyboard) == 1)
+    btn = mk.inline_keyboard[0][0]
+    check("buttons: Download is full-width + GREEN (Bot API 9.4 style=success)",
+          btn.text == "#1 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱"
+          and (getattr(btn, "api_kwargs", None) or {}).get("style") == "success")
+    extras = [{"label": "A", "url": "https://a.com", "color": None},
+              {"label": "B", "url": "https://b.com", "color": "primary"},
+              {"label": "C", "url": "https://c.com", "color": "danger"}]
+    mk = bot1.build_post_markup("https://x", 1, extras)
+    rows = [[b.text for b in r] for r in mk.inline_keyboard]
+    check("buttons: 3 extras -> rows of 2 + 1 under the Download row",
+          rows == [["#1 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱"], ["A", "B"], ["C"]])
+    check("buttons: per-button colors (none / blue / red)",
+          (mk.inline_keyboard[1][0].api_kwargs or {}).get("style") is None
+          and mk.inline_keyboard[1][1].api_kwargs.get("style") == "primary"
+          and mk.inline_keyboard[2][0].api_kwargs.get("style") == "danger")
+    mk1 = bot1.build_post_markup("https://x", 1, extras[:1])
+    check("buttons: a single extra takes the full row",
+          len(mk1.inline_keyboard[1]) == 1)
+    sm = bot1._build_styled_markup(mk)
+    check("buttons: styled rebuild keeps styles",
+          sm.inline_keyboard[0][0].api_kwargs.get("style") == "success")
+    cm = bot1._build_styled_markup(mk, clean=True)
+    check("buttons: clean rebuild strips all styles (fallback)",
+          all(not (b.api_kwargs or {}) for r in cm.inline_keyboard for b in r))
+
+    # (b) /addbutton family ----------------------------------------------
+    r = await run(adm.cmd_addbutton, text="/addbutton Join | https://t.me/grp | blue")
+    check("/addbutton saves label+link+color",
+          "Button #1" in r
+          and (await db.get_settings())["post_buttons"][0]
+          == {"label": "Join", "url": "https://t.me/grp", "color": "primary"})
+    r = await run(adm.cmd_addbutton, text="/addbutton Plain | https://t.me/plain")
+    check("/addbutton without color -> transparent (no style)",
+          (await db.get_settings())["post_buttons"][1]["color"] is None)
+    r = await run(adm.cmd_addbutton, text="/addbutton Bad | notaurl")
+    check("/addbutton rejects a bad link", "❌" in r)
+    r = await run(adm.cmd_addbutton, text="/addbutton X | https://x.com | purple")
+    check("/addbutton rejects unknown colors", "Unknown color" in r)
+    r = await run(adm.cmd_buttons)
+    check("/buttons lists all with colors", "Join" in r and "Plain" in r and "blue" in r)
+    r = await run(adm.cmd_removebutton, ["1"])
+    check("/removebutton removes by position",
+          [b["label"] for b in (await db.get_settings())["post_buttons"]] == ["Plain"])
+    r = await run(adm.cmd_removebutton, ["9"])
+    check("/removebutton out-of-range errors cleanly", "No button #9" in r)
+    upd = FakeUpdate(uid=12345)
+    await adm.cmd_addbutton(upd, FakeContext(args=[]))
+    check("/addbutton blocked for non-admin", "only by admins" in upd.message.replies[-1])
+
+    # do_post uses the styled layout (green Download + extra row) -----------
+    await db._db.files.update_many({}, {"$set": {"posted": True}})
+    await db.update_category("jav", {"post_channel_id": -100222, "db_channel_id": -100111,
+                                     "post_main_channel_id": None, "post_tag": None,
+                                     "queue_cursor": None})
+    await db.clear_queue_cursor("jav")
+    await db.upsert_item({"file_id": "jav_f400", "category": "jav", "db_message_id": 400,
+                          "cover_message_id": 400, "cover_file_id": "PHOTO_400",
+                          "caption": "orig cap",
+                          "videos": [{"db_message_id": 401, "caption": ""}], "srts": []})
+    fb = FakeBot()
+    item = await bot1.do_post(fb, category="jav")
+    mkw = fb.photos[0][2].get("reply_markup")
+    check("do_post: styled layout posted (green Download + extras row)",
+          mkw.inline_keyboard[0][0].api_kwargs.get("style") == "success"
+          and [b.text for b in mkw.inline_keyboard[1]] == ["Plain"])
+    check("do_post: styled send went through api_kwargs passthrough",
+          fb.photos[0][2].get("api_kwargs", {}).get("reply_markup", {})
+          .get("inline_keyboard", [[{}]])[0][0].get("style") == "success")
+
+    # styled send rejected -> repost WITHOUT styles, post never lost --------
+    class _StyleRejectBot(FakeBot):
+        async def send_photo(self, chat_id, photo, **kw):
+            if kw.get("api_kwargs"):
+                raise RuntimeError("Bad Request: can't parse inline keyboard button style")
+            return await super().send_photo(chat_id, photo, **kw)
+    await db.upsert_item({"file_id": "jav_f410", "category": "jav", "db_message_id": 410,
+                          "cover_message_id": 410, "cover_file_id": "PHOTO_410",
+                          "caption": "c410",
+                          "videos": [{"db_message_id": 411, "caption": ""}], "srts": []})
+    sb = _StyleRejectBot()
+    item = await bot1.do_post(sb, category="jav")
+    check("do_post: styled rejection -> plain repost (post never lost)",
+          item is not None and len(sb.photos) == 1
+          and sb.photos[0][2].get("api_kwargs") is None)
+
+    # (c) /addsticker -> MAIN channel (skip when none) ---------------------
+    await db.set_post_sticker("STICKER_MAIN_1")
+    await db.upsert_item({"file_id": "jav_f420", "category": "jav", "db_message_id": 420,
+                          "cover_message_id": 420, "cover_file_id": "PHOTO_420",
+                          "caption": "c420",
+                          "videos": [{"db_message_id": 421, "caption": ""}], "srts": []})
+    await db.update_category("jav", {"post_main_channel_id": -100333})
+    fb = FakeBot()
+    await bot1.do_post(fb, category="jav")
+    check("v4.0: sticker goes to the MAIN channel, never the posting channel",
+          fb.stickers and fb.stickers[-1] == (-100333, "STICKER_MAIN_1")
+          and all(c != -100222 for c, _ in fb.stickers))
+    await db.update_category("jav", {"post_main_channel_id": None})
+    await db.upsert_item({"file_id": "jav_f430", "category": "jav", "db_message_id": 430,
+                          "cover_message_id": 430, "cover_file_id": "PHOTO_430",
+                          "caption": "c430",
+                          "videos": [{"db_message_id": 431, "caption": ""}], "srts": []})
+    fb = FakeBot()
+    await bot1.do_post(fb, category="jav")
+    check("v4.0: sticker skipped entirely when no main channel is set",
+          not fb.stickers)
+    await db.update_settings({"post_sticker_id": None})
+
+    # (d) /addcovercaption + /addfilecaption -------------------------------
+    r = await run(adm.cmd_addcovercaption, text="/addcovercaption 🔥 Daily drop")
+    check("/addcovercaption saved",
+          (await db.get_settings())["cover_caption_extra"] == "🔥 Daily drop")
+    await db.upsert_item({"file_id": "jav_f440", "category": "jav", "db_message_id": 440,
+                          "cover_message_id": 440, "cover_file_id": "PHOTO_440",
+                          "caption": "original",
+                          "videos": [{"db_message_id": 441, "caption": ""}], "srts": []})
+    fb = FakeBot()
+    await bot1.do_post(fb, category="jav")
+    check("cover caption: extra appended AFTER the original",
+          fb.photos[0][2].get("caption") == "original\n🔥 Daily drop")
+    r = await run(adm.cmd_addcovercaption, text="/addcovercaption off")
+    check("/addcovercaption off clears it",
+          (await db.get_settings())["cover_caption_extra"] is None)
+
+    r = await run(adm.cmd_addfilecaption, text="/addfilecaption ⚡ grab it fast")
+    check("/addfilecaption saved",
+          (await db.get_settings())["file_caption_extra"] == "⚡ grab it fast")
+    await db.update_settings({"auto_delete_minutes": 30})
+    await db.upsert_item({"file_id": "jav_f450", "category": "jav", "db_message_id": 450,
+                          "cover_message_id": 450, "caption": "c450",
+                          "videos": [{"db_message_id": 451, "caption": "HD"}], "srts": []})
+    fb = FakeBot()
+    await bot2.send_item(fb, 998, await db.get_item_by_file_id("jav_f450"), 0)
+    check("file caption: extra appended AFTER the original on delivery",
+          fb.copy_kwargs[0].get("caption") == "HD\n⚡ grab it fast")
+    await db.update_settings({"file_caption_extra": None})
+    fb = FakeBot()
+    await bot2.send_item(fb, 998, await db.get_item_by_file_id("jav_f450"), 0)
+    check("file caption: untouched when no extra is set",
+          "caption" not in fb.copy_kwargs[0])
+
+    # (e) /broadcast timed flow --------------------------------------------
+    bbot = FakeBot()
+    upd = FakeUpdate(uid=999, text="/broadcast timed hello")
+    ctx = FakeContext(bot=bbot, args=["timed", "hello"])
+    await adm.cmd_broadcast(upd, ctx)
+    check("broadcast: timer question asked, nothing sent yet",
+          "deleted from users" in upd.message.replies[-1]
+          and not bbot.copied and not bbot.forwarded)
+    check("broadcast: pending state armed", 999 in adm._BROADCAST_PENDING)
+    upd.message.text = "whenever"
+    await adm.broadcast_pending_reply(upd, ctx)
+    check("broadcast: junk time re-asks (still pending, nothing sent)",
+          "Could not understand" in upd.message.replies[-1]
+          and 999 in adm._BROADCAST_PENDING and not bbot.copied)
+    upd.message.text = "2h"
+    await adm.broadcast_pending_reply(upd, ctx)
+    nusers = len(await db.all_user_ids())
+    check("broadcast: copies go out only after the answer",
+          len(bbot.copied) == nusers
+          and "Auto-delete scheduled" in upd.message.replies[-1])
+    pend = await db._db.deletions.find({"bot": "bot1"}).to_list(None)
+    check("broadcast: one deletion entry per user, ~2h horizon, tagged bot1",
+          len(pend) == nusers
+          and all(7000 < d["delete_at"] - db.now() <= 7200 for d in pend))
+    check("broadcast: bot2 sweeper never sees bot1 entries",
+          len(await db.due_deletions(bot="bot2")) == 0)
+    await db._db.deletions.update_many({"bot": "bot1"},
+                                       {"$set": {"delete_at": db.now() - 1}})
+    check("broadcast: due bot1 entries visible only to the bot1 sweeper",
+          len(await db.due_deletions(bot="bot1")) == nusers
+          and len(await db.due_deletions(bot="bot2")) == 0)
+    bsw = FakeBot()
+    await bot1.sweep_broadcast_deletions(FakeContext(bot=bsw))
+    check("broadcast sweeper deletes every delivered copy",
+          len(bsw.deleted) == nusers)
+    check("broadcast sweeper clears its queue",
+          len(await db._db.deletions.find({"bot": "bot1"}).to_list(None)) == 0)
+    # 'never' -> sends, nothing queued
+    bbot2 = FakeBot()
+    upd2 = FakeUpdate(uid=999)
+    upd2.message.reply_to_message = types.SimpleNamespace(message_id=777)
+    ctx2 = FakeContext(bot=bbot2, args=[])
+    await adm.cmd_broadcast(upd2, ctx2)
+    upd2.message.text = "never"
+    await adm.broadcast_pending_reply(upd2, ctx2)
+    check("broadcast reply mode: forwards after 'never', nothing queued",
+          len(bbot2.forwarded) == nusers
+          and "Kept forever" in upd2.message.replies[-1]
+          and len(await db._db.deletions.find({"bot": "bot1"}).to_list(None)) == 0)
+    # /cancel path
+    upd3 = FakeUpdate(uid=999, text="/broadcast cancel me")
+    await adm.cmd_broadcast(upd3, FakeContext(bot=FakeBot(), args=["cancel", "me"]))
+    upd3.message.text = "/cancel"
+    await adm.broadcast_pending_reply(upd3, FakeContext(bot=FakeBot()))
+    check("broadcast: /cancel aborts cleanly",
+          "cancelled" in upd3.message.replies[-1]
+          and 999 not in adm._BROADCAST_PENDING)
+    # non-admin cannot drive the pending reply
+    adm._BROADCAST_PENDING[12345] = {"mode": "copy", "chat_id": 1, "message_id": 1}
+    upd4 = FakeUpdate(uid=12345, text="2h")
+    await adm.broadcast_pending_reply(upd4, FakeContext(bot=FakeBot()))
+    check("broadcast: non-admin answer ignored (still pending)",
+          12345 in adm._BROADCAST_PENDING)
+    adm._BROADCAST_PENDING.pop(12345, None)
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")
