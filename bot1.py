@@ -220,11 +220,30 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
     token = await db.create_token(user_id, item["file_id"], ttl, kind="verify")
     deep = (f"https://t.me/{config.BOT1_USERNAME}"
             f"?start=verify_{item['file_id']}_{token}")
-    short = await shortener.shorten(deep, user_id=user_id)
-    # remember which shortener served this token (per-user rotation, v3.2)
-    _u = await db.get_user(user_id)
-    if _u and _u.get("rr_last_site"):
-        await db.set_token_shortener(token, _u["rr_last_site"])
+    short, state, site, failures = await shortener.shorten(
+        deep, user_id=user_id, with_status=True)
+    # v4.1: record on the token whether a LIVE shortener served it — the
+    # anti-bypass ban in process_verify only applies to 'active' tokens.
+    await db.set_token_shortener(token, site, state=state)
+    if state == "down":
+        # No provider could serve (vplink/arolink down, all paused, or none
+        # configured): hand the file over directly, NEVER ban the user for
+        # our outage, and alert the admins which provider(s) failed.
+        await db.mark_token_used(token)
+        log.warning("shorteners down %s — direct delivery to user %s",
+                    failures, user_id)
+        for aid in await db.list_admin_ids():
+            try:
+                await bot.send_message(
+                    aid,
+                    "⚠️ Shortener outage: no provider could shorten a link "
+                    f"(failed: {', '.join(failures) or 'none active'}).\n"
+                    f"User {user_id} got the file directly — no verification, "
+                    "no ban. Check the /shortenerapi dashboard.")
+            except Exception as exc:
+                log.warning("admin outage alert to %s failed: %s", aid, exc)
+        await deliver_now(bot, chat_id, user_id, item)
+        return
 
     rows = [[InlineKeyboardButton("🔓 Verify & Download", url=short or deep)]]
     for b in settings.get("shortener_buttons") or []:
@@ -305,7 +324,12 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
 
     # ── anti-bypass timing gate ───────────────────────────────
     elapsed = db.now() - float(doc.get("created_at") or 0)
-    if elapsed < BYPASS_MIN_SECONDS:
+    # v4.1: only treat a sub-150s return as a bypass when the token's link was
+    # served by a LIVE shortener. Tokens issued while every provider was down
+    # ('down') reached the user as a direct link — instant return is expected
+    # and must NEVER ban them.
+    if (elapsed < BYPASS_MIN_SECONDS
+            and doc.get("shortener_state", "active") != "down"):
         await db.mark_token_used(token)  # burn the bypassed link
         # v3.2: ZERO TOLERANCE — a single too-fast attempt bans instantly.
         # No 3-strike grace period anymore.

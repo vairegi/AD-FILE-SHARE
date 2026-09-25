@@ -52,27 +52,42 @@ async def test_key(base: str, key: str):
     return await _shorten_with(base, key, "https://example.com/self-test")
 
 
-async def shorten(long_url: str, user_id=None):
-    """Return a shortened URL string, or None when no shortener can serve.
+async def shorten(long_url: str, user_id=None, with_status=False):
+    """Shorten via the ACTIVE providers WITH FAILOVER (v4.1).
 
-    Rotation: the user's own round-robin cursor advances on every call and
-    only ACTIVE shorteners take part (paused ones are filtered out before the
-    modulo, so they are never selected). Fail-open: when every shortener is
-    paused this returns None and the gate delivers the file directly.
+    Every active shortener is tried in per-user round-robin order; the first
+    success wins. with_status=True returns (url, state, site, failures):
+      state "active" — a live provider served the link (ban rules apply);
+      state "down"   — NO provider could serve (all paused, none configured,
+                       or every API call failed). Callers must fail open and
+                       MUST NOT punish the user for an outage.
+    Plain calls return just the URL (or None) — unchanged for old callers.
     """
-    entry = await db.next_shortener(user_id or 0)
-    if not entry:
+    entries = await db.active_shorteners()
+    if not entries:
         if await db.count_shorteners():
-            log.warning("All shorteners are paused; cannot shorten (fail-open upstream).")
-            return None
-        # Legacy fallback: no shorteners collection entries at all (fresh
-        # deploy before migration, or migration found no key anywhere).
+            log.warning("All shorteners paused; nothing can serve.")
+            result = (None, "down", None, [])
+            return result if with_status else None
+        # Legacy single-key fallback (fresh deploy before migration).
         settings = await db.get_settings()
         key = (settings.get("shortener_api_key") or "").strip()
         if not key:
-            log.warning("No shortener API key set (DB or env); cannot shorten.")
-            return None
-        entry = {"api_base": (settings.get("shortener_api_base")
-                              or "https://vplink.in/api").strip(),
-                 "api_key": key, "site": "legacy"}
-    return await _shorten_with(entry["api_base"], entry["api_key"], long_url)
+            log.warning("No shortener API key set (DB or env).")
+            result = (None, "down", None, [])
+            return result if with_status else None
+        entries = [{"api_base": (settings.get("shortener_api_base")
+                                 or "https://vplink.in/api").strip(),
+                    "api_key": key, "site": "legacy"}]
+    start = (await db.bump_rr_cursor(user_id or 0)) % len(entries)
+    ordered = entries[start:] + entries[:start]
+    failures = []
+    for entry in ordered:
+        url = await _shorten_with(entry["api_base"], entry["api_key"], long_url)
+        if url:
+            result = (url, "active", entry.get("site"), failures)
+            return result if with_status else url
+        failures.append(entry.get("site"))
+    log.warning("ALL shorteners failed for one link: %s", failures)
+    result = (None, "down", None, failures)
+    return result if with_status else None

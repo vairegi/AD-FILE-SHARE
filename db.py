@@ -860,13 +860,29 @@ async def next_shortener(user_id):
     return chosen
 
 
-async def set_token_shortener(token, site):
-    """Record which shortener served a verify token (stats/debugging)."""
-    await _db.tokens.update_one({"token": token},
-                                {"$set": {"shortener_site": site}})
+async def set_token_shortener(token, site, state=None):
+    """Record which shortener served a verify token — and (v4.1) WHETHER one
+    did (state 'active'/'down'). process_verify only bans too-fast returns
+    on 'active' tokens; outage tokens can never get a user banned."""
+    fields = {"shortener_site": site}
+    if state:
+        fields["shortener_state"] = state
+    await _db.tokens.update_one({"token": token}, {"$set": fields})
 
 
-# ── force-sub channel lists (v3.4) ────────────────────────────
+async def active_shorteners():
+    """All ACTIVE shorteners in stable order (v4.1 failover list)."""
+    return await _db.shorteners.find({"status": "active"}).sort("site", 1).to_list(None)
+
+
+async def bump_rr_cursor(user_id):
+    """Advance the per-user round-robin cursor; return the OLD value (v4.1)."""
+    from pymongo import ReturnDocument
+    doc = await _db.users.find_one_and_update(
+        {"user_id": user_id}, {"$inc": {"rr_cursor": 1}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    return int((doc or {}).get("rr_cursor", 1)) - 1
+
 async def force_sub_channels(category=None):
     """Resolved list of force-sub channel ids for a category (never None)."""
     if category:

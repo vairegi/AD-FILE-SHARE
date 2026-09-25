@@ -295,9 +295,11 @@ async def main():
     orig_shorten = shortener.shorten
     captured = {}
 
-    async def fake_shorten(url, user_id=None):
+    async def fake_shorten(url, user_id=None, **_kw):
+        _ws = _kw.get("with_status")
         captured["url"] = url
-        return "https://vplink.in/AbCdEf"
+        _u = "https://vplink.in/AbCdEf"
+        return (_u, 'active', 'fake', []) if _ws else _u
 
     shortener.shorten = fake_shorten
     fb.sent.clear()
@@ -858,7 +860,9 @@ async def main():
                           "videos": [{"db_message_id": 191, "caption": ""}], "srts": []})
     fbh = _HtmlBot()
     orig_sh = shortener.shorten
-    async def _sh(u, user_id=None): return "https://x.in/abc"
+    async def _sh(u, user_id=None, **_kw):
+        _u = "https://x.in/abc"
+        return (_u, "active", "fake", []) if _kw.get("with_status") else _u
     shortener.shorten = _sh
     await bot1.send_shortener_gate(fbh, 999, 4242,
                                    {"file_id": "f190"}, await db.get_settings())
@@ -1546,6 +1550,86 @@ async def main():
     check("broadcast: non-admin answer ignored (still pending)",
           12345 in adm._BROADCAST_PENDING)
     adm._BROADCAST_PENDING.pop(12345, None)
+
+    # ── 13. v4.1: shortener failover + outage no-ban ──
+    import shortener as _sh
+
+    def _btn_texts(sent):
+        out = []
+        for _, _, k in sent:
+            mk = k.get("reply_markup")
+            if mk:
+                for row in mk.inline_keyboard:
+                    for b in row:
+                        out.append(b.text)
+        return out
+
+    await db.update_settings({"shortener_enabled": True})
+    await db._db.shorteners.delete_many({})
+    await db.add_shortener("arolink", "https://arolinks.com/api", "KEY-ARO")
+    await db.add_shortener("vplink", "https://vplink.in/api", "KEY-VP")
+
+    calls = []
+    async def _aro_down(base, key, url):
+        calls.append(base)
+        if "arolinks" in base:
+            return None                       # arolink DOWN
+        return "https://vplink.in/abc123"     # vplink UP
+    _orig = _sh._shorten_with
+    _sh._shorten_with = _aro_down
+    out = await _sh.shorten("https://deep.link/x", user_id=424242, with_status=True)
+    check("failover: arolink down -> vplink serves (state active)",
+          out[0] == "https://vplink.in/abc123" and out[1] == "active"
+          and out[2] == "vplink" and "arolink" in out[3])
+    check("failover: both providers were actually tried", len(calls) == 2)
+    check("failover: plain shorten() still returns a bare URL",
+          await _sh.shorten("https://deep.link/x", user_id=424242)
+          == "https://vplink.in/abc123")
+
+    async def _all_down(base, key, url):
+        return None
+    _sh._shorten_with = _all_down
+    out = await _sh.shorten("https://deep.link/x", user_id=424242, with_status=True)
+    check("failover: both down -> url None, state down, both listed",
+          out[0] is None and out[1] == "down"
+          and set(out[3]) == {"arolink", "vplink"})
+
+    # gate: every provider down -> direct Get File + admin alert, no verify link
+    await db.upsert_item({"file_id": "jav_f600", "category": "jav",
+                          "db_message_id": 600, "cover_message_id": 600,
+                          "caption": "c600",
+                          "videos": [{"db_message_id": 601, "caption": ""}],
+                          "srts": []})
+    fb = FakeBot()
+    await bot1.send_shortener_gate(fb, 555000, 555000,
+                                   await db.get_item_by_file_id("jav_f600"),
+                                   await db.get_settings())
+    texts = _btn_texts(fb.sent)
+    check("gate outage: user gets Get File directly (no Verify link)",
+          "📥 Get File" in texts and "🔓 Verify & Download" not in texts)
+    check("gate outage: admins alerted which providers failed",
+          any(cid == 999 and "Shortener outage" in txt and "arolink" in txt
+              for cid, txt, _ in fb.sent))
+    _sh._shorten_with = _orig
+
+    # verify: fast return on an OUTAGE token -> NO ban, file delivered
+    tok = await db.create_token(555001, "jav_f600", 60, kind="verify")
+    await db.set_token_shortener(tok, None, state="down")
+    fb = FakeBot()
+    await bot1.process_verify(fb, 555001, 555001, "jav_f600", tok, "downuser")
+    check("outage token: instant return does NOT ban",
+          not ((await db.get_user(555001)) or {}).get("banned"))
+    check("outage token: user still receives the file",
+          "📥 Get File" in _btn_texts(fb.sent))
+    # verify: fast return on an ACTIVE token -> instant ban (zero tolerance kept)
+    tok2 = await db.create_token(555002, "jav_f600", 60, kind="verify")
+    await db.set_token_shortener(tok2, "vplink", state="active")
+    fb = FakeBot()
+    await bot1.process_verify(fb, 555002, 555002, "jav_f600", tok2, "fastuser")
+    check("active token: sub-150s return still instant-bans",
+          ((await db.get_user(555002)) or {}).get("banned") is True)
+    await db.set_banned(555002, False)
+    await db.update_settings({"shortener_enabled": False})
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

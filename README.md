@@ -542,3 +542,25 @@ delete its messages — and removed by a new Bot-1 sweeper job
 - `/addbutton`, `/addcovercaption`, `/addfilecaption` no longer crash on
   edited messages (`update.message` can be None — they now use
   `update.effective_message`).
+
+---
+
+## v4.1 (2026-09-25) — shortener failover + outage no-ban
+
+**Failover across providers.** `shortener.shorten` now tries EVERY active
+shortener (per-user round-robin start, e.g. vplink then arolink) and uses
+the first one that answers — when one provider's server is down the other
+takes over automatically.
+
+**Outage = direct delivery, never a ban.** If NO provider can serve (all
+down, all paused, or none configured), the gate skips verification entirely
+and hands the user the Get File button directly — previously users received
+the raw deep link, "solved" it in seconds, and were auto-banned by the
+sub-150s anti-bypass rule. Every outage delivers an admin alert naming the
+failed provider(s) (check the `/shortenerapi` dashboard).
+
+**Ban rule is now outage-aware.** Each verify token records whether a live
+shortener served it (`shortener_state`: `active`/`down`). The instant
+sub-150s ban applies ONLY to `active` tokens — tokens issued during an
+outage can never ban a user. Zero-tolerance banning for genuine bypass
+scripts is unchanged.
