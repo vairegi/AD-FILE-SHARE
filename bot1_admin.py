@@ -849,7 +849,7 @@ async def cmd_addbutton(update: Update, context: ContextTypes.DEFAULT_TYPE):
         added.append(f"#{n} “{_h(label)}” → {_h(url)} ({_button_color_label(color)})")
     if not added:
         await update.message.reply_text(
-            "❌ Nothing added:\n" + "\n".join(errors), parse_mode="HTML",
+            "❌ Nothing added:\n" + "\n".join(errors),
             disable_web_page_preview=True)
         return
     lines = [f"✅ {len(added)} button(s) added — they show under every new "
@@ -857,7 +857,7 @@ async def cmd_addbutton(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("Manage: /buttons · /removebutton <n> · /clearbuttons")
     if errors:
         lines.append("\nSkipped:\n" + "\n".join(errors))
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+    await update.message.reply_text("\n".join(lines),
                                     disable_web_page_preview=True)
 
 
@@ -870,12 +870,12 @@ async def cmd_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "No extra buttons set. Add one with "
             "/addbutton <label> | <link> [| <color>]")
         return
-    lines = ["🔘 <b>Extra post buttons</b> (under the green Download button)\n"]
+    lines = ["🔘 Extra post buttons (under the green Download button)\n"]
     for i, b in enumerate(buttons, 1):
-        lines.append(f"{i}. {_h(b.get('label'))} — {_h(b.get('url'))} "
+        lines.append(f"{i}. {b.get('label')} — {b.get('url')} "
                      f"({_button_color_label(b.get('color'))})")
     lines.append("\nRemove one: /removebutton <number> · all: /clearbuttons")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+    await update.message.reply_text("\n".join(lines),
                                     disable_web_page_preview=True)
 
 
@@ -922,7 +922,7 @@ async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE
     await db.update_settings({"cover_caption_extra": text})
     await update.message.reply_text(
         "✅ Cover caption extra saved. Every new channel post caption becomes:\n\n"
-        f"<i>original caption</i>\n{_h(text)}", parse_mode="HTML")
+        f"original caption\n{text}")
 
 
 @admin_only
@@ -946,7 +946,7 @@ async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.update_settings({"file_caption_extra": text})
     await update.message.reply_text(
         "✅ File caption extra saved. Every delivered file caption becomes:\n\n"
-        f"<i>original caption</i>\n{_h(text)}", parse_mode="HTML")
+        f"original caption\n{text}")
 
 
 # ══════════════════════════════════════════════════════════════

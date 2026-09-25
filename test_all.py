@@ -1366,6 +1366,11 @@ async def main():
               "url": "https://t.me/NSFW_Universe", "color": "primary"})
     check("/addbutton multi: both labels in confirmation",
           "💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸" in r and "🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋" in r)
+    # The reply is sent WITHOUT parse_mode, so a literal <n> in it is just
+    # text — what matters is that it is NOT HTML-formatted (no tags emitted).
+    check("/addbutton multi: confirmation sent as plain text (no parse_mode)",
+          "💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸" in r and "🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋" in r
+          and "<b>" not in r and "<i>" not in r and "<code>" not in r)
     mkm = bot1.build_post_markup("https://x", 1, s["post_buttons"][2:])
     check("/addbutton multi: pair shares one half-width row",
           [b.text for b in mkm.inline_keyboard[1]]
