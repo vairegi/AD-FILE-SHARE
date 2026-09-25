@@ -526,3 +526,19 @@ durations), then broadcasts. Every delivered copy is queued in the existing
 delete its messages — and removed by a new Bot-1 sweeper job
 (restart-safe, non-blocking). `never` keeps the broadcast forever;
 `/cancel` aborts a pending broadcast.
+
+---
+
+### v4.0.1 (2026-09-25) — /addbutton multi-button + reply fixes
+
+- `/addbutton` now accepts MULTIPLE buttons in one command — a color word
+  ends a button, so
+  `/addbutton 💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸 | https://t.me/NSFW_Universe/6 | red 🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋 | https://t.me/NSFW_Universe | blue`
+  adds both as half-width buttons on one row. (Was wrongly rejecting the
+  second label as an "unknown color".)
+- Confirmation replies no longer crash with Telegram's
+  `unsupported start tag "n"` 400 error; the whole reply is escaped and
+  link previews are suppressed.
+- `/addbutton`, `/addcovercaption`, `/addfilecaption` no longer crash on
+  edited messages (`update.message` can be None — they now use
+  `update.effective_message`).

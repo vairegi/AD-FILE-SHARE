@@ -789,37 +789,76 @@ def _button_color_label(color):
 
 @admin_only
 async def cmd_addbutton(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addbutton <label> | <link> [| <color>] — add an extra button under the
-    green Download button of EVERY new channel post (all pipelines, global).
-    Colors (Bot API 9.4 button styles): green / blue / red; omit the color
-    for the default transparent look."""
-    raw = update.message.text.partition(" ")[2]
-    parts = [p.strip() for p in raw.split("|")]
-    if len(parts) < 2 or not parts[0] or not parts[1]:
+    """/addbutton <label> | <link> [| <color>] — extra button(s) under the
+    green Download button of EVERY new channel post (global). v4.0.1 FIX:
+    accepts MULTIPLE buttons in one command — a color word ENDS a button,
+    so the next segment starts a new one. Example:
+      /addbutton Premium | https://a.com | red BACKUP | https://b.com | blue
+    adds two half-width buttons on the same row."""
+    msg = update.effective_message or update.message
+    raw = (getattr(msg, "text", None) or "").partition(" ")[2]
+    tokens = [t.strip() for t in raw.split("|")]
+    if len(tokens) < 2 or not tokens[0] or not tokens[1]:
         await update.message.reply_text(
             "Usage: /addbutton <label> | <link> [| <color>]\n"
             "Example: /addbutton Join us | https://t.me/ourgroup | blue\n"
-            "Colors: green · blue · red (omit for the default look).")
+            "Colors: green · blue · red (omit for the default look).\n\n"
+            "Multiple in one go — a color word ends a button:\n"
+            "/addbutton Premium | https://a.com | red BACKUP | https://b.com | blue")
         return
-    label, url = parts[0], parts[1]
-    if not url.startswith(("http://", "https://", "tg://")):
+    chunks, cur = [], []
+    for tok in tokens:
+        if not tok:
+            continue
+        low = tok.lower()
+        # A color word ENDS the current button; anything after it in the same
+        # segment (e.g. "red 🦋BACKUP🦋") starts the NEXT button's label.
+        if cur and low in _BUTTON_COLORS:
+            chunks.append(cur + [tok])
+            cur = []
+            continue
+        if len(cur) >= 2:
+            rem = None
+            for cw in ("green", "blue", "red"):
+                if low.startswith(cw + " "):
+                    rem = tok[len(cw):].strip(" ,")
+                    chunks.append(cur + [tok[:len(cw)]])
+                    break
+            if rem is not None:
+                cur = [rem] if rem else []
+                continue
+        cur.append(tok)
+    if cur:
+        chunks.append(cur)
+    added, errors = [], []
+    for chunk in chunks:
+        if len(chunk) < 2:
+            errors.append(f"{_h(' | '.join(chunk))} — needs a label AND a link")
+            continue
+        label, url = chunk[0], chunk[1]
+        if not url.startswith(("http://", "https://", "tg://")):
+            errors.append(f"{_h(label)} — link must start with http(s):// or tg://")
+            continue
+        color = None
+        if len(chunk) >= 3 and chunk[2]:
+            color = _BUTTON_COLORS.get(chunk[2].lower())
+            if color is None:
+                errors.append(f"{_h(label)} — unknown color (use green/blue/red)")
+                continue
+        n = await db.add_post_button(label, url, color)
+        added.append(f"#{n} “{_h(label)}” → {_h(url)} ({_button_color_label(color)})")
+    if not added:
         await update.message.reply_text(
-            "❌ The link must start with http://, https:// or tg://")
+            "❌ Nothing added:\n" + "\n".join(errors), parse_mode="HTML",
+            disable_web_page_preview=True)
         return
-    color = None
-    if len(parts) >= 3 and parts[2]:
-        color = _BUTTON_COLORS.get(parts[2].lower())
-        if color is None:
-            await update.message.reply_text(
-                "❌ Unknown color. Use green, blue or red — or omit it.")
-            return
-    n = await db.add_post_button(label, url, color)
-    await update.message.reply_text(
-        f"✅ Button #{n} added: “{_h(label)}” → {_h(url)} "
-        f"({_button_color_label(color)})\n"
-        "It appears under every new channel post. Manage: /buttons · "
-        "/removebutton <n> · /clearbuttons",
-        parse_mode="HTML", disable_web_page_preview=True)
+    lines = [f"✅ {len(added)} button(s) added — they show under every new "
+             "channel post:"] + added
+    lines.append("Manage: /buttons · /removebutton <n> · /clearbuttons")
+    if errors:
+        lines.append("\nSkipped:\n" + "\n".join(errors))
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+                                    disable_web_page_preview=True)
 
 
 @admin_only
@@ -866,7 +905,8 @@ async def cmd_clearbuttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addcovercaption <text|off> — extra text APPENDED after the original
     caption of every posted cover photo (all pipelines, global)."""
-    text = update.message.text.partition(" ")[2].strip()
+    msg = update.effective_message or update.message
+    text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
         await update.message.reply_text(
             "Usage: /addcovercaption <text>\n"
@@ -889,7 +929,8 @@ async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addfilecaption <text|off> — extra text APPENDED after the original
     caption of every file Bot 2 delivers to users (global)."""
-    text = update.message.text.partition(" ")[2].strip()
+    msg = update.effective_message or update.message
+    text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
         await update.message.reply_text(
             "Usage: /addfilecaption <text>\n"

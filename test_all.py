@@ -1343,7 +1343,7 @@ async def main():
     # (b) /addbutton family ----------------------------------------------
     r = await run(adm.cmd_addbutton, text="/addbutton Join | https://t.me/grp | blue")
     check("/addbutton saves label+link+color",
-          "Button #1" in r
+          "#1" in r
           and (await db.get_settings())["post_buttons"][0]
           == {"label": "Join", "url": "https://t.me/grp", "color": "primary"})
     r = await run(adm.cmd_addbutton, text="/addbutton Plain | https://t.me/plain")
@@ -1352,7 +1352,28 @@ async def main():
     r = await run(adm.cmd_addbutton, text="/addbutton Bad | notaurl")
     check("/addbutton rejects a bad link", "❌" in r)
     r = await run(adm.cmd_addbutton, text="/addbutton X | https://x.com | purple")
-    check("/addbutton rejects unknown colors", "Unknown color" in r)
+    check("/addbutton rejects unknown colors", "unknown color" in r.lower())
+    # v4.0.1: the owner's real multi-button command (was wrongly rejected)
+    multi = ("/addbutton 💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸 | https://t.me/NSFW_Universe/6 | red "
+             "🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋 | https://t.me/NSFW_Universe | blue")
+    r = await run(adm.cmd_addbutton, text=multi)
+    s = await db.get_settings()
+    check("/addbutton multi: TWO buttons in ONE command",
+          len(s["post_buttons"]) == 4
+          and s["post_buttons"][2] == {"label": "💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸",
+              "url": "https://t.me/NSFW_Universe/6", "color": "danger"}
+          and s["post_buttons"][3] == {"label": "🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋",
+              "url": "https://t.me/NSFW_Universe", "color": "primary"})
+    check("/addbutton multi: both labels in confirmation",
+          "💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸" in r and "🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋" in r)
+    mkm = bot1.build_post_markup("https://x", 1, s["post_buttons"][2:])
+    check("/addbutton multi: pair shares one half-width row",
+          [b.text for b in mkm.inline_keyboard[1]]
+          == ["💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸", "🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋"])
+    # restore the exact 2-button state the following checks expect
+    await db.update_settings({"post_buttons": [
+        {"label": "Join", "url": "https://t.me/grp", "color": "primary"},
+        {"label": "Plain", "url": "https://t.me/plain", "color": None}]})
     r = await run(adm.cmd_buttons)
     check("/buttons lists all with colors", "Join" in r and "Plain" in r and "blue" in r)
     r = await run(adm.cmd_removebutton, ["1"])
