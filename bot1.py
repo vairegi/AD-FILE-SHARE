@@ -788,8 +788,11 @@ def _menu_markup(rows):
 
 
 def _rt(text):
-    """RichText plain node (leaf of every rich-text tree)."""
-    return {"type": "plain", "text": str(text)}
+    """RichText plain node. Uses the {"text": ..., "entities": [...]} shape —
+    the exact format the live /banlist and /verified_users rich tables send
+    and Telegram accepts (v4.5.1: {"type": "plain", ...} was REJECTED by the
+    API, which is why every /browse fell into the error path)."""
+    return {"text": str(text), "entities": []}
 
 
 def _rbtn(label, callback_data=None, url=None, style=None):
@@ -980,18 +983,18 @@ async def _browse_render(target, context, level, key=None, genre=None,
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
             return True
-        log.exception("rich browse menu failed (%s)", method)
+        err = str(exc)[:160]
+        log.exception("rich browse menu failed (%s): %s", method, err)
         if level == "callback":
             try:
-                await target.answer(
-                    "Your Telegram app is too old for rich messages — "
-                    "please update Telegram.", show_alert=True)
+                await target.answer(f"Rich menu error: {err[:150]}",
+                                    show_alert=True)
             except Exception:
                 pass
         else:
             await target.reply_text(
-                "⚠️ Your Telegram app is too old to show rich messages — "
-                "please update Telegram and try /browse again.")
+                f"⚠️ Rich menu failed to load.\nError: {err}\n"
+                "(Please screenshot this and send it to the admin.)")
     return True
 
 

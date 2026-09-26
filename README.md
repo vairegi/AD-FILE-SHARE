@@ -692,3 +692,15 @@ Everything else from v4.4 is unchanged: genre registry, one-time backfill
 scan persisted in MongoDB, lazy incremental matching, posted-only results,
 /onbrowse /offbrowse, ban checks, 64-byte callback budget, deep links into
 the gated Download flow.
+
+
+### v4.5.1 (2026-09-26) — hotfix: rich-text node format rejected by the API
+
+**Fix — every /browse attempt fell into the error path.** v4.5 built rich
+text as `{"type": "plain", "text": ...}`; Telegram's Bot API rejects that
+shape, so `sendRichMessage`/`editMessageText` returned Bad Request and the
+handler wrongly blamed the client ("app too old"). Rich-text nodes now use
+the proven production shape `{"text": ..., "entities": [...]}` — the exact
+format the live `/banlist` and `/verified_users` rich tables send. The error
+handler now also shows the real API error text instead of a generic notice,
+so any future failure is diagnosable from a screenshot.
