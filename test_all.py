@@ -1910,7 +1910,8 @@ async def main():
     ph = bot1._menu_home_payload(cats)
     check("v4.5: home is a rich InputRichMessage with embedded buttons",
           "blocks" in ph and "menu:cat:anime" in _bdatas(ph)
-          and len(_bdatas(ph)) == len(cats))
+          # v4.6: +1 embedded URL button for "Suggest a genre"
+          and len(_bdatas(ph)) == len(cats) + 1)
     check("v4.5: home heading + prompt are rich blocks",
           any("Browse the collection" in t for t in _ptexts(ph))
           and any("Pick a category" in t for t in _ptexts(ph)))
@@ -2097,6 +2098,80 @@ async def main():
     check("v4.4: the new post appears in the menu once posted",
           "anime_f950" in [d["file_id"] for d in
                            await db.items_by_genre("anime", "romance")])
+
+
+    # ── v4.6: premium/VIP users ───────────────────────────────
+    check("v4.6: duration parser 7h", adm._premium_duration("7h") == 25200)
+    check("v4.6: duration parser 1day", adm._premium_duration("1day") == 86400)
+    check("v4.6: duration parser '1 day'", adm._premium_duration("1 day") == 86400)
+    check("v4.6: duration parser 3day", adm._premium_duration("3day") == 259200)
+    check("v4.6: duration parser 1week", adm._premium_duration("1week") == 604800)
+    check("v4.6: duration parser 30day", adm._premium_duration("30day") == 2592000)
+    check("v4.6: duration parser 12hour", adm._premium_duration("12hour") == 43200)
+    check("v4.6: duration parser rejects junk", adm._premium_duration("banana") is None)
+    check("v4.6: duration parser rejects empty", adm._premium_duration("") is None)
+
+    _vip = 777000111
+    _pdoc = await db.premium_add(_vip, 86400, 1)
+    check("v4.6: premium_add persists record with expiry",
+          _pdoc["expiry"] > db.now() and (await db.premium_get(_vip))["duration_seconds"] == 86400)
+    check("v4.6: premium_active True while window open", await db.premium_active(_vip) is True)
+    check("v4.6: non-premium user is inactive", await db.premium_active(424242) is False)
+    check("v4.6: premium_active tolerates junk ids", await db.premium_active("nope") is False)
+    # topping up EXTENDS, never shortens
+    _pdoc2 = await db.premium_add(_vip, 86400, 1)
+    check("v4.6: top-up extends the window", _pdoc2["expiry"] > _pdoc["expiry"])
+    # implicit auto-expiry + purge
+    await db._db[db.PREMIUM_COLLECTION].update_one(
+        {"user_id": _vip}, {"$set": {"expiry": db.now() - 5}})
+    check("v4.6: expired premium auto-deactivates",
+          await db.premium_active(_vip) is False)
+    _n = await db.premium_purge_expired()
+    check("v4.6: purge removes expired records",
+          _n >= 1 and (await db.premium_get(_vip)) is None and
+          await db.premium_active(_vip) is False)
+    check("v4.6: premium_remove works",
+          await db.premium_add(_vip, 86400, 1) and await db.premium_remove(_vip) is True
+          and await db.premium_get(_vip) is None)
+
+    # bypass wiring: premium check must run BEFORE the shortener gate
+    import inspect as _inspect
+    _src = _inspect.getsource(bot1.process_file)
+    check("v4.6: process_file consults db.premium_active",
+          "db.premium_active(user_id)" in _src)
+    check("v4.6: premium bypass precedes send_shortener_gate in process_file",
+          "db.premium_active(user_id)" in _src and "send_shortener_gate" in _src
+          and _src.index("db.premium_active(user_id)") < _src.index("send_shortener_gate"))
+    check("v4.6: premium commands registered",
+          all(k in adm.COMMANDS for k in
+              ("addpremiumuser", "removepremiumuser", "listpremiumuser")))
+
+    # table serialization (names verified against the Bot API docs)
+    _rows = [{"user_id": 555000222, "duration_seconds": 2592000,
+              "expiry": db.now() + 86400 * 12, "added_at": db.now(),
+              "_user": {"first_name": "Ada"}}]
+    _pl = adm._premium_table_payload(_rows)
+    _tbl = [b for b in _pl["blocks"] if b.get("type") == "table"]
+    check("v4.6: premium payload contains an InputRichBlockTable", len(_tbl) == 1)
+    _tb = _tbl[0]
+    check("v4.6: table is compact/bordered/striped",
+          _tb.get("is_compact") and _tb.get("is_bordered") and _tb.get("is_striped"))
+    check("v4.6: table header row is marked is_header",
+          all(c.get("is_header") for c in _tb["cells"][0])
+          and [c["text"] for c in _tb["cells"][0]] == ["User", "Added", "Days left", "Expires"])
+    _nc = _tb["cells"][1][0]["text"]
+    check("v4.6: user title embeds tg:// profile link",
+          _nc["type"] == "url" and _nc["url"] == "tg://user?id=555000222"
+          and _nc["text"] == "Ada")
+    check("v4.6: days-left column is present and numeric",
+          _tb["cells"][1][2]["text"].endswith("d"))
+    check("v4.6: suggest-genre blocks render below the browse menu",
+          any("@icollecteverything" in str(b.get("text")) for b in
+              [x for x in bot1._menu_home_payload([{"key": "anime", "label": "Anime"}])["blocks"]
+               if x.get("type") == "paragraph"])
+          and any(b.get("type") == "buttons" and
+                  any("icollecteverything" in str(bt.get("url")) for bt in b["buttons"])
+                  for b in bot1._menu_home_payload([{"key": "anime", "label": "Anime"}])["blocks"]))
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

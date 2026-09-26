@@ -717,3 +717,25 @@ for table CELLS — a different type — which is why /banlist renders fine).
 All plain text nodes (block text and button labels) are now bare JSON
 strings. Regression test added: every plain text node in the menu payload is
 asserted to be a string.
+
+
+## v4.6 (2026-09-26) — VIP users + genre suggestion line
+
+* **/browse**: a "Suggest a genre — @icollecteverything" line + embedded link
+  button now renders directly below the category list.
+* **VIP / premium users** (shortener bypass):
+  * `/addpremiumuser <id|@username> <duration>` — durations: `7h`, `1day`,
+    `3day`, `1week`, `30day`, `12hour` … topping up adds onto remaining time.
+  * `/removepremiumuser <id|@username>` — revoke.
+  * `/listpremiumuser` — rendered as an `InputRichBlockTable`
+    (User | Added | Days left | Expires); the user's name is a
+    `RichTextUrl` profile link (`tg://user?id=…`). Expired rows are purged
+    automatically on every call; expiry itself is implicit
+    (`expiry > now`), so no background job is needed.
+  * Premium users skip the shortener on every gated path that funnels through
+    `process_file`. Force-sub still applies (same as the admin bypass).
+* New Mongo collection: `premium_users`
+  `{user_id, added_at, expiry, duration_seconds, added_by}`.
+* Tests added: duration parsing, grant/revoke, implicit expiry +
+  purge, bypass wiring (checked in source order before `send_shortener_gate`),
+  and `InputRichBlockTable` serialization (header cells + `tg://` link cell).

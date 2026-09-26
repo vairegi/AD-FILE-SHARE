@@ -1249,3 +1249,58 @@ async def items_by_genre(category, genre, posted_only=True):
         q["posted"] = True
     cur = _db.files.find(q).sort("db_message_id", 1)
     return [d async for d in cur]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v4.6: VIP / PREMIUM USERS — bypass the shortener gate entirely.
+# A premium record is {user_id, added_at, expiry, duration_seconds, added_by}.
+# There is no background job: a record is "active" iff expiry > now, so
+# expiry is automatic and self-healing (premium_purge_expired() reaps the
+# dead rows opportunistically from /listpremiumuser).
+# ─────────────────────────────────────────────────────────────────────
+PREMIUM_COLLECTION = "premium_users"
+
+
+async def premium_add(user_id: int, seconds: int, added_by=None) -> dict:
+    """Grant/extend premium. Adds the duration onto any remaining time so
+    topping up an active user never shortens their access."""
+    user_id = int(user_id)
+    t = now()
+    prev = await premium_get(user_id)
+    base = float(prev.get("expiry") or 0) if prev else 0
+    base = max(base, t)
+    doc = {"user_id": user_id, "added_at": t, "expiry": base + int(seconds),
+           "duration_seconds": int(seconds), "added_by": added_by}
+    await _db[PREMIUM_COLLECTION].update_one(
+        {"user_id": user_id}, {"$set": doc}, upsert=True)
+    return doc
+
+
+async def premium_remove(user_id: int) -> bool:
+    r = await _db[PREMIUM_COLLECTION].delete_one({"user_id": int(user_id)})
+    return bool(r.deleted_count)
+
+
+async def premium_get(user_id: int):
+    return await _db[PREMIUM_COLLECTION].find_one({"user_id": int(user_id)})
+
+
+async def premium_active(user_id) -> bool:
+    """True while the user's premium window is open (auto-expires)."""
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    doc = await premium_get(user_id)
+    return bool(doc and float(doc.get("expiry") or 0) > now())
+
+
+async def premium_list(include_expired: bool = True) -> list:
+    q = {} if include_expired else {"expiry": {"$gt": now()}}
+    cur = _db[PREMIUM_COLLECTION].find(q).sort("expiry", -1)
+    return [d async for d in cur]
+
+
+async def premium_purge_expired() -> int:
+    r = await _db[PREMIUM_COLLECTION].delete_many({"expiry": {"$lte": now()}})
+    return int(r.deleted_count)

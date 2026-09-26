@@ -2056,6 +2056,213 @@ async def cmd_offbrowse(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _browse_toggle(update, False)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# v4.6: VIP / PREMIUM USERS
+#   /addpremiumuser <id|@username> <duration>   (7h, 1day, 3day, 1week, 30day)
+#   /removepremiumuser <id|@username>
+#   /listpremiumuser     -> InputRichBlockTable (User | Added | Days left | Expires)
+# Premium users BYPASS the shortener gate (force-sub still applies).
+# ═════════════════════════════════════════════════════════════════════
+_PREM_UNITS = {
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "w": 604800, "week": 604800, "weeks": 604800,
+}
+
+
+def _premium_duration(text):
+    """'7h' / '1day' / '1 day' / '3day' / '1week' / '30day' / '12hour' -> seconds.
+    Returns None when nothing parseable. A bare number means minutes (same
+    convention as the rest of the bot's duration parser)."""
+    import re
+    s = (text or "").strip().lower()
+    if not s:
+        return None
+    total, found = 0, False
+    for num, unit in re.findall(r"(\d+)\s*([a-z]+)", s):
+        if unit in _PREM_UNITS:
+            total += int(num) * _PREM_UNITS[unit]
+            found = True
+    if found:
+        return total or None
+    if s.isdigit():
+        return int(s) * 60
+    return None
+
+
+async def _resolve_premium_target(arg, context):
+    """Accepts a numeric id, a tg://user?id= link, or @username (resolved via
+    getChat). Returns the integer user id, or None."""
+    if not arg:
+        return None
+    a = str(arg).strip()
+    if a.startswith("tg://user?id="):
+        a = a.split("id=", 1)[1]
+    if a.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(a)
+            return int(chat.id)
+        except Exception:
+            return None
+    if a.lstrip("-").isdigit():
+        return int(a)
+    return None
+
+
+def _premium_name_from_doc(doc, uid):
+    if not doc:
+        return f"User {uid}"
+    return (doc.get("first_name") or doc.get("name")
+            or (("@" + doc["username"]) if doc.get("username") else None)
+            or f"User {uid}")
+
+
+def _premium_table_payload(rows, page_size=20):
+    """InputRichBlockTable payload (fields verified against the Bot API docs:
+    InputRichBlockTable{type:'table', cells:[[RichBlockTableCell...]],
+    is_bordered, is_striped, is_compact, caption}; RichBlockTableCell
+    {text: RichText, is_header, colspan, rowspan, align}; the clickable
+    profile title is a RichTextUrl{type:'url', text, url} on tg://user?id=)."""
+    def hcell(t):
+        return {"text": t, "is_header": True}
+
+    def cell(t):
+        return {"text": t}
+
+    def name_cell(text, uid):
+        return {"text": {"type": "url", "text": text,
+                         "url": f"tg://user?id={int(uid)}"}}
+
+    header = [hcell("User"), hcell("Added"), hcell("Days left"), hcell("Expires")]
+    cells = [header]
+    t = db.now()
+    for r in rows[:page_size]:
+        uid = int(r["user_id"])
+        added_days = max(1, round(int(r.get("duration_seconds") or 0) / 86400) or 1)
+        left = (float(r.get("expiry") or 0) - t) / 86400
+        left_days = max(0, __import__("math").ceil(left)) if left > 0 else 0
+        try:
+            import datetime as _dt
+            exp = _dt.datetime.fromtimestamp(
+                float(r.get("expiry") or 0),
+                _dt.timezone(_dt.timedelta(hours=5, minutes=30))).strftime("%d %b %Y %H:%M")
+        except Exception:
+            exp = "-"
+        cells.append([
+            name_cell(_premium_name_from_doc(r.get("_user"), uid), uid),
+            cell(f"{added_days}d"),
+            cell("expired" if left_days <= 0 else f"{left_days}d"),
+            cell(exp),
+        ])
+    header_doc = {"type": "table", "cells": cells, "is_bordered": True,
+                  "is_striped": True, "is_compact": True}
+    return {"blocks": [
+        _rich_heading("\U0001F451 Premium users"),
+        _rich_para(f"{len(rows)} user(s) \u00b7 shortener bypass active while days left > 0"),
+        header_doc,
+        _rich_para("Tap a name to open their profile. Remove with /removepremiumuser <id>."),
+    ]}
+
+
+def _rich_heading(text):
+    return {"type": "heading", "text": str(text), "size": 3}
+
+
+def _rich_para(text):
+    return {"type": "paragraph", "text": str(text)}
+
+
+async def _send_premium_table(bot, chat_id, payload):
+    """Raw sendRichMessage (python-telegram-bot ships no rich helpers).
+    Surfaces the REAL Telegram error instead of masking it."""
+    import json as _json
+    last = None
+    for data in ({"chat_id": chat_id, "rich_message": payload},
+                 {"chat_id": chat_id, "rich_message": _json.dumps(payload)}):
+        try:
+            return await bot._post("sendRichMessage", data=data)
+        except Exception as exc:
+            last = exc
+    try:
+        await bot.send_message(
+            chat_id,
+            "\u26A0\uFE0F Premium table could not be rendered as a rich message.\n"
+            f"Error: {last}")
+    except Exception:
+        pass
+    return None
+
+
+@admin_only
+async def cmd_addpremiumuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addpremiumuser <id|@username> <duration> — e.g. /addpremiumuser 123456789 30day.
+    Premium users bypass the shortener on all gated download paths."""
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /addpremiumuser <id|@username> <duration>\n"
+            "Examples: /addpremiumuser 123456789 7h\n"
+            "          /addpremiumuser 123456789 1day · 3day · 1week · 30day")
+        return
+    uid = await _resolve_premium_target(args[0], context)
+    if not uid:
+        await update.message.reply_text(
+            f"\u274C Could not resolve '{args[0]}' to a user id "
+            "(use a numeric id or @username).")
+        return
+    secs = _premium_duration(" ".join(args[1:]))
+    if not secs or secs < 60:
+        await update.message.reply_text(
+            "\u274C Invalid duration. Use s/m/h/day/week — "
+            "e.g. 7h, 1day, 3day, 1week, 30day.")
+        return
+    doc = await db.premium_add(uid, secs, update.effective_user.id)
+    left = (doc["expiry"] - db.now()) / 86400
+    await update.message.reply_text(
+        f"\u2705 Premium granted to {uid}\n"
+        f"Duration: {utils.human_duration(secs)}\n"
+        f"Expires in: {left:.2f} day(s) — shortener bypass is now active.")
+
+
+@admin_only
+async def cmd_removepremiumuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/removepremiumuser <id|@username> — revoke premium (shortener applies again)."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Usage: /removepremiumuser <id|@username>")
+        return
+    uid = await _resolve_premium_target(args[0], context)
+    if not uid:
+        await update.message.reply_text("\u274C Could not resolve that user id.")
+        return
+    ok = await db.premium_remove(uid)
+    await update.message.reply_text(
+        f"\u2705 Premium removed from {uid}. Shortener applies again."
+        if ok else f"\u2139\uFE0F {uid} was not in the premium list.")
+
+
+@admin_only
+async def cmd_listpremiumuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/listpremiumuser — InputRichBlockTable: user (profile linked), days added,
+    days left, expiry. Expired rows are purged automatically on each call."""
+    purged = await db.premium_purge_expired()
+    rows = await db.premium_list(include_expired=False)
+    for r in rows:
+        try:
+            r["_user"] = await db.get_user(int(r["user_id"]))
+        except Exception:
+            r["_user"] = None
+    if not rows:
+        await update.message.reply_text(
+            "\U0001F451 No premium users right now."
+            + (f" ({purged} expired record(s) purged.)" if purged else ""))
+        return
+    payload = _premium_table_payload(rows)
+    await _send_premium_table(context.bot, update.effective_chat.id, payload)
+
+
 # Command name -> handler, registered by bot1.build_bot1()
 COMMANDS = {
     "shortener": cmd_shortener,
@@ -2115,4 +2322,8 @@ COMMANDS = {
     "genres": cmd_genres,
     "onbrowse": cmd_onbrowse,
     "offbrowse": cmd_offbrowse,
+    # v4.6: VIP / premium users (shortener bypass)
+    "addpremiumuser": cmd_addpremiumuser,
+    "removepremiumuser": cmd_removepremiumuser,
+    "listpremiumuser": cmd_listpremiumuser,
 }

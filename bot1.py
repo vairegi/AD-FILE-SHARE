@@ -303,6 +303,12 @@ async def process_file(bot, chat_id, user_id, file_id):
     if await is_admin(user_id):
         await deliver_now(bot, chat_id, user_id, item)
         return
+    # VIP bypass (v4.6): premium users skip the shortener on EVERY gated
+    # path that funnels through process_file. Force-sub (above) still applies,
+    # exactly like the admin bypass. Expiry is automatic (db.premium_active).
+    if await db.premium_active(user_id):
+        await deliver_now(bot, chat_id, user_id, item)
+        return
     settings = await db.get_settings()
     if not settings.get("shortener_enabled"):
         await deliver_now(bot, chat_id, user_id, item)
@@ -830,6 +836,19 @@ def _rich(blocks):
     return {"blocks": blocks}
 
 
+# ── v4.6: "Suggest a genre" line + link, embedded directly BELOW the
+# /browse output (item 1). Rendered as rich blocks, never an inline keyboard.
+SUGGEST_HANDLE = "icollecteverything"
+
+
+def _suggest_blocks():
+    return [
+        _para(f"\U0001F4A1 Don't see your genre? Suggest one: @{SUGGEST_HANDLE}"),
+        _btn_row(_rbtn(f"\u2709\ufe0f Suggest a genre \u2014 @{SUGGEST_HANDLE}",
+                       url=f"https://t.me/{SUGGEST_HANDLE}")),
+    ]
+
+
 def _menu_home_payload(cats):
     """Level 0: one embedded button row per ENABLED pipeline (a new pipeline
     appears automatically — pure DB read, nothing hardcoded)."""
@@ -842,6 +861,7 @@ def _menu_home_payload(cats):
         blocks.append(_btn_row(_rbtn(
             f"📁 {(c.get('label') or c['key']).strip()}",
             callback_data=f"menu:cat:{c['key']}")))
+    blocks.extend(_suggest_blocks())
     return _rich(blocks)
 
 
