@@ -93,6 +93,14 @@ async def scan_channel(channel_id, category=None, progress=None):
             if progress and scanned % 200 == 0:
                 await progress(scanned)
         items = await db.rebuild_items(category)
-        return {"scanned": scanned, "items": items}
+        # v4.4: captions may have changed since the last scan — refresh every
+        # genre match list of this category once (still no per-genre scans).
+        genres = 0
+        if category:
+            try:
+                genres = await db.rematch_genres(category)
+            except Exception as exc:
+                log.warning("genre rematch after scan failed (non-fatal): %s", exc)
+        return {"scanned": scanned, "items": items, "genres": genres}
     finally:
         await client.disconnect()

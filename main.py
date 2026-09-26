@@ -39,6 +39,7 @@ async def _set_commands():
         # Bot 1 — everyone sees the basics
         await bot1.bot.set_my_commands([
             BotCommand("start", "Start the bot"),
+            BotCommand("browse", "Browse by category & genre"),
             BotCommand("help", "Show all commands"),
         ])
         # Bot 1 — admins additionally get the full admin panel in the menu

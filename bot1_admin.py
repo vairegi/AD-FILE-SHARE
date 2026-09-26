@@ -1843,6 +1843,10 @@ async def _run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_
     await _say(
         f"✅ [{category or 'legacy'}] Scan complete. Messages indexed: {result['scanned']} · "
         f"Items in queue: {result['items']}")
+    if category and result.get("genres"):
+        await _say(
+            f"🏷 [{category}] {result['genres']} genre match list(s) refreshed "
+            "from the current captions.")
 
 
 @admin_only
@@ -1904,6 +1908,154 @@ async def cmd_renamecategory(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="HTML")
 
 
+# ══════════════════════════════════════════════════════════════
+#  GENRES + BROWSE TOGGLE (v4.4)
+# ══════════════════════════════════════════════════════════════
+async def _backfill_genre_task(category, genre, bot, chat_id):
+    """Background one-time caption scan for a freshly added genre. The result
+    is PERSISTED in the genre doc (matched + scanned) — the DB is never
+    scanned twice for the same genre. Reports the count to the admin when
+    done; a crash only logs, it can never break the command that spawned it."""
+    try:
+        n = await db.backfill_genre(category, genre)
+        await bot.send_message(
+            chat_id,
+            f"✅ [{category}] Scan done — {n} item(s) match '{genre}'. "
+            "It now appears in /browse. New uploads match automatically.")
+    except Exception as exc:
+        log.exception("genre backfill failed: %s/%s", category, genre)
+        try:
+            await bot.send_message(
+                chat_id,
+                f"⚠️ [{category}] Genre '{genre}' was saved but the caption "
+                f"scan failed: {exc}. Delete + re-add it to retry.")
+        except Exception:
+            pass
+
+
+@admin_only
+async def cmd_addgenre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addgenre <pipeline> <genre> — register a genre under a pipeline.
+    Runs a ONE-TIME caption scan in the background (result stored in Mongo);
+    re-adding an existing genre never rescans. Matching is format-proof:
+    '#Romance!', bold, mono, quotes, emoji all count (captions are stored
+    as plain text). Example: /addgenre anime Adventure"""
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /addgenre <pipeline> <genre>\n"
+            "Example: /addgenre anime Adventure\n"
+            f"(letters/numbers/spaces, max {db.GENRE_MAX_LEN} chars)")
+        return
+    key = args[0].lower()
+    raw = " ".join(args[1:]).strip()
+    cat = await db.get_category(key)
+    if not cat:
+        await update.message.reply_text(
+            f"❌ No pipeline named '{key}'. See /categories.")
+        return
+    if db.normalize_genre(raw) is None:
+        await update.message.reply_text(
+            f"❌ Invalid genre. Use letters/numbers/spaces only, max "
+            f"{db.GENRE_MAX_LEN} chars (e.g. 'Adventure', 'slice of life').")
+        return
+    doc, created = await db.add_genre(key, raw, update.effective_user.id)
+    slug = doc["genre"]
+    if not created:
+        await update.message.reply_text(
+            f"ℹ️ [{key}] Genre '{slug}' already exists — "
+            f"{len(doc.get('matched') or [])} item(s) matched "
+            f"(scan {'done' if doc.get('scanned') else 'still running'}). "
+            "No rescan needed.")
+        return
+    await update.message.reply_text(
+        f"✅ [{key}] Genre '{slug}' added. Scanning existing captions once, "
+        "in the background — I'll report the match count here when done.")
+    asyncio.create_task(_backfill_genre_task(key, slug, context.bot,
+                                             update.effective_chat.id))
+
+
+@admin_only
+async def cmd_delgenre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delgenre <pipeline> <genre> — remove a genre (menu button + stored
+    match list disappear instantly; files themselves are untouched)."""
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /delgenre <pipeline> <genre>")
+        return
+    key = args[0].lower()
+    if not await db.get_category(key):
+        await update.message.reply_text(f"❌ No pipeline named '{key}'.")
+        return
+    raw = " ".join(args[1:]).strip()
+    if await db.remove_genre(key, raw):
+        await update.message.reply_text(
+            f"🗑 [{key}] Genre '{db.normalize_genre(raw)}' removed. "
+            "The /browse menu updates instantly.")
+    else:
+        await update.message.reply_text(
+            f"❌ [{key}] No such genre. See /genres {key}.")
+
+
+@admin_only
+async def cmd_genres(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/genres [pipeline] — every pipeline's genres with match counts
+    (stored matches / currently posted). No pipeline given -> all of them."""
+    args = context.args or []
+    if args:
+        key = args[0].lower()
+        cat = await db.get_category(key)
+        if not cat:
+            await update.message.reply_text(f"❌ No pipeline named '{key}'.")
+            return
+        cats = [cat]
+    else:
+        cats = await db.list_categories()
+    if not cats:
+        await update.message.reply_text("No pipelines yet — /addcategory first.")
+        return
+    lines = []
+    for cat in cats:
+        key = cat["key"]
+        genres = await db.list_genres(key)
+        lines.append(f"📂 <b>{_h(cat.get('label') or key)}</b> (<code>{key}</code>)")
+        if not genres:
+            lines.append(f"   none — add one: /addgenre {key} &lt;genre&gt;")
+        for g in genres:
+            matched = g.get("matched") or []
+            posted = len(await db.items_by_genre(key, g["genre"],
+                                                 posted_only=True))
+            state = "" if g.get("scanned") else " ⏳ scanning"
+            lines.append(
+                f"   • {_h(g['genre'])} — {len(matched)} matched, "
+                f"{posted} posted{state}")
+        lines.append("")
+    await update.message.reply_text("\n".join(lines).strip(),
+                                    parse_mode="HTML")
+
+
+async def _browse_toggle(update, enabled):
+    await db.update_settings({"browse_enabled": enabled})
+    await update.message.reply_text(
+        "✅ Browse menu is now <b>ON</b> — /browse works for everyone."
+        if enabled else
+        "⛔ Browse menu is now <b>OFF</b> — /browse and its buttons tell "
+        "users browsing is disabled. Channel-post Download buttons are "
+        "unaffected.", parse_mode="HTML")
+
+
+@admin_only
+async def cmd_onbrowse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/onbrowse — enable the /browse genre menu globally (default: on)."""
+    await _browse_toggle(update, True)
+
+
+@admin_only
+async def cmd_offbrowse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/offbrowse — disable the /browse genre menu globally."""
+    await _browse_toggle(update, False)
+
+
 # Command name -> handler, registered by bot1.build_bot1()
 COMMANDS = {
     "shortener": cmd_shortener,
@@ -1957,4 +2109,10 @@ COMMANDS = {
     "use": cmd_use,
     "renamecategory": cmd_renamecategory,
     "verified_users": cmd_verified_users,
+    # v4.4: genre registry + browse-menu toggle
+    "addgenre": cmd_addgenre,
+    "delgenre": cmd_delgenre,
+    "genres": cmd_genres,
+    "onbrowse": cmd_onbrowse,
+    "offbrowse": cmd_offbrowse,
 }

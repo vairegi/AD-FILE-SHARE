@@ -252,6 +252,23 @@ automatically.
 | `/addfilecaption <text\|off>` | text appended after every delivered file caption |
 | `/addsticker` · `/removesticker` | sticker posted to the MAIN channel after each post (skipped when no main channel) |
 
+**Genres & browse menu (v4.4)**
+
+| Command | Effect |
+|---|---|
+| `/addgenre <pipeline> <genre>` | register a genre under a pipeline; runs a ONE-TIME caption scan in the background (result stored in MongoDB — never rescanned) |
+| `/delgenre <pipeline> <genre>` | remove a genre and its stored match list |
+| `/genres [pipeline]` | list genres with matched/posted counts (all pipelines when omitted) |
+| `/onbrowse` · `/offbrowse` | enable/disable the `/browse` menu globally |
+
+### Bot 1 — user
+
+| Command | Effect |
+|---|---|
+| `/start` | welcome (carries a 📂 Browse button) / handles `file_*` and `verify_*` deep links |
+| `/browse` | multi-level menu: category → genre → posted items; works in DMs and groups; results deep-link into the gated Download flow |
+| `/help` | command list |
+
 ### Bot 2 — user
 
 | Command | Effect |
@@ -606,3 +623,33 @@ of everyone who verified SINCE MIDNIGHT IST, one row per user:
 - **`/verified_users yesterday`** shows the previous day's table.
 - Falls back to a paged monospace table if Telegram rejects the rich
   payload — the report can never fail to display.
+
+---
+
+## v4.4 (2026-09-26) — dynamic genre browse menu (rich messages)
+
+**New — `/browse` multi-level menu (users).** One inline message that edits
+itself in place (ephemeral view): every ENABLED pipeline → its genres →
+posted items (10 per page, Prev/Next). Works in DMs and groups; new
+pipelines appear automatically. Result buttons deep-link into the existing
+`/start file_…` flow, so force-sub, the shortener gate and the Bot 2 token
+handoff apply exactly like channel posts — the menu can never bypass
+monetization. `/start` also carries a 📂 Browse button.
+
+**New — genre registry (admin).** `/addgenre <pipeline> <genre>` runs a
+ONE-TIME background caption scan and persists the matches in MongoDB
+(`genres` collection) — the database is never re-scanned for that genre.
+New uploads are matched incrementally at index time (in-memory regex per
+genre, zero extra queries), and `/rescandb` refreshes all genre lists of
+the pipeline once. Matching is format-proof: `#Romance! 💕`, bold, mono,
+quotes and emoji all count (captions are stored as plain text), and
+whole-phrase matching keeps `romance` from matching `romancer`.
+`/delgenre` and `/genres` manage the registry.
+
+**New — `/onbrowse` / `/offbrowse` (admin).** Global switch for the menu
+(channel-post Download buttons are unaffected).
+
+Safety: banned users are rejected at every menu level; stale taps on
+deleted pipelines/genres re-render the parent menu instead of erroring;
+callback data stays under Telegram's 64-byte limit by construction
+(genre slugs are capped at 24 chars).

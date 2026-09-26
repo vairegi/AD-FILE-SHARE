@@ -29,6 +29,11 @@ join_requests : { user_id, at }
 admins        : { user_id, at }
 admin_state   : { user_id, active_category }
 deletions     : { chat_id, message_ids[], delete_at }
+genres        : { category, genre, matched: [file_id], scanned, created_at,
+                  added_by }  — v4.4: per-category genre registry; `matched`
+                  is the PERSISTED caption-scan result so the DB is scanned
+                  once per genre, never again (lazy incremental matching tops
+                  it up as new items are indexed).
 
 file_id format
 --------------
@@ -37,6 +42,7 @@ Items created before the upgrade keep their legacy "f{db_message_id}" form;
 get_item_by_file_id() transparently falls back so old Download buttons in
 already-published channel posts keep working forever.
 """
+import re
 import time
 import uuid
 
@@ -84,6 +90,7 @@ DEFAULT_SETTINGS = {
     "queue_cursor": None,
     "protect_content": False,
     "with_file_message": None,   # custom post-delivery notice (/withfilemessages)
+    "browse_enabled": True,      # v4.4: /onbrowse /offbrowse global switch for the genre browse menu
 }
 
 # Fields a category document always carries (defaults for /addcategory).
@@ -187,6 +194,8 @@ async def connect():
     await _db.admins.create_index("user_id", unique=True)
     await _db.deletions.create_index("delete_at")
     await _db.admin_state.create_index("user_id", unique=True)
+    # v4.4: one doc per (category, genre) — upserts can never duplicate a genre
+    await _db.genres.create_index([("category", 1), ("genre", 1)], unique=True)
     await migrate_to_categories()
     return _db
 
@@ -299,6 +308,7 @@ async def delete_category(key, purge_data=False):
     if purge_data:
         await _db.files.delete_many({"category": key})
         await _db.raw.delete_many({"category": key})
+        await _db.genres.delete_many({"category": key})   # v4.4: no orphan genres
     return res.deleted_count
 
 
@@ -620,6 +630,27 @@ def group_items(raw: list, category=None):
         for it in items:
             it["category"] = cat
     return items
+
+
+async def rematch_genres(category):
+    """v4.4: rebuild every genre's match list for a category from the CURRENT
+    captions. Called after /rescandb (rebuild_items may have changed captions
+    or dropped items) so genre results never go stale. One pass over files
+    per category — genres without a stored list just get their backfill."""
+    key = _norm_key(category)
+    genres = await list_genres(key)
+    if not genres:
+        return 0
+    docs = await _db.files.find({"category": key},
+                                {"file_id": 1, "caption": 1}).to_list(None)
+    for gdoc in genres:
+        hits = [d["file_id"] for d in docs
+                if d.get("file_id")
+                and _genre_in_caption(gdoc["genre"], d.get("caption"))]
+        await _db.genres.update_one(
+            {"_id": gdoc["_id"]},
+            {"$set": {"matched": hits, "scanned": True}})
+    return len(genres)
 
 
 async def rebuild_items(category=None):
@@ -1072,3 +1103,149 @@ async def remove_post_button(index):
     buttons.pop(index - 1)
     await update_settings({"post_buttons": buttons})
     return True
+
+
+# ══════════════════════════════════════════════════════════════
+#  GENRES + BROWSE MENU (v4.4)
+# ══════════════════════════════════════════════════════════════
+# Genre slugs ride inside Telegram callback_data (hard limit: 64 BYTES).
+# Worst case 'menu:p:<cat>:<genre>:<page>' = 8 + 1 + 24 + 1 + 24 + 1 + 4 = 63.
+GENRE_MAX_LEN = 24
+
+
+def normalize_genre(text):
+    """Canonical genre slug: lowercase alnum+space, '#' and every other
+    symbol stripped, whitespace collapsed. 'Romance!', '#ROMANCE 💕' and
+    'sci  fi' all normalize cleanly; empty/over-long -> None (rejected)."""
+    slug = " ".join(re.sub(r"[^a-z0-9 ]", "", str(text or "").lower()).split())
+    if not slug or len(slug) > GENRE_MAX_LEN:
+        return None
+    return slug
+
+
+def _genre_in_caption(genre, caption) -> bool:
+    """Whole-phrase caption match, format-proof by construction.
+
+    Captions are stored as PLAIN text (Telegram bold/italic/mono entities
+    are already discarded at scan time), so any font styling can never
+    break the match. Case, '#', markdown chars, quotes and emoji are all
+    normalized away on both sides; 'romance' matches '#Romance! 💕' but
+    never 'romancer'. Pure function — unit-tested in test_all.py."""
+    g = normalize_genre(genre)
+    if not g:
+        return False
+    norm = " ".join(re.sub(r"[^a-z0-9 ]", " ", str(caption or "").lower()).split())
+    return re.search(r"(?<![a-z0-9])" + re.escape(g) + r"(?![a-z0-9])", norm) is not None
+
+
+async def add_genre(category, genre, admin_id=None):
+    """Register a genre under a category. Returns (doc, created: bool);
+    (None, False) when the genre slug is invalid. Idempotent: re-adding an
+    existing genre NEVER rescans — it just returns the stored doc."""
+    slug = normalize_genre(genre)
+    if not slug:
+        return None, False
+    key = _norm_key(category)
+    existing = await _db.genres.find_one({"category": key, "genre": slug})
+    if existing:
+        return existing, False
+    doc = {"category": key, "genre": slug, "matched": [], "scanned": False,
+           "created_at": now(), "added_by": admin_id}
+    await _db.genres.update_one(
+        {"category": key, "genre": slug}, {"$setOnInsert": doc}, upsert=True)
+    return await _db.genres.find_one({"category": key, "genre": slug}), True
+
+
+async def remove_genre(category, genre) -> bool:
+    """Delete a genre (and its stored match list). True when it existed."""
+    res = await _db.genres.delete_one(
+        {"category": _norm_key(category), "genre": normalize_genre(genre) or "\x00"})
+    return res.deleted_count > 0
+
+
+async def list_genres(category):
+    """All genres of one category with their stored match lists, A->Z."""
+    cur = _db.genres.find({"category": _norm_key(category)}).sort("genre", 1)
+    return [d async for d in cur]
+
+
+async def get_genre(category, genre):
+    slug = normalize_genre(genre)
+    if not slug:
+        return None
+    return await _db.genres.find_one(
+        {"category": _norm_key(category), "genre": slug})
+
+
+async def genre_add_matches(category, genre, file_ids):
+    """Append file ids to a genre's stored match list. $addToSet/$each is
+    idempotent — a rescan or double delivery can never create duplicates."""
+    ids = list(dict.fromkeys(file_ids or []))   # dedupe, keep order
+    if not ids:
+        return
+    await _db.genres.update_one(
+        {"category": _norm_key(category), "genre": normalize_genre(genre) or "\x00"},
+        {"$addToSet": {"matched": {"$each": ids}}})
+
+
+async def genre_mark_scanned(category, genre):
+    await _db.genres.update_one(
+        {"category": _norm_key(category), "genre": normalize_genre(genre) or "\x00"},
+        {"$set": {"scanned": True}})
+
+
+async def backfill_genre(category, genre):
+    """ONE-TIME full caption scan for a genre (runs when it is first added).
+    Stores the result in the genre doc and returns the match count."""
+    key = _norm_key(category)
+    hits = []
+    async for doc in _db.files.find({"category": key},
+                                    {"file_id": 1, "caption": 1}):
+        if _genre_in_caption(genre, doc.get("caption")):
+            hits.append(doc.get("file_id"))
+    hits = [h for h in hits if h]
+    await genre_add_matches(key, genre, hits)
+    await genre_mark_scanned(key, genre)
+    return len(hits)
+
+
+async def match_caption_against_genres(category, caption):
+    """Incremental path: check ONE new/updated caption against a category's
+    genres (an in-memory regex per genre — no scanning, no extra queries).
+    Matching genres get the item's file_id appended. Returns matched slugs.
+    file_id=None only dry-checks (used where the id is not known yet)."""
+    return await match_item_genres(category, None, caption)
+
+
+async def match_item_genres(category, file_id, caption):
+    """Same as match_caption_against_genres but records under `file_id`.
+    Skips genres whose one-time backfill has not finished yet (scanned=False)
+    — the running backfill already covers this item, so writing now would be
+    redundant work (and $addToSet makes it harmless anyway)."""
+    key = _norm_key(category)
+    matched = []
+    async for gdoc in _db.genres.find({"category": key}):
+        if not gdoc.get("scanned"):
+            continue
+        if _genre_in_caption(gdoc["genre"], caption):
+            matched.append(gdoc["genre"])
+    if matched and file_id:
+        for slug in matched:
+            await genre_add_matches(key, slug, [file_id])
+    return matched
+
+
+async def items_by_genre(category, genre, posted_only=True):
+    """Resolve a genre's stored matches into file docs (delivery query).
+    posted_only=True (the user-facing menu) filters to posted items and
+    SORTS by db_message_id — $in alone returns natural order, so results
+    would appear random without the sort."""
+    gdoc = await get_genre(category, genre)
+    ids = (gdoc or {}).get("matched") or []
+    if not ids:
+        return []
+    q = {"category": _norm_key(category), "file_id": {"$in": ids}}
+    if posted_only:
+        q["posted"] = True
+    cur = _db.files.find(q).sort("db_message_id", 1)
+    return [d async for d in cur]

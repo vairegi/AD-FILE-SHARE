@@ -40,12 +40,14 @@ class FakeMessage:
     def __init__(self, text=""):
         self.text = text
         self.replies = []
+        self.reply_markups = []   # v4.4: reply_markup of each reply (for menu checks)
         self.chat_id = 999
         self.message_id = 1234
         self.reply_to_message = None
 
     async def reply_text(self, text, **kw):
         self.replies.append(text)
+        self.reply_markups.append(kw.get("reply_markup"))
 
 
 class FakeUser:
@@ -56,8 +58,10 @@ class FakeUser:
 class FakeUpdate:
     def __init__(self, uid=999, text=""):
         self.message = FakeMessage(text)
+        self.message.from_user = FakeUser(uid)   # v4.4: menu render reads it
         self.effective_message = self.message
         self.effective_user = FakeUser(uid)
+        self.effective_chat = types.SimpleNamespace(id=999)   # v4.4: /addgenre
         self.callback_query = None
 
 
@@ -1738,6 +1742,275 @@ async def main():
     check("v4.3: rich rejection falls back to paged text table",
           any("Verified users" in r and "<pre>" in r
               for r in updv.message.replies))
+
+    # ── 16. v4.4: genres + dynamic browse menu ────────────────
+    # pure matchers
+    check("v4.4: normalize '#ROMANCE 💕' -> romance",
+          db.normalize_genre("#ROMANCE 💕") == "romance")
+    check("v4.4: normalize collapses spaces + strips symbols",
+          db.normalize_genre("sci  fi!!") == "sci fi")
+    check("v4.4: emoji-only genre rejected", db.normalize_genre("💕") is None)
+    check("v4.4: 25-char genre rejected (64-byte callback budget)",
+          db.normalize_genre("a" * 25) is None)
+    check("v4.4: 24-char genre accepted", db.normalize_genre("a" * 24) == "a" * 24)
+    check("v4.4: caption match is format-proof (hash/case/quotes/emoji/markdown)",
+          all(db._genre_in_caption("romance", c) for c in
+              ("#Romance! 💕", "**ROMANCE** forever", 'a "romance" story',
+               "romance,action", "ROMANCE")))
+    check("v4.4: whole-word only (romancer/partials/empty rejected)",
+          not any(db._genre_in_caption("romance", c) for c in
+                  ("romancer", "rom antic", "", None)))
+    check("v4.4: multi-word genre matches the whole phrase",
+          db._genre_in_caption("slice of life", "a cozy slice of life tale")
+          and not db._genre_in_caption("slice of life", "slice of li fe"))
+
+    # genre registry + one-time persisted backfill
+    if not await db.get_category("anime"):
+        await db.create_category("anime", "Anime", db_channel_id=-100999)
+    _anime_db_ch = (await db.get_category("anime"))["db_channel_id"]
+    for mid, cap, posted in (
+            (901, "My Romance Story 💕", True),
+            (902, "#ROMANCE in the air", True),
+            (903, "action only", True),
+            (904, "romancer tales", True),
+            (905, "queued romance pilot", False)):
+        await db.upsert_item({"file_id": f"anime_f{mid}", "category": "anime",
+                              "db_message_id": mid, "cover_message_id": mid,
+                              "cover_file_id": None, "caption": cap,
+                              "videos": [{"db_message_id": mid + 50, "caption": ""}],
+                              "srts": []})
+        if posted:
+            await db.mark_posted(mid, category="anime")
+    gdoc, created = await db.add_genre("anime", "Romance", admin_id=999)
+    check("v4.4: add_genre creates the doc", created and gdoc["genre"] == "romance")
+    check("v4.4: invalid genre rejected at db layer",
+          (await db.add_genre("anime", "💕💕"))[0] is None)
+    n = await db.backfill_genre("anime", "romance")
+    check("v4.4: one-time backfill matches variants, not romancer", n == 3)
+    gdoc2, created2 = await db.add_genre("anime", "romance")
+    check("v4.4: re-add is idempotent, no rescan (stored matches kept)",
+          not created2 and len(gdoc2.get("matched") or []) == 3)
+    posted_hits = await db.items_by_genre("anime", "romance")
+    check("v4.4: menu query = posted only, sorted oldest first",
+          [d["file_id"] for d in posted_hits] == ["anime_f901", "anime_f902"])
+    all_hits = await db.items_by_genre("anime", "romance", posted_only=False)
+    check("v4.4: unposted item included when posted_only=False",
+          "anime_f905" in [d["file_id"] for d in all_hits])
+
+    # incremental matching + scanned=False guard
+    await db.add_genre("anime", "Action", admin_id=999)   # left unscanned
+    got = await db.match_item_genres("anime", "anime_f906", "romance and action")
+    check("v4.4: incremental match skips genres still scanning",
+          got == ["romance"])
+    check("v4.4: incremental match persisted to Mongo",
+          "anime_f906" in ((await db.get_genre("anime", "romance"))["matched"]))
+    await db.backfill_genre("anime", "action")
+    got2 = await db.match_item_genres("anime", "anime_f907", "pure action")
+    check("v4.4: after its scan a genre matches incrementally", got2 == ["action"])
+    check("v4.4: dry check without file_id writes nothing",
+          await db.match_caption_against_genres("anime", "action") == ["action"])
+
+    # rematch after caption edits (the /rescandb path)
+    await db.upsert_item({"file_id": "anime_f903", "category": "anime",
+                          "db_message_id": 903, "cover_message_id": 903,
+                          "cover_file_id": None, "caption": "now a romance too",
+                          "videos": [], "srts": []})
+    nrem = await db.rematch_genres("anime")
+    _rom = (await db.get_genre("anime", "romance"))["matched"]
+    check("v4.4: rematch refreshes every genre list from current captions",
+          nrem == 2 and "anime_f903" in _rom and "anime_f906" not in _rom)
+
+    # purge + settings default
+    await db.create_category("tempcat", "Temp")
+    await db.add_genre("tempcat", "drama")
+    await db.delete_category("tempcat", purge_data=True)
+    check("v4.4: purging a pipeline drops its genres",
+          await db.list_genres("tempcat") == [])
+    check("v4.4: browse menu enabled by default",
+          (await db.get_settings()).get("browse_enabled") is True)
+
+    # admin commands
+    upd = FakeUpdate(uid=999)
+    ctx = FakeContext(args=["anime", "Adventure"], bot=FakeBot())
+    await adm.cmd_addgenre(upd, ctx)
+    check("v4.4: /addgenre confirms + schedules the one-time scan",
+          any("Genre 'adventure' added" in r for r in upd.message.replies))
+    await asyncio.sleep(0.5)   # let the background backfill finish
+    check("v4.4: background scan reports the match count back",
+          any("Scan done" in txt for _, txt, _ in ctx.bot.sent))
+    adv = await db.get_genre("anime", "adventure")
+    check("v4.4: scan result persisted (scanned=True)",
+          bool(adv) and adv.get("scanned") is True)
+    upd2 = FakeUpdate(uid=999)
+    await adm.cmd_addgenre(upd2, FakeContext(args=["anime", "Adventure"]))
+    check("v4.4: /addgenre again reports existing — no rescan",
+          any("already exists" in r for r in upd2.message.replies))
+    upd3 = FakeUpdate(uid=999)
+    await adm.cmd_addgenre(upd3, FakeContext(args=["nope", "x"]))
+    check("v4.4: /addgenre validates the pipeline",
+          any("No pipeline named" in r for r in upd3.message.replies))
+    upd4 = FakeUpdate(uid=999)
+    await adm.cmd_genres(upd4, FakeContext(args=["anime"]))
+    check("v4.4: /genres lists genres with match counts",
+          any("adventure" in r and "matched" in r for r in upd4.message.replies))
+    upd8 = FakeUpdate(uid=999)
+    await adm.cmd_delgenre(upd8, FakeContext(args=["anime", "Adventure"]))
+    check("v4.4: /delgenre removes the genre",
+          any("removed" in r for r in upd8.message.replies)
+          and await db.get_genre("anime", "adventure") is None)
+    upd5 = FakeUpdate(uid=999)
+    await adm.cmd_offbrowse(upd5, FakeContext())
+    check("v4.4: /offbrowse flips the global switch",
+          (await db.get_settings()).get("browse_enabled") is False)
+    upd6 = FakeUpdate(uid=999)
+    await adm.cmd_onbrowse(upd6, FakeContext())
+    check("v4.4: /onbrowse restores it",
+          (await db.get_settings()).get("browse_enabled") is True)
+    upd7 = FakeUpdate(uid=123456)
+    await adm.cmd_addgenre(upd7, FakeContext(args=["anime", "Hacker"]))
+    check("v4.4: admin guard rejects non-admins",
+          any("only by admins" in r for r in upd7.message.replies))
+
+    # menu views (pure builders)
+    cats = await db.list_categories(enabled_only=True)
+    text, mk = bot1._menu_home_view(cats)
+    datas = [b.callback_data for row in mk.inline_keyboard for b in row]
+    check("v4.4: home view lists every enabled pipeline dynamically",
+          "menu:cat:anime" in datas and len(datas) == len(cats))
+    t0, mk0 = bot1._menu_home_view([])
+    check("v4.4: empty home view has no buttons", mk0 is None)
+    catdoc = await db.get_category("anime")
+    genres = await db.list_genres("anime")
+    t1, mk1 = bot1._menu_genres_view(catdoc, genres)
+    datas1 = [b.callback_data for row in mk1.inline_keyboard for b in row]
+    check("v4.4: genre view shows genres + Back",
+          "menu:g:anime:romance" in datas1 and "menu:home" in datas1)
+    check("v4.4: every callback_data within Telegram's 64-byte limit",
+          all(len(d.encode()) <= 64 for d in datas + datas1))
+    t2, mk2 = bot1._menu_genres_view(catdoc, [])
+    check("v4.4: genre-less pipeline shows a friendly notice",
+          "No genres here yet" in t2)
+
+    # results view + pagination (12 more posted items -> 14 total)
+    for mid in range(910, 922):
+        await db.upsert_item({"file_id": f"anime_f{mid}", "category": "anime",
+                              "db_message_id": mid, "cover_message_id": mid,
+                              "cover_file_id": None,
+                              "caption": f"romance ep {mid}",
+                              "videos": [], "srts": []})
+        await db.mark_posted(mid, category="anime")
+    await db.rematch_genres("anime")
+    items = await db.items_by_genre("anime", "romance")
+    gdocr = await db.get_genre("anime", "romance")
+    tr, mkr = bot1._menu_results_view(catdoc, gdocr, items, 0)
+    rows0 = mkr.inline_keyboard
+    d0 = [b.callback_data or b.url for row in rows0 for b in row]
+    check("v4.4: results page 1 = 10 items + Next, no Prev",
+          sum(1 for row in rows0 for b in row if b.url) == 10
+          and "menu:p:anime:romance:1" in d0
+          and "menu:p:anime:romance:-1" not in d0)
+    check("v4.4: result buttons deep-link into the gated /start flow",
+          all(b.url.startswith(
+              f"https://t.me/{config.BOT1_USERNAME}?start=file_")
+              for row in rows0 for b in row if b.url))
+    tr2, mkr2 = bot1._menu_results_view(catdoc, gdocr, items, 1)
+    d1 = [b.callback_data or b.url for row in mkr2.inline_keyboard for b in row]
+    check("v4.4: page 2 has Prev + the remaining items",
+          "menu:p:anime:romance:0" in d1
+          and sum(1 for row in mkr2.inline_keyboard for b in row if b.url)
+          == len(items) - 10)
+    check("v4.4: pagination callbacks stay within 64 bytes",
+          all(len(str(d).encode()) <= 64 for d in d0 + d1))
+    te, mke = bot1._menu_results_view(catdoc, gdocr, [], 0)
+    check("v4.4: empty genre shows a placeholder instead of dead air",
+          any("Nothing posted here yet" in b.text
+              for row in mke.inline_keyboard for b in row))
+
+    # callback router end-to-end (edits the same message in place)
+    async def _tap(data, uid=555):
+        q = FakeQuery(uid, data)
+        await bot1.on_browse_menu(
+            types.SimpleNamespace(callback_query=q), FakeContext())
+        return q
+    q1 = await _tap("menu:cat:anime")
+    check("v4.4: tapping a pipeline edits the message to its genres",
+          any("pick a genre" in e for e in q1.edits))
+    q2 = await _tap("menu:g:anime:romance")
+    check("v4.4: tapping a genre shows posted results",
+          any("posted item" in e for e in q2.edits))
+    q3 = await _tap("menu:p:anime:romance:1")
+    check("v4.4: pagination callback re-renders page 2",
+          any("page 2/" in e for e in q3.edits))
+    q4 = await _tap("menu:home")
+    check("v4.4: Home returns to the pipeline list",
+          any("Pick a category" in e for e in q4.edits))
+    q5 = await _tap("menu:noop")
+    check("v4.4: noop only answers the callback", bool(q5.answers) and not q5.edits)
+    q6 = await _tap("menu:g:anime:ghost")
+    check("v4.4: stale genre tap re-renders the genre list",
+          any("pick a genre" in e for e in q6.edits))
+    q7 = await _tap("menu:cat:ghost")
+    check("v4.4: stale pipeline tap re-renders Home",
+          any("Pick a category" in e for e in q7.edits))
+
+    # toggle + ban enforcement at menu level
+    await db.update_settings({"browse_enabled": False})
+    q8 = await _tap("menu:home")
+    check("v4.4: disabled menu answers with an alert, no edit",
+          bool(q8.answers) and q8.answers[0][1] is True and not q8.edits)
+    updoff = FakeUpdate(uid=555, text="/browse")
+    await bot1.browse_cmd(updoff, FakeContext())
+    check("v4.4: /browse while disabled says so",
+          any("disabled" in r for r in updoff.message.replies))
+    await db.update_settings({"browse_enabled": True})
+    updon = FakeUpdate(uid=555, text="/browse")
+    await bot1.browse_cmd(updon, FakeContext())
+    check("v4.4: /browse renders the pipeline menu",
+          any("Pick a category" in r for r in updon.message.replies))
+    await db.set_banned(555, True)
+    q9 = await _tap("menu:home", uid=555)
+    check("v4.4: banned user gets the ban alert, no menu",
+          bool(q9.answers) and q9.answers[0][1] is True and not q9.edits)
+    await db.set_banned(555, False)
+
+    # /start welcome carries the Browse entry point
+    upds = FakeUpdate(uid=556, text="/start")
+    await bot1.start(upds, FakeContext())
+    mkstart = upds.message.reply_markups[-1]
+    check("v4.4: /start welcome carries the Browse button",
+          mkstart is not None and any(
+              b.callback_data == "menu:home"
+              for row in mkstart.inline_keyboard for b in row))
+
+    # handler registration + command registry
+    from telegram.ext import CommandHandler as _CH, CallbackQueryHandler as _CQ
+    app1 = bot1.build_bot1()
+    cmds0, pats0 = set(), []
+    for h in app1.handlers.get(0, []):
+        if isinstance(h, _CH):
+            cmds0 |= set(h.commands)
+        if isinstance(h, _CQ) and getattr(h, "pattern", None) is not None:
+            pats0.append(h.pattern.pattern)
+    check("v4.4: /browse command + menu: callbacks registered in bot1",
+          "browse" in cmds0 and "^menu:" in pats0)
+    check("v4.4: new admin commands in the COMMANDS registry",
+          all(k in adm.COMMANDS for k in
+              ("addgenre", "delgenre", "genres", "onbrowse", "offbrowse")))
+
+    # live DB-channel post -> incremental genre match (runs LAST: rebuild_items
+    # wipes the synthetic items above, which have no raw staging entries)
+    msg = types.SimpleNamespace(
+        chat_id=_anime_db_ch, message_id=950, caption="a brand new #ROMANCE drop",
+        photo=[types.SimpleNamespace(file_id="photo950")],
+        video=None, document=None, animation=None)
+    await bot1.on_channel_post(types.SimpleNamespace(channel_post=msg),
+                               FakeContext())
+    check("v4.4: live DB-channel post is genre-matched incrementally",
+          "anime_f950" in ((await db.get_genre("anime", "romance"))["matched"]))
+    await db.mark_posted(950, category="anime")
+    check("v4.4: the new post appears in the menu once posted",
+          "anime_f950" in [d["file_id"] for d in
+                           await db.items_by_genre("anime", "romance")])
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")

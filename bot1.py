@@ -84,7 +84,8 @@ HELP_USER = (
     "1. Tap ⬇️ Download under any channel post\n"
     "2. Join the channel if asked, then tap ✅\n"
     "3. Complete the quick verification\n"
-    "4. Tap 📥 Get File — the delivery bot sends it"
+    "4. Tap 📥 Get File — the delivery bot sends it\n\n"
+    "Or tap 📂 <b>Browse</b> (/browse) to explore by category &amp; genre."
 )
 
 HELP_ADMIN = (
@@ -125,6 +126,10 @@ HELP_ADMIN = (
     "/addfilecaption &lt;text|off&gt; — appended to every delivered file caption\n"
     "/addadmin &lt;user_id&gt; — promote an admin\n"
     "/verified_users [yesterday] — today's verifications as a table"
+    "\n\n<b>▸ Genres &amp; browse menu</b> (v4.4)\n"
+    "/addgenre &lt;pipeline&gt; &lt;genre&gt; — add a genre (one-time caption scan, then auto)\n"
+    "/delgenre &lt;pipeline&gt; &lt;genre&gt; · /genres [pipeline] — manage genres\n"
+    "/onbrowse · /offbrowse — enable/disable the /browse menu (users: /browse)\n"
 )
 
 
@@ -715,7 +720,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                  getattr(user, "username", None))
             return
 
-    await update.message.reply_text(WELCOME)
+    # v4.4: the plain /start welcome carries a direct entry into the genre
+    # browse menu (categories -> genres -> posted items). Banned users and
+    # the gate flows above returned long before this point.
+    await update.message.reply_text(WELCOME, reply_markup=_menu_markup(
+        [[InlineKeyboardButton("\U0001F4C2 Browse collection",
+                               callback_data="menu:home")]]))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -742,6 +752,189 @@ async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("You haven't joined yet. Please join, then tap again.",
                            show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  BROWSE MENU — dynamic multi-level rich messages (v4.4)
+# ══════════════════════════════════════════════════════════════
+# /browse works in DMs and GROUPS (any chat type). Navigation edits the SAME
+# message in place (ephemeral view): categories -> genres -> posted items.
+# Level 3 buttons are URL deep links into the existing /start file_ flow, so
+# force-sub, shortener and the Bot 2 token handoff apply exactly like channel
+# posts — the menu can never bypass monetization or the gates.
+BROWSE_PAGE_SIZE = 10
+BROWSE_DISABLED_MSG = (
+    "\U0001F6AB Browsing is currently disabled by the admin.\n"
+    "Use the Download buttons under channel posts meanwhile.")
+
+
+def _menu_markup(rows):
+    """Inline keyboard from pre-built rows. Pure -> unit-tested."""
+    return InlineKeyboardMarkup(rows)
+
+
+def _menu_home_view(cats):
+    """Level 0: one button per ENABLED pipeline (auto-shows new pipelines)."""
+    rows = [[InlineKeyboardButton(
+        f"\U0001F4C1 {(c.get('label') or c['key']).strip()}",
+        callback_data=f"menu:cat:{c['key']}")] for c in cats]
+    text = ("\U0001F4DA <b>Browse the collection</b>\n\nPick a category:"
+            if rows else "\U0001F4DA No categories are available yet.")
+    return text, _menu_markup(rows) if rows else None
+
+
+def _menu_genres_view(cat, genres):
+    """Level 1: the category's genres (whole rows) + Back."""
+    key, label = cat["key"], (cat.get("label") or cat["key"]).strip()
+    if not genres:
+        return (f"\U0001F4C1 <b>{_hh(label)}</b>\n\nNo genres here yet — "
+                "check back soon."), _menu_markup(
+                    [[InlineKeyboardButton("◀️ Back", callback_data="menu:home")]])
+    rows = [[InlineKeyboardButton(
+        f"\U0001F3B4 {g['genre'].title()} ({len(g.get('matched') or [])})",
+        callback_data=f"menu:g:{key}:{g['genre']}")] for g in genres]
+    rows.append([InlineKeyboardButton("◀️ Back", callback_data="menu:home")])
+    return f"\U0001F4C1 <b>{_hh(label)}</b> — pick a genre:", _menu_markup(rows)
+
+
+def _menu_results_view(cat, genre, items, page, page_size=BROWSE_PAGE_SIZE):
+    """Level 3: posted items as numbered deep-link buttons, paginated.
+    Every callback stays under Telegram's 64-byte callback_data limit by
+    construction (genre slugs are capped at db.GENRE_MAX_LEN)."""
+    key, label = cat["key"], (cat.get("label") or cat["key"]).strip()
+    g = genre["genre"]
+    total = len(items)
+    pages = max(1, -(-total // page_size))
+    page = max(0, min(page, pages - 1))
+    rows = []
+    for i, it in enumerate(items[page * page_size:(page + 1) * page_size]):
+        title = ((it.get("caption") or "").strip().split("\n")[0]
+                 or it.get("file_id") or "item")[:40]
+        rows.append([InlineKeyboardButton(
+            f"{page * page_size + i + 1}. {title}",
+            url=(f"https://t.me/{config.BOT1_USERNAME}"
+                 f"?start=file_{it['file_id']}"))])
+    if not rows:
+        rows.append([InlineKeyboardButton(
+            "\U0001F4ED Nothing posted here yet", callback_data="menu:noop")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "◀️ Prev", callback_data=f"menu:p:{key}:{g}:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(
+            "Next ▶️", callback_data=f"menu:p:{key}:{g}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("◀️ Genres", callback_data=f"menu:cat:{key}"),
+                 InlineKeyboardButton("\U0001F3E0 Home", callback_data="menu:home")])
+    text = (f"\U0001F3B4 <b>{_hh(label)} · {_hh(g.title())}</b> — "
+            f"{total} posted item{'s' if total != 1 else ''}"
+            + (f" (page {page + 1}/{pages})" if pages > 1 else ""))
+    return text, _menu_markup(rows)
+
+
+async def _browse_render(target, context, level, key=None, genre=None, page=0):
+    """Render one menu level into `target` (a Message from /browse or a
+    callback Query). Stale taps (pipeline/genre deleted meanwhile) re-render
+    the parent level instead of erroring. Returns False when the caller must
+    NOT send at all (banned user / browse disabled — message already sent)."""
+    user = target.from_user if level == "callback" else target.from_user
+    uid = user.id if user else None
+    if uid is not None:
+        rec = await db.get_user(uid)
+        if rec and rec.get("banned"):
+            _bm = (await db.get_settings()).get("ban_message") or \
+                "\U0001F6AB You are banned from using this bot."
+            if level == "callback":
+                await target.answer(_bm, show_alert=True)
+            else:
+                await target.reply_text(_bm)
+            return False
+        await db.touch_user(uid)
+    if not (await db.get_settings()).get("browse_enabled", True):
+        if level == "callback":
+            await target.answer("Browsing is currently disabled.",
+                                show_alert=True)
+        else:
+            await target.reply_text(BROWSE_DISABLED_MSG)
+        return False
+
+    if key is None:                                   # level 0: categories
+        text, markup = _menu_home_view(
+            await db.list_categories(enabled_only=True))
+    elif genre is None:                               # level 1: genres
+        cat = await db.get_category(key)
+        if not cat or not cat.get("enabled", True):
+            text, markup = _menu_home_view(
+                await db.list_categories(enabled_only=True))
+        else:
+            text, markup = _menu_genres_view(cat, await db.list_genres(key))
+    else:                                             # level 3: results
+        cat = await db.get_category(key)
+        gdoc = await db.get_genre(key, genre)
+        if not cat or not cat.get("enabled", True):
+            text, markup = _menu_home_view(
+                await db.list_categories(enabled_only=True))
+        elif not gdoc:
+            text, markup = _menu_genres_view(cat, await db.list_genres(key))
+        else:
+            items = await db.items_by_genre(key, genre, posted_only=True)
+            text, markup = _menu_results_view(cat, gdoc, items, page)
+
+    if level == "callback":
+        await target.answer()
+        try:
+            await target.edit_message_text(text, parse_mode="HTML",
+                                           reply_markup=markup,
+                                           disable_web_page_preview=True)
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+    else:
+        await target.reply_text(text, parse_mode="HTML", reply_markup=markup,
+                                disable_web_page_preview=True)
+    return True
+
+
+async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/browse — opens the genre menu. Works in DMs and groups alike; in
+    groups the results deep-link into a Bot 1 DM so the gates run privately."""
+    msg = update.effective_message
+    if msg:
+        await _browse_render(msg, context, "message")
+
+
+async def on_browse_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback router for the browse menu (menu:home / menu:cat:<key> /
+    menu:g:<key>:<genre> / menu:p:<key>:<genre>:<page> / menu:noop)."""
+    query = update.callback_query
+    data = query.data or ""
+    if data == "menu:noop":
+        await query.answer()
+        return
+    parts = data.split(":")
+    try:
+        if data == "menu:home" or len(parts) < 3:
+            await _browse_render(query, context, "callback")
+        elif parts[1] == "cat":
+            await _browse_render(query, context, "callback", key=parts[2])
+        elif parts[1] == "g" and len(parts) >= 4:
+            await _browse_render(query, context, "callback",
+                                 key=parts[2], genre=parts[3], page=0)
+        elif parts[1] == "p" and len(parts) >= 5:
+            await _browse_render(query, context, "callback",
+                                 key=parts[2], genre=parts[3],
+                                 page=int(parts[4]))
+        else:
+            await query.answer()
+    except Exception as exc:
+        log.exception("browse menu callback failed: %s", data)
+        try:
+            await query.answer("Something went wrong — try /browse again.",
+                               show_alert=True)
+        except Exception:
+            pass
 
 
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -776,6 +969,16 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         entry["file_id"] = msg.photo[-1].file_id
     await db.ingest_raw(entry, category=cat_key)
     await db.rebuild_items(cat_key)
+    if kind == "cover" and cat_key:
+        # v4.4: lazy incremental genre matching — regex the fresh caption
+        # against this pipeline's genres (in-memory, microseconds); matched
+        # genres store the new file_id so the DB is NEVER re-scanned.
+        try:
+            await db.match_item_genres(cat_key,
+                                       db.make_file_id(cat_key, msg.message_id),
+                                       entry["caption"])
+        except Exception as exc:
+            log.warning("genre match for new item failed (non-fatal): %s", exc)
 
 
 # ── application factory ───────────────────────────────────────
@@ -787,6 +990,10 @@ def build_bot1() -> Application:
     for name, func in ADMIN_COMMANDS.items():
         app.add_handler(CommandHandler(name, func))
     app.add_handler(CallbackQueryHandler(on_checksub, pattern=r"^checksub:"))
+    # v4.4: /browse command + genre menu callbacks (registered BEFORE the
+    # catch-all text handlers; own 'menu:' namespace, never collides)
+    app.add_handler(CommandHandler("browse", browse_cmd))
+    app.add_handler(CallbackQueryHandler(on_browse_menu, pattern=r"^menu:"))
     # category-management inline actions (post now / pause / resume / delete)
     from bot1_admin import on_category_action
     app.add_handler(CallbackQueryHandler(on_category_action, pattern=r"^cat:"))
