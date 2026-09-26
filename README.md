@@ -704,3 +704,16 @@ the proven production shape `{"text": ..., "entities": [...]}` — the exact
 format the live `/banlist` and `/verified_users` rich tables send. The error
 handler now also shows the real API error text instead of a generic notice,
 so any future failure is diagnosable from a screenshot.
+
+
+### v4.5.2 (2026-09-26) — hotfix: plain RichText is a bare string, not an object
+
+**Fix — `sendRichMessage` returned `400 Can't parse inputrichblock: can't
+find field "type"` on every /browse.** The docs define RichText as "either a
+**String** for plain text, an Array of RichText, or any of the typed
+classes" — there is NO plain-text object. v4.5 sent `{"type": "plain"}` and
+v4.5.1 sent `{"text": ..., "entities": []}` (that object shape is only valid
+for table CELLS — a different type — which is why /banlist renders fine).
+All plain text nodes (block text and button labels) are now bare JSON
+strings. Regression test added: every plain text node in the menu payload is
+asserted to be a string.

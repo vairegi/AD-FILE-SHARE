@@ -1892,13 +1892,17 @@ async def main():
                 for b in (blk.get("buttons") or [])]
 
     def _btexts(payload):
-        return [b.get("text", {}).get("text", "") for b in _btns(payload)]
+        def _tn(t):
+            return t if isinstance(t, str) else (t or {}).get("text", "")
+        return [_tn(b.get("text")) for b in _btns(payload)]
 
     def _bdatas(payload):
         return [b.get("callback_data") or b.get("url") for b in _btns(payload)]
 
     def _ptexts(payload):
-        return [blk.get("text", {}).get("text", "")
+        def _tn2(t):
+                return t if isinstance(t, str) else (t or {}).get("text", "")
+        return [_tn2(blk.get("text"))
                 for blk in payload.get("blocks", [])
                 if blk.get("type") in ("paragraph", "heading")]
 
@@ -1917,6 +1921,10 @@ async def main():
     ph0 = bot1._menu_home_payload([])
     check("v4.5: empty home shows a notice block, no buttons",
           any("No categories" in t for t in _ptexts(ph0)) and not _btns(ph0))
+    check("v4.5.2: plain rich-text nodes are bare STRINGS (the documented shape)",
+          all(isinstance(blk.get("text"), str)
+              for blk in ph.get("blocks", []) if "text" in blk)
+          and all(isinstance(b.get("text"), str) for b in _btns(ph)))
     catdoc = await db.get_category("anime")
     genres = await db.list_genres("anime")
     pg = bot1._menu_genres_payload(catdoc, genres)

@@ -788,11 +788,13 @@ def _menu_markup(rows):
 
 
 def _rt(text):
-    """RichText plain node. Uses the {"text": ..., "entities": [...]} shape —
-    the exact format the live /banlist and /verified_users rich tables send
-    and Telegram accepts (v4.5.1: {"type": "plain", ...} was REJECTED by the
-    API, which is why every /browse fell into the error path)."""
-    return {"text": str(text), "entities": []}
+    """RichText PLAIN node = a bare JSON string. Per the Bot API docs, RichText
+    'can be either a String for plain text, an Array of RichText, or any of
+    the [typed] classes' — there is NO plain-text object. v4.5 used
+    {"type": "plain"} and v4.5.1 used {"text", "entities"} (that shape is only
+    valid for table CELLS, which is why /banlist works); both objects were
+    rejected with 'can't find field "type"'. A string is the correct leaf."""
+    return str(text)
 
 
 def _rbtn(label, callback_data=None, url=None, style=None):
