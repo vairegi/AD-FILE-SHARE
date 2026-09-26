@@ -653,3 +653,42 @@ Safety: banned users are rejected at every menu level; stale taps on
 deleted pipelines/genres re-render the parent menu instead of erroring;
 callback data stays under Telegram's 64-byte limit by construction
 (genre slugs are capped at 24 chars).
+
+---
+
+## v4.5 (2026-09-26) — /browse becomes true RICH messages + EPHEMERAL views (Bot API 10.3)
+
+**Fix — the v4.4 menu used a standard InlineKeyboardMarkup under a plain
+message.** The owner asked for Telegram's Rich Messages with embedded
+buttons and ephemeral views; v4.5 implements exactly that.
+
+**Rich messages.** Every /browse level (categories → genres → posted items)
+is now an `InputRichMessage` sent via `sendRichMessage` and edited via
+`editMessageText(rich_message=…)`: a `heading` block, a `paragraph` block,
+and buttons EMBEDDED as `InputRichBlockButtons` rows of `RichMessageButton`
+(`callback_data` for navigation, `url` + `style: success` for item deep
+links). No inline keyboard markup is attached anywhere in the menu.
+
+**Ephemeral views (groups).** The first /browse render in a group/supergroup
+sends with `ephemeral_message_parameters.receiver_user_id` — visible only to
+the user who opened it. Taps inside it arrive carrying
+`Message.ephemeral_message_id` (read from PTB `api_kwargs`, since PTB has no
+rich/ephemeral models) and are edited in place via `editEphemeralMessageText`
+(chat_id + receiver_user_id + ephemeral_message_id), per the Bot API 10.3
+rule that callbacks FROM ephemeral messages must not use
+`replace_callback_query_message`.
+
+**Private chats.** Ephemeral views are a group-only feature per the docs, so
+DMs render the same rich message normally (edited with `editMessageText`).
+
+**No library upgrade.** python-telegram-bot ships no rich/ephemeral helpers
+(verified against the latest release), so all calls use `bot._post(...)` —
+the raw-API path already proven in production by /banlist and
+/verified_users. If Telegram rejects the rich call, the user gets a clear
+"update your Telegram app" notice (per owner decision: no inline-keyboard
+fallback).
+
+Everything else from v4.4 is unchanged: genre registry, one-time backfill
+scan persisted in MongoDB, lazy incremental matching, posted-only results,
+/onbrowse /offbrowse, ban checks, 64-byte callback budget, deep links into
+the gated Download flow.

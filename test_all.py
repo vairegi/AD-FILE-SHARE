@@ -42,6 +42,7 @@ class FakeMessage:
         self.replies = []
         self.reply_markups = []   # v4.4: reply_markup of each reply (for menu checks)
         self.chat_id = 999
+        self.chat = types.SimpleNamespace(id=999, type="private")  # v4.5
         self.message_id = 1234
         self.reply_to_message = None
 
@@ -75,6 +76,7 @@ class FakeBot:
         self.deleted = []
         self.stickers = []      # (chat_id, file_id) send_sticker
         self.membership = True  # get_chat_member result control
+        self.posts = []         # v4.5: raw bot._post(endpoint, data) calls
 
     async def send_message(self, chat_id, text, **kw):
         self.sent.append((chat_id, text, kw))
@@ -99,6 +101,11 @@ class FakeBot:
     async def send_sticker(self, chat_id=None, sticker=None, **kw):
         self.stickers.append((chat_id, sticker))
         return types.SimpleNamespace(message_id=5500 + len(self.stickers))
+
+    async def _post(self, endpoint, data=None, **kw):
+        """v4.5: capture raw Bot API calls (rich/ephemeral menu sends)."""
+        self.posts.append((endpoint, data or {}))
+        return types.SimpleNamespace(message_id=9000 + len(self.posts))
 
     async def get_chat(self, channel_id):
         return types.SimpleNamespace(username="forcechannel")
@@ -695,7 +702,14 @@ async def main():
     check("/banmessage reset restores default", (await db.get_settings())["ban_message"] is None)
     await db.set_banned(8416709177, True)
     await db.mark_ban_info(8416709177, "Noob7", 46.7)
-    r = await run(adm.cmd_banlist, [])
+    # v4.5: FakeBot now HAS _post (rich menu) — the banlist fallback test
+    # needs a bot whose rich call fails, like the v4.3 _NoRich pattern
+    class _NoRichBl(FakeBot):
+        async def _post(self, *a, **k):
+            raise RuntimeError("rich unsupported")
+    _upd_bl = FakeUpdate(uid=999)
+    await adm.cmd_banlist(_upd_bl, FakeContext(args=[], bot=_NoRichBl()))
+    r = "\n".join(str(x) for x in _upd_bl.message.replies)
     # rich send fails on FakeBot (no _post) -> HTML fallback text
     check("/banlist format with tap-to-copy /unban (fallback)",
           "@Noob7 Elapsed: 46.7s" in r and "/unban 8416709177" in r
@@ -1871,27 +1885,51 @@ async def main():
     check("v4.4: admin guard rejects non-admins",
           any("only by admins" in r for r in upd7.message.replies))
 
-    # menu views (pure builders)
+    # rich menu payloads (pure builders — Bot API 10.3 InputRichMessage)
+    def _btns(payload):
+        return [b for blk in payload.get("blocks", [])
+                if blk.get("type") == "buttons"
+                for b in (blk.get("buttons") or [])]
+
+    def _btexts(payload):
+        return [b.get("text", {}).get("text", "") for b in _btns(payload)]
+
+    def _bdatas(payload):
+        return [b.get("callback_data") or b.get("url") for b in _btns(payload)]
+
+    def _ptexts(payload):
+        return [blk.get("text", {}).get("text", "")
+                for blk in payload.get("blocks", [])
+                if blk.get("type") in ("paragraph", "heading")]
+
     cats = await db.list_categories(enabled_only=True)
-    text, mk = bot1._menu_home_view(cats)
-    datas = [b.callback_data for row in mk.inline_keyboard for b in row]
-    check("v4.4: home view lists every enabled pipeline dynamically",
-          "menu:cat:anime" in datas and len(datas) == len(cats))
-    t0, mk0 = bot1._menu_home_view([])
-    check("v4.4: empty home view has no buttons", mk0 is None)
+    ph = bot1._menu_home_payload(cats)
+    check("v4.5: home is a rich InputRichMessage with embedded buttons",
+          "blocks" in ph and "menu:cat:anime" in _bdatas(ph)
+          and len(_bdatas(ph)) == len(cats))
+    check("v4.5: home heading + prompt are rich blocks",
+          any("Browse the collection" in t for t in _ptexts(ph))
+          and any("Pick a category" in t for t in _ptexts(ph)))
+    check("v4.5: NO inline keyboard markup anywhere (rich buttons only)",
+          "reply_markup" not in ph
+          and all(blk.get("type") != "inline_keyboard"
+                  for blk in ph.get("blocks", [])))
+    ph0 = bot1._menu_home_payload([])
+    check("v4.5: empty home shows a notice block, no buttons",
+          any("No categories" in t for t in _ptexts(ph0)) and not _btns(ph0))
     catdoc = await db.get_category("anime")
     genres = await db.list_genres("anime")
-    t1, mk1 = bot1._menu_genres_view(catdoc, genres)
-    datas1 = [b.callback_data for row in mk1.inline_keyboard for b in row]
-    check("v4.4: genre view shows genres + Back",
-          "menu:g:anime:romance" in datas1 and "menu:home" in datas1)
-    check("v4.4: every callback_data within Telegram's 64-byte limit",
-          all(len(d.encode()) <= 64 for d in datas + datas1))
-    t2, mk2 = bot1._menu_genres_view(catdoc, [])
-    check("v4.4: genre-less pipeline shows a friendly notice",
-          "No genres here yet" in t2)
+    pg = bot1._menu_genres_payload(catdoc, genres)
+    check("v4.5: genre view embeds genres + Back",
+          "menu:g:anime:romance" in _bdatas(pg) and "menu:home" in _bdatas(pg))
+    check("v4.5: every rich callback_data within Telegram's 64-byte limit",
+          all(1 <= len((b.get("callback_data") or "x").encode()) <= 64
+              for b in _btns(ph) + _btns(pg)))
+    pg0 = bot1._menu_genres_payload(catdoc, [])
+    check("v4.5: genre-less pipeline shows a friendly notice",
+          any("No genres here yet" in t for t in _ptexts(pg0)))
 
-    # results view + pagination (12 more posted items -> 14 total)
+    # results payload + pagination (12 more posted items -> 14 total)
     for mid in range(910, 922):
         await db.upsert_item({"file_id": f"anime_f{mid}", "category": "anime",
                               "db_message_id": mid, "cover_message_id": mid,
@@ -1902,82 +1940,122 @@ async def main():
     await db.rematch_genres("anime")
     items = await db.items_by_genre("anime", "romance")
     gdocr = await db.get_genre("anime", "romance")
-    tr, mkr = bot1._menu_results_view(catdoc, gdocr, items, 0)
-    rows0 = mkr.inline_keyboard
-    d0 = [b.callback_data or b.url for row in rows0 for b in row]
-    check("v4.4: results page 1 = 10 items + Next, no Prev",
-          sum(1 for row in rows0 for b in row if b.url) == 10
-          and "menu:p:anime:romance:1" in d0
-          and "menu:p:anime:romance:-1" not in d0)
-    check("v4.4: result buttons deep-link into the gated /start flow",
-          all(b.url.startswith(
+    pr = bot1._menu_results_payload(catdoc, gdocr, items, 0)
+    urls = [b.get("url") for b in _btns(pr) if b.get("url")]
+    check("v4.5: results page 1 = 10 item buttons + Next, no Prev",
+          len(urls) == 10
+          and "menu:p:anime:romance:1" in _bdatas(pr)
+          and "menu:p:anime:romance:-1" not in _bdatas(pr))
+    check("v4.5: item buttons deep-link into the gated /start flow",
+          all(u.startswith(
               f"https://t.me/{config.BOT1_USERNAME}?start=file_")
-              for row in rows0 for b in row if b.url))
-    tr2, mkr2 = bot1._menu_results_view(catdoc, gdocr, items, 1)
-    d1 = [b.callback_data or b.url for row in mkr2.inline_keyboard for b in row]
-    check("v4.4: page 2 has Prev + the remaining items",
-          "menu:p:anime:romance:0" in d1
-          and sum(1 for row in mkr2.inline_keyboard for b in row if b.url)
-          == len(items) - 10)
-    check("v4.4: pagination callbacks stay within 64 bytes",
-          all(len(str(d).encode()) <= 64 for d in d0 + d1))
-    te, mke = bot1._menu_results_view(catdoc, gdocr, [], 0)
-    check("v4.4: empty genre shows a placeholder instead of dead air",
-          any("Nothing posted here yet" in b.text
-              for row in mke.inline_keyboard for b in row))
+              for u in urls))
+    pr2 = bot1._menu_results_payload(catdoc, gdocr, items, 1)
+    check("v4.5: page 2 has Prev + the remaining items",
+          "menu:p:anime:romance:0" in _bdatas(pr2)
+          and len([b for b in _btns(pr2) if b.get("url")]) == len(items) - 10)
+    check("v4.5: pagination callbacks stay within 64 bytes",
+          all(len((b.get("callback_data") or "x").encode()) <= 64
+              for b in _btns(pr) + _btns(pr2)))
+    pre = bot1._menu_results_payload(catdoc, gdocr, [], 0)
+    check("v4.5: empty genre shows a placeholder instead of dead air",
+          any("Nothing posted here yet" in t for t in _btexts(pre)))
 
-    # callback router end-to-end (edits the same message in place)
-    async def _tap(data, uid=555):
+    # callback router end-to-end — rich edits, DM + group-ephemeral
+    async def _tap(data, uid=555, chat_type="private", eph_id=None):
         q = FakeQuery(uid, data)
+        cid = 555 if chat_type == "private" else -100777
+        q.message = types.SimpleNamespace(
+            chat=types.SimpleNamespace(id=cid, type=chat_type),
+            chat_id=cid, message_id=555,
+            api_kwargs=({"ephemeral_message_id": eph_id} if eph_id else {}))
+        ctx = FakeContext()
         await bot1.on_browse_menu(
-            types.SimpleNamespace(callback_query=q), FakeContext())
-        return q
-    q1 = await _tap("menu:cat:anime")
-    check("v4.4: tapping a pipeline edits the message to its genres",
-          any("pick a genre" in e for e in q1.edits))
-    q2 = await _tap("menu:g:anime:romance")
-    check("v4.4: tapping a genre shows posted results",
-          any("posted item" in e for e in q2.edits))
-    q3 = await _tap("menu:p:anime:romance:1")
-    check("v4.4: pagination callback re-renders page 2",
-          any("page 2/" in e for e in q3.edits))
-    q4 = await _tap("menu:home")
-    check("v4.4: Home returns to the pipeline list",
-          any("Pick a category" in e for e in q4.edits))
-    q5 = await _tap("menu:noop")
-    check("v4.4: noop only answers the callback", bool(q5.answers) and not q5.edits)
-    q6 = await _tap("menu:g:anime:ghost")
-    check("v4.4: stale genre tap re-renders the genre list",
-          any("pick a genre" in e for e in q6.edits))
-    q7 = await _tap("menu:cat:ghost")
-    check("v4.4: stale pipeline tap re-renders Home",
-          any("Pick a category" in e for e in q7.edits))
+            types.SimpleNamespace(callback_query=q), ctx)
+        return q, ctx.bot.posts
 
-    # toggle + ban enforcement at menu level
+    q, posts = await _tap("menu:cat:anime")
+    m, d = posts[-1]
+    check("v4.5: tapping a pipeline in DM edits via editMessageText(rich)",
+          m == "editMessageText" and "rich_message" in d
+          and any("pick a genre" in t.lower()
+                  for t in _ptexts(d["rich_message"])))
+    q, posts = await _tap("menu:g:anime:romance")
+    m, d = posts[-1]
+    check("v4.5: tapping a genre shows posted results as rich blocks",
+          m == "editMessageText"
+          and any("posted item" in t for t in _ptexts(d["rich_message"])))
+    q, posts = await _tap("menu:p:anime:romance:1")
+    m, d = posts[-1]
+    check("v4.5: pagination callback re-renders page 2",
+          any("page 2/" in t for t in _ptexts(d["rich_message"])))
+    q, posts = await _tap("menu:home")
+    m, d = posts[-1]
+    check("v4.5: Home returns to the pipeline menu",
+          any("Pick a category" in t for t in _ptexts(d["rich_message"])))
+    q, posts = await _tap("menu:noop")
+    check("v4.5: noop only answers the callback",
+          bool(q.answers) and not posts)
+    q, posts = await _tap("menu:g:anime:ghost")
+    m, d = posts[-1]
+    check("v4.5: stale genre tap re-renders the genre menu",
+          any("pick a genre" in t.lower()
+              for t in _ptexts(d["rich_message"])))
+    q, posts = await _tap("menu:cat:ghost")
+    m, d = posts[-1]
+    check("v4.5: stale pipeline tap re-renders Home",
+          any("Pick a category" in t for t in _ptexts(d["rich_message"])))
+
+    # groups: first render is ephemeral; taps inside edit the ephemeral view
+    q, posts = await _tap("menu:cat:anime", chat_type="supergroup", eph_id=77)
+    m, d = posts[-1]
+    check("v4.5: tap inside an ephemeral view uses editEphemeralMessageText",
+          m == "editEphemeralMessageText"
+          and d.get("receiver_user_id") == 555
+          and d.get("ephemeral_message_id") == 77
+          and "rich_message" in d)
+    updg = FakeUpdate(uid=557, text="/browse")
+    updg.message.chat = types.SimpleNamespace(id=-100777, type="supergroup")
+    updg.message.chat_id = -100777
+    ctxg = FakeContext()
+    await bot1.browse_cmd(updg, ctxg)
+    m, d = ctxg.bot.posts[-1]
+    check("v4.5: /browse in a group sends an EPHEMERAL rich message",
+          m == "sendRichMessage" and "rich_message" in d
+          and d.get("ephemeral_message_parameters", {})
+          .get("receiver_user_id") == 557)
+    upddm = FakeUpdate(uid=558, text="/browse")
+    ctxdm = FakeContext()
+    await bot1.browse_cmd(upddm, ctxdm)
+    m, d = ctxdm.bot.posts[-1]
+    check("v4.5: /browse in DM sends a rich message (no ephemeral params)",
+          m == "sendRichMessage" and "rich_message" in d
+          and "ephemeral_message_parameters" not in d
+          and any("Pick a category" in t for t in _ptexts(d["rich_message"])))
+
+    # toggle + ban enforcement at menu level (no API call when blocked)
     await db.update_settings({"browse_enabled": False})
-    q8 = await _tap("menu:home")
-    check("v4.4: disabled menu answers with an alert, no edit",
-          bool(q8.answers) and q8.answers[0][1] is True and not q8.edits)
+    q, posts = await _tap("menu:home")
+    check("v4.5: disabled menu answers with an alert, no API call",
+          bool(q.answers) and q.answers[0][1] is True and not posts)
     updoff = FakeUpdate(uid=555, text="/browse")
-    await bot1.browse_cmd(updoff, FakeContext())
-    check("v4.4: /browse while disabled says so",
-          any("disabled" in r for r in updoff.message.replies))
+    ctxoff = FakeContext()
+    await bot1.browse_cmd(updoff, ctxoff)
+    check("v4.5: /browse while disabled says so (plain reply, no API call)",
+          any("disabled" in r for r in updoff.message.replies)
+          and not ctxoff.bot.posts)
     await db.update_settings({"browse_enabled": True})
-    updon = FakeUpdate(uid=555, text="/browse")
-    await bot1.browse_cmd(updon, FakeContext())
-    check("v4.4: /browse renders the pipeline menu",
-          any("Pick a category" in r for r in updon.message.replies))
     await db.set_banned(555, True)
-    q9 = await _tap("menu:home", uid=555)
-    check("v4.4: banned user gets the ban alert, no menu",
-          bool(q9.answers) and q9.answers[0][1] is True and not q9.edits)
+    q, posts = await _tap("menu:home", uid=555)
+    check("v4.5: banned user gets the ban alert, no menu",
+          bool(q.answers) and q.answers[0][1] is True and not posts)
     await db.set_banned(555, False)
 
-    # /start welcome carries the Browse entry point
+    # /start welcome carries the Browse entry point (tap -> rich menu)
     upds = FakeUpdate(uid=556, text="/start")
     await bot1.start(upds, FakeContext())
     mkstart = upds.message.reply_markups[-1]
-    check("v4.4: /start welcome carries the Browse button",
+    check("v4.5: /start welcome carries the Browse button",
           mkstart is not None and any(
               b.callback_data == "menu:home"
               for row in mkstart.inline_keyboard for b in row))
@@ -1991,9 +2069,9 @@ async def main():
             cmds0 |= set(h.commands)
         if isinstance(h, _CQ) and getattr(h, "pattern", None) is not None:
             pats0.append(h.pattern.pattern)
-    check("v4.4: /browse command + menu: callbacks registered in bot1",
+    check("v4.5: /browse command + menu: callbacks registered in bot1",
           "browse" in cmds0 and "^menu:" in pats0)
-    check("v4.4: new admin commands in the COMMANDS registry",
+    check("v4.5: new admin commands in the COMMANDS registry",
           all(k in adm.COMMANDS for k in
               ("addgenre", "delgenre", "genres", "onbrowse", "offbrowse")))
 

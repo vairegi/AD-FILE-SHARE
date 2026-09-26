@@ -755,97 +755,168 @@ async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════════════════
-#  BROWSE MENU — dynamic multi-level rich messages (v4.4)
+#  BROWSE MENU — Bot API 10.3 RICH messages + EPHEMERAL views (v4.5)
 # ══════════════════════════════════════════════════════════════
-# /browse works in DMs and GROUPS (any chat type). Navigation edits the SAME
-# message in place (ephemeral view): categories -> genres -> posted items.
-# Level 3 buttons are URL deep links into the existing /start file_ flow, so
-# force-sub, shortener and the Bot 2 token handoff apply exactly like channel
-# posts — the menu can never bypass monetization or the gates.
+# The menu is a genuine RICH MESSAGE: InputRichMessage.blocks with buttons
+# EMBEDDED as InputRichBlockButtons / RichMessageButton blocks — never an
+# InlineKeyboardMarkup under a plain text message.
+#
+# * GROUPS: the menu is an EPHEMERAL message (sendRichMessage with
+#   ephemeral_message_parameters.receiver_user_id) — visible only to the user
+#   who opened it. Follow-up taps arrive carrying Message.ephemeral_message_id
+#   and edit it in place via editEphemeralMessageText (the docs require
+#   replace_callback_query_message=False for callbacks FROM ephemeral
+#   messages — Bot API 10.3).
+# * PRIVATE CHATS: ephemeral views do not exist there (docs: ephemeral =
+#   group messages visible to one user), so the menu is a normal rich
+#   message edited with editMessageText(rich_message=...).
+# * python-telegram-bot ships NO rich/ephemeral helpers (verified against the
+#   latest release), so every call goes through bot._post — the same raw-API
+#   path already proven in production by /banlist and /verified_users.
+# * Level-3 item buttons are URL deep links into the existing /start file_
+#   flow: force-sub, shortener and the Bot 2 token handoff apply exactly
+#   like channel posts — the menu can never bypass monetization or the gates.
 BROWSE_PAGE_SIZE = 10
 BROWSE_DISABLED_MSG = (
-    "\U0001F6AB Browsing is currently disabled by the admin.\n"
+    "🚫 Browsing is currently disabled by the admin.\n"
     "Use the Download buttons under channel posts meanwhile.")
 
 
 def _menu_markup(rows):
-    """Inline keyboard from pre-built rows. Pure -> unit-tested."""
+    """Plain inline keyboard — only used for the /start welcome entry button."""
     return InlineKeyboardMarkup(rows)
 
 
-def _menu_home_view(cats):
-    """Level 0: one button per ENABLED pipeline (auto-shows new pipelines)."""
-    rows = [[InlineKeyboardButton(
-        f"\U0001F4C1 {(c.get('label') or c['key']).strip()}",
-        callback_data=f"menu:cat:{c['key']}")] for c in cats]
-    text = ("\U0001F4DA <b>Browse the collection</b>\n\nPick a category:"
-            if rows else "\U0001F4DA No categories are available yet.")
-    return text, _menu_markup(rows) if rows else None
+def _rt(text):
+    """RichText plain node (leaf of every rich-text tree)."""
+    return {"type": "plain", "text": str(text)}
 
 
-def _menu_genres_view(cat, genres):
-    """Level 1: the category's genres (whole rows) + Back."""
+def _rbtn(label, callback_data=None, url=None, style=None):
+    """RichMessageButton: text + exactly ONE action field (docs: url, or
+    callback_data of 1-64 bytes). style: danger/success/primary/link."""
+    b = {"text": _rt(label)}
+    if style:
+        b["style"] = style
+    if url:
+        b["url"] = url
+    elif callback_data is not None:
+        b["callback_data"] = callback_data
+    return b
+
+
+def _btn_row(*buttons):
+    """One InputRichBlockButtons row (docs: 1-8 buttons shown in one row)."""
+    return {"type": "buttons", "buttons": list(buttons)}
+
+
+def _heading(text, size=3):
+    """InputRichBlockSectionHeading (size 1 largest .. 6 smallest)."""
+    return {"type": "heading", "text": _rt(text), "size": size}
+
+
+def _para(text):
+    """InputRichBlockParagraph."""
+    return {"type": "paragraph", "text": _rt(text)}
+
+
+def _rich(blocks):
+    """InputRichMessage payload ({'blocks': [...]})."""
+    return {"blocks": blocks}
+
+
+def _menu_home_payload(cats):
+    """Level 0: one embedded button row per ENABLED pipeline (a new pipeline
+    appears automatically — pure DB read, nothing hardcoded)."""
+    blocks = [_heading("📚 Browse the collection", 2)]
+    if not cats:
+        blocks.append(_para("No categories are available yet."))
+        return _rich(blocks)
+    blocks.append(_para("Pick a category:"))
+    for c in cats:
+        blocks.append(_btn_row(_rbtn(
+            f"📁 {(c.get('label') or c['key']).strip()}",
+            callback_data=f"menu:cat:{c['key']}")))
+    return _rich(blocks)
+
+
+def _menu_genres_payload(cat, genres):
+    """Level 1: the category's genres (one embedded row each) + Back."""
     key, label = cat["key"], (cat.get("label") or cat["key"]).strip()
-    if not genres:
-        return (f"\U0001F4C1 <b>{_hh(label)}</b>\n\nNo genres here yet — "
-                "check back soon."), _menu_markup(
-                    [[InlineKeyboardButton("◀️ Back", callback_data="menu:home")]])
-    rows = [[InlineKeyboardButton(
-        f"\U0001F3B4 {g['genre'].title()} ({len(g.get('matched') or [])})",
-        callback_data=f"menu:g:{key}:{g['genre']}")] for g in genres]
-    rows.append([InlineKeyboardButton("◀️ Back", callback_data="menu:home")])
-    return f"\U0001F4C1 <b>{_hh(label)}</b> — pick a genre:", _menu_markup(rows)
+    blocks = [_heading(f"📁 {label}", 3)]
+    if genres:
+        blocks.append(_para("Pick a genre:"))
+        for g in genres:
+            blocks.append(_btn_row(_rbtn(
+                f"🏴 {g['genre'].title()} ({len(g.get('matched') or [])})",
+                callback_data=f"menu:g:{key}:{g['genre']}")))
+    else:
+        blocks.append(_para("No genres here yet — check back soon."))
+    blocks.append(_btn_row(_rbtn("◀️ Back", callback_data="menu:home")))
+    return _rich(blocks)
 
 
-def _menu_results_view(cat, genre, items, page, page_size=BROWSE_PAGE_SIZE):
-    """Level 3: posted items as numbered deep-link buttons, paginated.
-    Every callback stays under Telegram's 64-byte callback_data limit by
-    construction (genre slugs are capped at db.GENRE_MAX_LEN)."""
+def _menu_results_payload(cat, genre, items, page, page_size=BROWSE_PAGE_SIZE):
+    """Level 3: posted items as embedded URL buttons (deep links into the
+    gated /start flow), paginated. Every callback_data stays under Telegram's
+    64-byte limit by construction (genre slugs capped at db.GENRE_MAX_LEN)."""
     key, label = cat["key"], (cat.get("label") or cat["key"]).strip()
     g = genre["genre"]
     total = len(items)
     pages = max(1, -(-total // page_size))
     page = max(0, min(page, pages - 1))
-    rows = []
+    blocks = [_heading(f"🏴 {label} · {g.title()}", 3),
+              _para(f"{total} posted item{'s' if total != 1 else ''}"
+                    + (f" — page {page + 1}/{pages}" if pages > 1 else ""))]
+    if not items:
+        blocks.append(_btn_row(_rbtn("📭 Nothing posted here yet",
+                                     callback_data="menu:noop")))
     for i, it in enumerate(items[page * page_size:(page + 1) * page_size]):
         title = ((it.get("caption") or "").strip().split("\n")[0]
                  or it.get("file_id") or "item")[:40]
-        rows.append([InlineKeyboardButton(
+        blocks.append(_btn_row(_rbtn(
             f"{page * page_size + i + 1}. {title}",
             url=(f"https://t.me/{config.BOT1_USERNAME}"
-                 f"?start=file_{it['file_id']}"))])
-    if not rows:
-        rows.append([InlineKeyboardButton(
-            "\U0001F4ED Nothing posted here yet", callback_data="menu:noop")])
+                 f"?start=file_{it['file_id']}"),
+            style="success")))
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(
-            "◀️ Prev", callback_data=f"menu:p:{key}:{g}:{page - 1}"))
+        nav.append(_rbtn("◀️ Prev",
+                         callback_data=f"menu:p:{key}:{g}:{page - 1}"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton(
-            "Next ▶️", callback_data=f"menu:p:{key}:{g}:{page + 1}"))
+        nav.append(_rbtn("Next ▶️",
+                         callback_data=f"menu:p:{key}:{g}:{page + 1}"))
     if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton("◀️ Genres", callback_data=f"menu:cat:{key}"),
-                 InlineKeyboardButton("\U0001F3E0 Home", callback_data="menu:home")])
-    text = (f"\U0001F3B4 <b>{_hh(label)} · {_hh(g.title())}</b> — "
-            f"{total} posted item{'s' if total != 1 else ''}"
-            + (f" (page {page + 1}/{pages})" if pages > 1 else ""))
-    return text, _menu_markup(rows)
+        blocks.append(_btn_row(*nav))
+    blocks.append(_btn_row(_rbtn("◀️ Genres", callback_data=f"menu:cat:{key}"),
+                           _rbtn("🏠 Home", callback_data="menu:home")))
+    return _rich(blocks)
 
 
-async def _browse_render(target, context, level, key=None, genre=None, page=0):
-    """Render one menu level into `target` (a Message from /browse or a
-    callback Query). Stale taps (pipeline/genre deleted meanwhile) re-render
-    the parent level instead of erroring. Returns False when the caller must
-    NOT send at all (banned user / browse disabled — message already sent)."""
-    user = target.from_user if level == "callback" else target.from_user
+def _eph_id(message):
+    """ephemeral_message_id is not in PTB's Message model (Bot API 10.2+);
+    PTB keeps unknown fields in api_kwargs — read it from either place."""
+    eid = getattr(message, "ephemeral_message_id", None)
+    if eid is None:
+        eid = (getattr(message, "api_kwargs", None) or {}).get(
+            "ephemeral_message_id")
+    return eid
+
+
+async def _browse_render(target, context, level, key=None, genre=None,
+                         page=0):
+    """Render one menu level as a RICH message. `target` is a Message from
+    /browse (level='message') or a callback Query (level='callback').
+    Stale taps (pipeline/genre deleted meanwhile) re-render the parent level
+    instead of erroring. Returns False when nothing should be sent (banned
+    user / browse disabled — the user was already told)."""
+    user = target.from_user
     uid = user.id if user else None
     if uid is not None:
         rec = await db.get_user(uid)
         if rec and rec.get("banned"):
             _bm = (await db.get_settings()).get("ban_message") or \
-                "\U0001F6AB You are banned from using this bot."
+                "🚫 You are banned from using this bot."
             if level == "callback":
                 await target.answer(_bm, show_alert=True)
             else:
@@ -861,45 +932,73 @@ async def _browse_render(target, context, level, key=None, genre=None, page=0):
         return False
 
     if key is None:                                   # level 0: categories
-        text, markup = _menu_home_view(
+        payload = _menu_home_payload(
             await db.list_categories(enabled_only=True))
     elif genre is None:                               # level 1: genres
         cat = await db.get_category(key)
         if not cat or not cat.get("enabled", True):
-            text, markup = _menu_home_view(
+            payload = _menu_home_payload(
                 await db.list_categories(enabled_only=True))
         else:
-            text, markup = _menu_genres_view(cat, await db.list_genres(key))
+            payload = _menu_genres_payload(cat, await db.list_genres(key))
     else:                                             # level 3: results
         cat = await db.get_category(key)
         gdoc = await db.get_genre(key, genre)
         if not cat or not cat.get("enabled", True):
-            text, markup = _menu_home_view(
+            payload = _menu_home_payload(
                 await db.list_categories(enabled_only=True))
         elif not gdoc:
-            text, markup = _menu_genres_view(cat, await db.list_genres(key))
+            payload = _menu_genres_payload(cat, await db.list_genres(key))
         else:
             items = await db.items_by_genre(key, genre, posted_only=True)
-            text, markup = _menu_results_view(cat, gdoc, items, page)
+            payload = _menu_results_payload(cat, gdoc, items, page)
 
     if level == "callback":
         await target.answer()
-        try:
-            await target.edit_message_text(text, parse_mode="HTML",
-                                           reply_markup=markup,
-                                           disable_web_page_preview=True)
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                raise
+        msg = target.message
+        chat_id = getattr(msg, "chat_id", None) or msg.chat.id
+        eid = _eph_id(msg)
+        if eid is not None:
+            # tap INSIDE an ephemeral menu (groups) -> edit it in place
+            method = "editEphemeralMessageText"
+            data = {"chat_id": chat_id, "receiver_user_id": uid,
+                    "ephemeral_message_id": eid, "rich_message": payload}
+        else:
+            method = "editMessageText"
+            data = {"chat_id": chat_id, "message_id": msg.message_id,
+                    "rich_message": payload}
     else:
-        await target.reply_text(text, parse_mode="HTML", reply_markup=markup,
-                                disable_web_page_preview=True)
+        chat_id = getattr(target, "chat_id", None) or target.chat.id
+        method = "sendRichMessage"
+        data = {"chat_id": chat_id, "rich_message": payload}
+        ctype = getattr(getattr(target, "chat", None), "type", None)
+        if ctype in ("group", "supergroup") and uid is not None:
+            # first render in a group -> ephemeral: only this user sees it
+            data["ephemeral_message_parameters"] = {"receiver_user_id": uid}
+    try:
+        await context.bot._post(method, data=data)
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return True
+        log.exception("rich browse menu failed (%s)", method)
+        if level == "callback":
+            try:
+                await target.answer(
+                    "Your Telegram app is too old for rich messages — "
+                    "please update Telegram.", show_alert=True)
+            except Exception:
+                pass
+        else:
+            await target.reply_text(
+                "⚠️ Your Telegram app is too old to show rich messages — "
+                "please update Telegram and try /browse again.")
     return True
 
 
 async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/browse — opens the genre menu. Works in DMs and groups alike; in
-    groups the results deep-link into a Bot 1 DM so the gates run privately."""
+    """/browse — opens the genre menu as a rich message. Works in DMs and
+    groups alike; in groups it is EPHEMERAL (visible only to the sender),
+    and the results deep-link into a Bot 1 DM so the gates run privately."""
     msg = update.effective_message
     if msg:
         await _browse_render(msg, context, "message")
@@ -928,7 +1027,7 @@ async def on_browse_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                  page=int(parts[4]))
         else:
             await query.answer()
-    except Exception as exc:
+    except Exception:
         log.exception("browse menu callback failed: %s", data)
         try:
             await query.answer("Something went wrong — try /browse again.",
