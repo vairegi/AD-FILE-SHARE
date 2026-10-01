@@ -140,43 +140,55 @@ async def _require_active(update, key):
 _WIZARD = {}
 
 
-def _p_db_channel(t):
+def _p_db_channel(t, mode="add"):
+    if mode == "edit" and t.strip().lower() in ("skip", "-", "none"):
+        return (None, None)   # keep the existing Database Channel
     cid = _parse_channel_id(t)
-    return ("db_channel_id", cid) if cid is not None else (None, "Send a numeric channel id (e.g. -1001234567890).")
+    return (("db_channel_id", cid) if cid is not None
+            else (None, "Send a numeric channel id (e.g. -1001234567890)"
+                  + (", or 'skip' to keep the current one." if mode == "edit" else ".")))
 
 
-def _p_post_channel(t):
+def _p_post_channel(t, mode="add"):
+    if mode == "edit" and t.strip().lower() in ("skip", "-", "none"):
+        return (None, None)   # keep the existing Posting Channel
     cid = _parse_channel_id(t)
-    return ("post_channel_id", cid) if cid is not None else (None, "Send a numeric channel id (e.g. -1001234567890).")
+    return (("post_channel_id", cid) if cid is not None
+            else (None, "Send a numeric channel id (e.g. -1001234567890)"
+                  + (", or 'skip' to keep the current one." if mode == "edit" else ".")))
 
 
-def _p_main_channel(t):
+def _p_main_channel(t, mode="add"):
     if t.strip().lower() in ("skip", "-", "none", "off"):
-        return ("post_main_channel_id", None)
+        # edit -> keep the current Main Channel; add -> no Main Channel
+        return (None, None) if mode == "edit" else ("post_main_channel_id", None)
     cid = _parse_channel_id(t)
-    return ("post_main_channel_id", cid) if cid is not None else (None, "Send a numeric channel id, or 'skip'.")
+    return (("post_main_channel_id", cid) if cid is not None
+            else (None, "Send a numeric channel id, or 'skip' to keep the current one."))
 
 
-def _p_tag(t):
+def _p_tag(t, mode="add"):
     if t.strip().lower() in ("skip", "-", "none", "off"):
-        return ("post_tag", None)
+        return (None, None) if mode == "edit" else ("post_tag", None)
     return ("post_tag", t.strip())
 
 
-def _p_time(t):
+def _p_time(t, mode="add"):
     if t.strip().lower() in ("skip", "-", "none"):
-        return ("post_time", "18:00")
+        return (None, None) if mode == "edit" else ("post_time", "18:00")
     v = _parse_hhmm(t)
-    return ("post_time", v) if v else (None, "Send the time as HH:MM (24h, IST), e.g. 21:30 — or 'skip'.")
+    return (("post_time", v) if v
+            else (None, "Send the time as HH:MM (24h, IST), e.g. 21:30 — or 'skip'."))
+
 
 
 # Ordered ADD-wizard steps: (step_name, prompt, parser)
 _WIZARD_STEPS = [
-    ("db_channel",   "1/5 · Send the <b>Database Channel</b> id (where raw files are uploaded).", _p_db_channel),
-    ("post_channel", "2/5 · Send the <b>Posting Channel</b> id (where covers are drip-posted).", _p_post_channel),
-    ("main_channel", "3/5 · Send the <b>Main Posting Channel</b> id, or <code>skip</code>.", _p_main_channel),
-    ("tag",          "4/5 · Send the <b>tag line</b> — a caption shown above each forward in the Main Channel (e.g. a hashtag or @handle). Optional: <code>skip</code>.", _p_tag),
-    ("time",         "5/5 · Send the <b>daily post time</b> as HH:MM (IST), or <code>skip</code> for 18:00.", _p_time),
+    ("db_channel",   "1/5 · Send the <b>Database Channel</b> id (where raw files are uploaded). In edit mode: <code>skip</code> keeps the current one.", _p_db_channel),
+    ("post_channel", "2/5 · Send the <b>Posting Channel</b> id (where covers are drip-posted). In edit mode: <code>skip</code> keeps the current one.", _p_post_channel),
+    ("main_channel", "3/5 · Send the <b>Main Posting Channel</b> id. In edit mode: <code>skip</code> keeps the current one (add mode: skip = none).", _p_main_channel),
+    ("tag",          "4/5 · Send the <b>tag line</b> — a caption shown above each forward in the Main Channel (e.g. a hashtag or @handle). Optional: <code>skip</code> keeps the current one.", _p_tag),
+    ("time",         "5/5 · Send the <b>daily post time</b> as HH:MM (IST). In edit mode: <code>skip</code> keeps the current one (add mode: skip = 18:00).", _p_time),
 ]
 
 
@@ -227,7 +239,8 @@ async def cmd_editcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _WIZARD[uid] = {"mode": "edit", "step": 0, "key": key, "data": {}}
     await update.message.reply_text(
         f"✏️ Editing pipeline <b>{_h(cat.get('label') or key)}</b> (<code>{key}</code>)\n"
-        "Current values are kept if you press skip where offered.\n\n"
+        "Every step accepts <code>skip</code> — the current value "
+        "is kept untouched.\n\n"
         + _WIZARD_STEPS[0][1],
         parse_mode="HTML", reply_markup=_wizard_cancel_kb())
 
@@ -290,11 +303,14 @@ async def wizard_message_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
     step_idx = session["step"]
     _, prompt, parser = _WIZARD_STEPS[step_idx]
-    field, value = parser(text)
-    if field is None:
+    field, value = parser(text, session.get("mode", "add"))
+    # (None, "msg") = parse error -> re-ask; (None, None) = skip -> keep
+    # current value and advance; (field, value) = store it.
+    if field is None and value is not None:
         await update.message.reply_text(f"⚠️ {value}\n\n{prompt}", parse_mode="HTML")
         return
-    session["data"][field] = value
+    if field is not None:
+        session["data"][field] = value
     session["step"] += 1
     try:
         if session["step"] < len(_WIZARD_STEPS):

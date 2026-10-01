@@ -812,3 +812,8 @@ asserted to be a string.
   table with one row per fetch: file (linked back into the Download flow),
   exact IST time, shortener solve time, provider. Per-fetch events start
   recording at deploy; older days show totals only.
+
+
+## v4.8.1 — edit wizard skip
+
+/editcategory now accepts **skip** on EVERY step (DB channel, posting channel, main channel, tag, time): the current value is kept untouched. Add-mode behaviour is unchanged.
