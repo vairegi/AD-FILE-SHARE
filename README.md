@@ -817,3 +817,8 @@ asserted to be a string.
 ## v4.8.1 — edit wizard skip
 
 /editcategory now accepts **skip** on EVERY step (DB channel, posting channel, main channel, tag, time): the current value is kept untouched. Add-mode behaviour is unchanged.
+
+
+## v4.8.2 — wizard answers no longer swallowed
+
+Bot 1's group-1 text handlers (broadcast timer answer, edit/add wizard) are now scoped with pending-state filters — PTB runs only the first matching handler per group, and the broadcast handler's bare text filter was eating wizard answers like `skip`. Wizard answers route to the wizard; broadcast answers route to the broadcast flow; neither blocks the other.

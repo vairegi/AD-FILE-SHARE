@@ -1188,11 +1188,30 @@ def build_bot1() -> Application:
     from bot1_admin import wizard_message_handler
     # v4.0: captures the admin's time answer after /broadcast (runs BEFORE the
     # wizard handler; both are keyed by user id and never active together)
+    import bot1_admin
     from bot1_admin import broadcast_pending_reply
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                   broadcast_pending_reply), group=1)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                   wizard_message_handler), group=1)
+    # v4.8.2: PTB runs only the FIRST matching handler per group — a bare
+    # text filter let broadcast_pending_reply swallow wizard answers (e.g.
+    # "skip") before the wizard ever saw them. Scope each handler with its
+    # own pending-state UpdateFilter (PTB 21 native; filters.Create is gone).
+    class _BroadcastPendingFilter(filters.UpdateFilter):
+        name = "broadcast_pending"
+        def filter(self, update):
+            u = getattr(update, "effective_user", None)
+            return bool(u and bot1_admin._BROADCAST_PENDING.get(u.id))
+
+    class _WizardActiveFilter(filters.UpdateFilter):
+        name = "wizard_active"
+        def filter(self, update):
+            u = getattr(update, "effective_user", None)
+            return bool(u and u.id in bot1_admin._WIZARD)
+
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & _BroadcastPendingFilter(),
+        broadcast_pending_reply), group=1)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & _WizardActiveFilter(),
+        wizard_message_handler), group=1)
     schedule_broadcast_sweeper(app)
     return app
 

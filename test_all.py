@@ -2451,6 +2451,51 @@ async def main():
           {"broadcast", "checkram"} <= _cmds2)
 
     # ── cleanup ───────────────────────────────────────────────
+    
+    # v4.8.2 routing: real telegram.Update objects through the real PTB
+    # application — ask PTB whether each group-1 handler would fire.
+    import bot1_admin as _adm
+    import bot1 as _b1
+    from telegram import Update as _TU, Message as _TM, Chat as _TC, User as _TUsr
+    import datetime as _dtm
+    _app = _b1.build_bot1()
+    _by_cb = {}
+    for _h in _app.handlers[1]:
+        _cb = getattr(getattr(_h, "callback", None), "__name__", "")
+        if _cb in ("broadcast_pending_reply", "wizard_message_handler"):
+            _by_cb[_cb] = _h
+    check("v4.8.2: both group-1 handlers registered", len(_by_cb) == 2)
+
+    def _mkupd(uid, text):
+        _usr = _TUsr(id=uid, first_name="A", is_bot=False)
+        _msg = _TM(message_id=1, date=_dtm.datetime.now(),
+                   chat=_TC(id=999, type="private"), text=text, from_user=_usr)
+        return _TU(update_id=1, message=_msg)
+
+    async def _fires(handler, upd):
+        r = handler.check_update(upd)
+        if asyncio.iscoroutine(r):
+            r = await r
+        return bool(r)
+
+    _adm._WIZARD[999] = {"mode": "edit", "step": 0, "key": "x", "data": {}}
+    _adm._BROADCAST_PENDING.clear()
+    _u = _mkupd(999, "skip")
+    check("v4.8.2: wizard answer not swallowed by broadcast handler",
+          await _fires(_by_cb["wizard_message_handler"], _u) is True
+          and await _fires(_by_cb["broadcast_pending_reply"], _u) is False)
+    _adm._WIZARD.pop(999, None)
+    _adm._BROADCAST_PENDING[999] = {"mode": "copy", "chat_id": 1, "message_id": 2}
+    _u = _mkupd(999, "2h")
+    check("v4.8.2: broadcast answer routed to broadcast handler",
+          await _fires(_by_cb["broadcast_pending_reply"], _u) is True
+          and await _fires(_by_cb["wizard_message_handler"], _u) is False)
+    _adm._BROADCAST_PENDING.clear()
+    _u = _mkupd(999, "hello")
+    check("v4.8.2: plain text falls through both",
+          await _fires(_by_cb["broadcast_pending_reply"], _u) is False
+          and await _fires(_by_cb["wizard_message_handler"], _u) is False)
+
     await db._client.drop_database("video_bots_dev_test")
     await db.close()
 
