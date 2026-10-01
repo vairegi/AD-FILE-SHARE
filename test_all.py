@@ -448,9 +448,8 @@ async def main():
     await db.update_settings({"db_channel_id": -100999,
                               "auto_delete_minutes": 30})
     await bot2.process_delivery(fb, 998, 998, "jav_f99", dtok)
-    check("deliver: copyMessages batch used (server-side)",
-          len(getattr(fb, "copied_batch", [])) == 1
-          and fb.copied_batch[0][1] == -100999)
+    check("deliver: copy_message used (server-side)", len(fb.copied) == 1
+          and fb.copied[0][1] == -100999)
     check("deliver: token burned", (await db.get_token(dtok))["used"] is True)
     check("deliver: auto-delete note shown", "auto-deleted" in fb.sent[-1][1])
     due = await db.due_deletions()
@@ -468,9 +467,8 @@ async def main():
     joined = str(fb.sent[-1]) if fb.sent else ""
     check("deliver: multi-version delivers ALL versions (no chooser)",
           not any("Choose which version" in str(m[1]) for m in fb.sent)
-          and getattr(fb, "copied_batch", [])
-          and fb.copied_batch[-1][2] == [51, 52, 53],
-          extra=str(getattr(fb, "copied_batch", None)))
+          and [c[2] for c in fb.copied] == [51, 53, 52],
+          extra=str(fb.copied))
 
     # chooser callback delivers chosen version + srt
     fb.copied.clear(); fb.sent.clear()
@@ -2312,12 +2310,14 @@ async def main():
     _tok = await db.create_token(998, "jav_f480", 60, kind="deliver")
     upd = FakeUpdate(uid=998)
     await _b2.start(upd, FakeContext(bot=fb, args=[f"deliver_jav_f480_{_tok}"]))
-    _batch = getattr(fb, "copied_batch", [])
-    check("v4.7: 3 videos + srt delivered in ONE batch (all at once)",
-          len(_batch) == 1 and _batch[0][2] == [481, 482, 483, 484])
-    check("v4.7: file-caption extra sent once as HTML after the batch",
-          any("<b>hot</b>" in str(t) and "<code>stuff</code>" in str(t)
-              for _, t, _ in fb.sent))
+    # v4.8.3: per-file copies — all videos + srt arrive back-to-back, extra
+    # rides UNDER each file's caption (HTML kept).
+    check("v4.8.3: 3 videos + srt delivered per-file, back-to-back",
+          [c[2] for c in fb.copied] == [481, 484, 482, 483])
+    check("v4.8.3: file-caption extra under each file's caption (HTML)",
+          any(k.get("caption") and "<b>hot</b>" in str(k["caption"])
+              and "<code>stuff</code>" in str(k["caption"])
+              and k.get("parse_mode") == "HTML" for k in fb.copy_kwargs))
     check("v4.7: deliver token burned after batch delivery",
           (await db.get_token(_tok)).get("used") is True)
 
@@ -2342,8 +2342,7 @@ async def main():
     upd = FakeUpdate(uid=556)
     await _b2.start(upd, FakeContext(bot=fb, args=[_payload]))
     check("v4.7.1: bot2 delivers from the single-token link end-to-end",
-          getattr(fb, "copied_batch", [])
-          and fb.copied_batch[-1][2] == [491])
+          [c[2] for c in fb.copied] == [491])
     # force-sub resume stores the pending delivery in the DB, not the link
     await db.update_settings({"force_sub_channel_ids": [-100300]})
     fb = FakeBot(); fb.membership = False
@@ -2358,9 +2357,8 @@ async def main():
     upd = FakeUpdate(uid=557)
     upd.callback_query = _mk_query(557, "sub2:g")
     await _b2.on_checksub2(upd, FakeContext(bot=fb))
-    check("v4.7.1: 'I've Joined' resumes delivery from the DB pending record",
-          getattr(fb, "copied_batch", [])
-          and fb.copied_batch[-1][2] == [491]
+    check("v4.8.3: 'I've Joined' resumes delivery from the DB pending record",
+          [c[2] for c in fb.copied] == [491]
           and (await db.get_pending_delivery(557)) is None)
     await db.update_settings({"force_sub_channel_ids": []})
 
@@ -2380,9 +2378,8 @@ async def main():
     upd = FakeUpdate(uid=998)
     upd.callback_query = _mk_query(998, "sub2:f_jav_f480")
     await _b2.on_checksub2(upd, FakeContext(bot=fb))
-    check("v4.7: 'I've Joined' resumes delivery with the full batch",
-          len(getattr(fb, "copied_batch", [])) == 1
-          and fb.copied_batch[0][2] == [481, 482, 483, 484])
+    check("v4.8.3: 'I've Joined' resumes delivery per-file",
+          [c[2] for c in fb.copied] == [481, 484, 482, 483])
 
     # (g) bare /start: gated, then held files re-sent ALL AT ONCE
     fb = FakeBot(); fb.membership = False

@@ -791,7 +791,8 @@ async def send_item(bot, chat_id, item, index, note=True):
             **copy_kwargs,
         )
     except Exception as exc:
-        log.error("copy_message failed: %s", exc)
+        log.error("copy_message failed (channel=%s msg=%s): %s",
+                  db_channel, video.get("db_message_id"), exc)
         await bot.send_message(
             chat_id,
             "⚠️ Failed to deliver the file. Please go back and tap Download again.",
@@ -859,60 +860,24 @@ async def process_delivery(bot, chat_id, user_id, file_id, token):
 
     await db.mark_token_used(token)
 
-    # v4.7: deliver EVERYTHING at once — ONE copyMessages batch copies all
-    # videos AND the subtitles server-side in a single API call, so the user
-    # receives the whole post in one go (order preserved). copyMessages has
-    # no per-message caption override, so the /addfilecaption extra travels
-    # as ONE follow-up message after the batch instead.
+    # v4.8.3: per-file copy_message delivery (the pre-v4.7 proven path).
+    # The copyMessages batch failed on production with 400 "Chat not found";
+    # per-file copies keep working AND let /addfilecaption ride UNDER each
+    # file's own caption. One auto-delete entry per file (tagged bot2);
+    # the notice is posted once by the last send_item call.
     db_channel = await _db_channel_for(item)
     if not db_channel:
+        log.error("delivery failed: no db_channel for %s (category=%s)",
+                  file_id, item.get("category"))
         await bot.send_message(chat_id,
                                "❌ Delivery channel is not configured.")
         return
-    protect = await _protect_flag(item.get("category"))
-    mids = [v["db_message_id"] for v in item["videos"]]
-    mids += [s["db_message_id"] for s in (item.get("srts") or [])]
-    try:
-        sent = await bot.copy_messages(
-            chat_id=chat_id, from_chat_id=db_channel,
-            message_ids=mids[:100], protect_content=protect)
-        delivered = [getattr(m, "message_id", None) for m in sent]
-    except Exception as exc:
-        log.error("copy_messages failed: %s", exc)
-        await bot.send_message(
-            chat_id,
-            "⚠️ Failed to deliver the files. Please go back and tap "
-            "Download again.")
-        return
-
-    _s = await db.get_settings()
-    _fc_html = _s.get("file_caption_extra_html")
-    _fc_plain = _s.get("file_caption_extra")
-    if _fc_html or _fc_plain:
-        try:
-            await bot.send_message(
-                chat_id, str(_fc_html or _fc_plain)[:4096],
-                parse_mode="HTML" if _fc_html else None)
-        except Exception as exc:
-            log.warning("file caption extra failed (%s); sending plain", exc)
-            if _fc_plain:
-                try:
-                    await bot.send_message(chat_id, str(_fc_plain)[:4096])
-                except Exception:
-                    pass
-
-    minutes = await _autodelete_minutes(chat_id, item.get("category"))
-    if minutes and minutes > 0:
-        await db.add_deletion(chat_id, [m for m in delivered if m],
-                              db.now() + minutes * 60, bot="bot2")
-        default_note = (f"⏳ This file will be auto-deleted in "
-                        f"{human_duration(minutes * 60)}.")
-    else:
-        default_note = "📌 This file will stay in the chat."
-    template = await _withfile_template(item.get("category"))
-    note = (render_withfile_message(template, minutes)
-            if template else default_note)
-    await bot.send_message(chat_id, note)
+    log.info("delivering %s: %d videos + %d srts from channel %s to %s",
+             file_id, len(item["videos"]), len(item.get("srts") or []),
+             db_channel, chat_id)
+    videos = item["videos"]
+    for i in range(len(videos)):
+        await send_item(bot, chat_id, item, i, note=(i == len(videos) - 1))
 
 
 # ── handlers ──────────────────────────────────────────────────

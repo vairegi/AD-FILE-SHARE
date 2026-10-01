@@ -822,3 +822,8 @@ asserted to be a string.
 ## v4.8.2 — wizard answers no longer swallowed
 
 Bot 1's group-1 text handlers (broadcast timer answer, edit/add wizard) are now scoped with pending-state filters — PTB runs only the first matching handler per group, and the broadcast handler's bare text filter was eating wizard answers like `skip`. Wizard answers route to the wizard; broadcast answers route to the broadcast flow; neither blocks the other.
+
+
+## v4.8.3 — delivery restored to the proven per-file path
+
+The v4.7 copyMessages batch call failed in production (400 'Chat not found' from Telegram on every Get File). Delivery is back to per-file copy_message — every video + subtitle still arrives back-to-back in one go, and /addfilecaption rides UNDER each file's caption. Failure logs now name the exact channel + message id.
