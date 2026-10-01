@@ -114,18 +114,21 @@ HELP_ADMIN = (
     "/setverifytime &lt;hours&gt; · /settokenttl &lt;minutes&gt;\n"
     "/shortenermsg · /shortenerbotmsg · /verifymsg\n"
     "/shortenerbtn &lt;label&gt; | &lt;url&gt; · /clearshortenerbtns\n"
-    "\n<b>▸ General</b>\n"
-    "/broadcast &lt;message&gt; — copy to all users\n"
-    "/stats — overview + per-pipeline breakdown\n"
-    "/ban &lt;user_id&gt; · /unban &lt;user_id&gt;\n"
-    "/banlist · /banmessage &lt;text|reply|reset&gt;\n"
-    "/addsticker · /removesticker — sticker after every post (main channel)\n"
+    "\n<b>▸ Channel posts</b>\n"
     "/addbutton &lt;label&gt; | &lt;link&gt; [| green|blue|red] — extra button under every post\n"
     "/buttons · /removebutton &lt;n&gt; · /clearbuttons — manage extra buttons\n"
+    "/addsticker · /removesticker — sticker after every post (main channel)\n"
     "/addcovercaption &lt;text|off&gt; — appended to every posted cover caption\n"
-    "/addfilecaption &lt;text|off&gt; — appended to every delivered file caption\n"
+    "/addfilecaption &lt;text|off&gt; — sent after every delivered batch of files\n"
+    "   ↳ both keep your formatting: bold, quote, mono, links (v4.7)\n"
+    "\n<b>▸ Users &amp; system</b>\n"
+    "/broadcast &lt;message&gt; — copy to all Bot 1 users (asks for a delete timer)\n"
+    "/stats — overview + per-pipeline breakdown\n"
+    "/ban &lt;user_id&gt; · /unban &lt;user_id&gt; · /banlist\n"
+    "/banmessage &lt;text|reply|reset&gt; — the banned-user notice\n"
     "/addadmin &lt;user_id&gt; — promote an admin\n"
-    "/verified_users [yesterday] — today's verifications as a table"
+    "/verified_users [yesterday] — today's verifications as a table\n"
+    "/checkram — RAM usage: both bots together + per-bot estimate"
     "\n\n<b>▸ Genres &amp; browse menu</b> (v4.4)\n"
     "/addgenre &lt;pipeline&gt; &lt;genre&gt; — add a genre (one-time caption scan, then auto)\n"
     "/delgenre &lt;pipeline&gt; &lt;genre&gt; · /genres [pipeline] — manage genres\n"
@@ -224,6 +227,9 @@ async def send_force_sub(bot, chat_id, file_id, category=None):
 async def send_shortener_gate(bot, chat_id, user_id, item, settings):
     ttl = max(int(settings.get("token_ttl_minutes") or 10), 60)
     token = await db.create_token(user_id, item["file_id"], ttl, kind="verify")
+    # NOTE: the primary verify link gets NO '_g' marker — it must run the
+    # FULL verification (timing gate, burn, logging). Only the second token
+    # inside Bot 2's Get File link (deliver_now) carries '_g'.
     deep = (f"https://t.me/{config.BOT1_USERNAME}"
             f"?start=verify_{item['file_id']}_{token}")
     short, state, site, failures = await shortener.shorten(
@@ -278,8 +284,14 @@ async def deliver_now(bot, chat_id, user_id, item):
     settings = await db.get_settings()
     ttl = int(settings.get("token_ttl_minutes") or 10)
     token = await db.create_token(user_id, item["file_id"], ttl, kind="deliver")
+    # v4.7: the link ALSO carries a '_g' verify token. If Bot 2's own
+    # force-sub gate stops the user, their deliver token is NOT burned there
+    # and after joining they can come back through this verify token — the
+    # shortener is never solved twice.
+    verify_token = await db.create_token(user_id, item["file_id"], ttl,
+                                         kind="verify")
     deep = (f"https://t.me/{config.BOT2_USERNAME}"
-            f"?start=deliver_{item['file_id']}_{token}")
+            f"?start=deliver_{item['file_id']}_{token}_{verify_token}_g")
     text = settings.get("verify_msg") or "✅ Tap below to get your file."
     await bot.send_message(
         chat_id, text,
@@ -320,7 +332,12 @@ async def process_file(bot, chat_id, user_id, file_id):
     await send_shortener_gate(bot, chat_id, user_id, item, settings)
 
 
-async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
+async def process_verify(bot, chat_id, user_id, file_id, token,
+                         username=None, via_gate=False):
+    """via_gate=True marks the '_g' link Bot 1's own Get File message carries
+    for Bot 2's force-sub gate: the user ALREADY solved the shortener here,
+    so the anti-bypass timing gate and the verification bookkeeping are
+    skipped — only force-sub is re-checked before handing Get File back."""
     doc = await db.get_token(token)
     if (not doc or doc.get("kind") != "verify" or doc.get("used")
             or doc.get("expires_at", 0) < db.now()):
@@ -341,7 +358,8 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
     # ('down') reached the user as a direct link — instant return is expected
     # and must NEVER ban them.
     if (elapsed < BYPASS_MIN_SECONDS
-            and doc.get("shortener_state", "active") != "down"):
+            and doc.get("shortener_state", "active") != "down"
+            and not via_gate):   # v4.7: '_g' links already passed Gate 2
         await db.mark_token_used(token)  # burn the bypassed link
         # v3.2: ZERO TOLERANCE — a single too-fast attempt bans instantly.
         # No 3-strike grace period anymore.
@@ -363,6 +381,25 @@ async def process_verify(bot, chat_id, user_id, file_id, token, username=None):
                     f"/unban {user_id} to reverse")
             except Exception as exc:
                 log.warning("admin alert to %s failed: %s", aid, exc)
+        return
+
+    if via_gate:
+        # The user already solved the shortener (the '_g' link only exists
+        # inside Bot 1's Get File message). Bot 2's force-sub gate stopped
+        # them, they joined and came back — hand a FRESH Get File button over
+        # WITHOUT burning this verify token and without logging a second
+        # verification.
+        item = await db.get_item_by_file_id(file_id)
+        category = (item or {}).get("category") or \
+            await db.resolve_category(file_id)
+        if not item:
+            await bot.send_message(chat_id,
+                                   "❌ This file is no longer available.")
+            return
+        if not await gate_ok(bot, user_id, category):
+            await send_force_sub(bot, chat_id, file_id, category)
+            return
+        await deliver_now(bot, chat_id, user_id, item)
         return
 
     await db.mark_token_used(token)
@@ -488,15 +525,23 @@ async def _post_cover(bot, post_channel, db_channel, item, markup, styled=False)
     if not cover_id and item.get("videos"):
         cover_id = item["videos"][0]["db_message_id"]
     caption = (item.get("caption") or "").strip()
-    _cc_extra = (await db.get_settings()).get("cover_caption_extra")
-    if _cc_extra:
+    _s_cc = await db.get_settings()
+    _cc_html = _s_cc.get("cover_caption_extra_html")
+    _cc_extra = _s_cc.get("cover_caption_extra")
+    caption_pm = None
+    if _cc_html:
+        # v4.7: the /addcovercaption extra keeps its formatting — the stored
+        # HTML is appended as HTML so bold/quote/mono/links survive the post.
+        caption = (caption + "\n" + str(_cc_html).strip()).strip()
+        caption_pm = "HTML"
+    elif _cc_extra:
         caption = (caption + "\n" + str(_cc_extra).strip()).strip()
     photo_fid = item.get("cover_file_id")
     api_kwargs = ({"reply_markup": _build_styled_markup(markup).to_dict()}
                   if styled else None)
     if photo_fid and len(caption) <= 1024:
         kwargs = {"caption": caption or None, "reply_markup": markup,
-                  "has_spoiler": True}
+                  "has_spoiler": True, "parse_mode": caption_pm}
         if api_kwargs:
             kwargs["api_kwargs"] = api_kwargs
         return await bot.send_photo(chat_id=post_channel, photo=photo_fid,
@@ -703,7 +748,7 @@ def schedule_broadcast_sweeper(application):
 # ── command / update handlers ─────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await db.touch_user(user.id)
+    await db.touch_user(user.id, bot="bot1")   # v4.7: per-bot audience tag
     record = await db.get_user(user.id)
     if record and record.get("banned"):
         _bm = (await db.get_settings()).get("ban_message") or \
@@ -719,11 +764,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if payload.startswith("verify_"):
             rest = payload[len("verify_"):]
+            # v4.7: a trailing '_g' marks a link that already passed the
+            # shortener (re-issued for Bot 2's force-sub gate).
+            via_gate = rest.endswith("_g")
+            if via_gate:
+                rest = rest[:-2]
             # rpartition: file_id may itself contain '_' (category-prefixed ids
             # like "jav_f30"); the token is always the final '_' segment.
             file_id, _, token = rest.rpartition("_")
             await process_verify(context.bot, user.id, user.id, file_id, token,
-                                 getattr(user, "username", None))
+                                 getattr(user, "username", None),
+                                 via_gate=via_gate)
             return
 
     # v4.4: the plain /start welcome carries a direct entry into the genre
@@ -947,7 +998,7 @@ async def _browse_render(target, context, level, key=None, genre=None,
             else:
                 await target.reply_text(_bm)
             return False
-        await db.touch_user(uid)
+        await db.touch_user(uid, bot="bot1")
     if not (await db.get_settings()).get("browse_enabled", True):
         if level == "callback":
             await target.answer("Browsing is currently disabled.",

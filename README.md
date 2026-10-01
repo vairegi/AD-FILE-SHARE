@@ -739,3 +739,31 @@ asserted to be a string.
 * Tests added: duration parsing, grant/revoke, implicit expiry +
   purge, bypass wiring (checked in source order before `send_shortener_gate`),
   and `InputRichBlockTable` serialization (header cells + `tg://` link cell).
+
+---
+
+## v4.7 — Bot 2 force-sub, batch delivery, rich captions, /checkram
+
+* **Bot 2 enforces its OWN force-subscribe gate** (same `/setforcesub` list as
+  Bot 1). A user must satisfy it in BOTH bots: Bot 1 gates the shortener, Bot 2
+  gates delivery AND a bare `/start`. Token is NOT burned when the gate fails —
+  "✅ I've Joined" resumes delivery; a gated bare `/start` re-sends all held
+  (not-yet-deleted) files AT ONCE after joining. The Get File link now carries
+  a second `verify..._g` token so a user who already solved the shortener is
+  never asked to solve it again after joining on Bot 2.
+* **Batch delivery**: all videos + subtitles of a post arrive in ONE
+  `copyMessages` call (server-side, order preserved). `/addfilecaption` extra
+  is sent once as a formatted message after the batch (copyMessages takes no
+  per-message caption). The legacy `dl:` chooser path is unchanged.
+* **Rich caption extras**: `/addcovercaption` and `/addfilecaption` preserve
+  bold, italic, mono, quotes, spoilers and links (captured as HTML via
+  `text_html`; both plain + HTML variants stored for backward compatibility).
+* **Bot 2 `/broadcast`**: same UX as Bot 1 (asks for the auto-delete timer
+  first, paced ~3/sec with 429 retry_after, restart-safe deletion queue tagged
+  `bot="bot2"`) — but the audience is ONLY users who started Bot 2
+  (`touch_user(user_id, bot=...)` tags each starter; Bot 1 keeps the full list).
+* **`/checkram`** (both bots, admin-only): process RSS = what Render bills
+  against, peak RSS, per-bot estimate (single process → estimate), server RAM.
+* **`/help` regrouped** on both bots; Bot 2 admin menu (broadcast,
+  setautodelete, withfilemessages, checkram) registered via per-chat scopes.
+* New dep: `psutil>=5.9`.

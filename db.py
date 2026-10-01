@@ -76,6 +76,8 @@ DEFAULT_SETTINGS = {
     "post_buttons": [],              # v4.0: extra channel-post buttons (/addbutton) — {label, url, color}
     "cover_caption_extra": None,     # v4.0: appended to every posted cover caption (/addcovercaption)
     "file_caption_extra": None,      # v4.0: appended to every delivered file caption (/addfilecaption)
+    "cover_caption_extra_html": None,  # v4.7: HTML variant keeps bold/quote/mono/links
+    "file_caption_extra_html": None,
     # legacy single-pipeline knobs, kept only as migration seeds:
     "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
@@ -341,13 +343,15 @@ async def get_active_category(user_id):
 
 
 # ── users ─────────────────────────────────────────────────────
-async def touch_user(user_id):
-    await _db.users.update_one(
-        {"user_id": user_id},
-        {"$setOnInsert": {"joined_at": now(), "banned": False,
-                          "auto_delete_override": None, "verified": {}}},
-        upsert=True,
-    )
+async def touch_user(user_id, bot=None):
+    """Upsert the user record. v4.7: optional `bot` tag ('bot1'/'bot2') is
+    added to the user's `bots` set so each bot can broadcast to exactly the
+    users who started IT (legacy users have no tag and count as Bot 1's)."""
+    ops = {"$setOnInsert": {"joined_at": now(), "banned": False,
+                            "auto_delete_override": None, "verified": {}}}
+    if bot:
+        ops["$addToSet"] = {"bots": bot}
+    await _db.users.update_one({"user_id": user_id}, ops, upsert=True)
 
 
 async def get_user(user_id):
@@ -462,6 +466,16 @@ async def count_banned():
 async def all_user_ids():
     cur = _db.users.find({}, {"user_id": 1})
     return [d["user_id"] async for d in cur]
+
+
+async def all_user_ids_for(bot=None):
+    """Audience of ONE bot. bot='bot2' -> only users who started Bot 2
+    (explicitly tagged). Any other value -> every user (legacy behaviour).
+    Tagged bots land in the `bots` set via touch_user(user_id, bot=...)."""
+    if bot == "bot2":
+        cur = _db.users.find({"bots": "bot2"}, {"user_id": 1})
+        return [d["user_id"] async for d in cur]
+    return await all_user_ids()
 
 
 # ── files / posting queue (category-scoped) ───────────────────
@@ -764,6 +778,17 @@ async def due_deletions(bot=None):
 
 async def remove_deletion(doc_id):
     await _db.deletions.delete_one({"_id": doc_id})
+
+
+async def pending_delivery_message_ids(chat_id):
+    """v4.7: every not-yet-auto-deleted message id delivered to this chat —
+    i.e. the files the user currently holds, used by Bot 2's sub_ resume to
+    re-deliver everything at once after the force-sub gate passes."""
+    cur = _db.deletions.find({"chat_id": chat_id}, {"message_ids": 1})
+    out = set()
+    async for d in cur:
+        out.update(d.get("message_ids") or [])
+    return sorted(m for m in out if m)
 
 
 # ── persisted per-category queue state ────────────────────────

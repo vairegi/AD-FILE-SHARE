@@ -53,11 +53,24 @@ async def _set_commands():
                     admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
             except Exception as exc:
                 log.warning("admin menu for %s failed: %s", admin_id, exc)
-        # Bot 2
+        # Bot 2 — everyone sees the basics
         await bot2.bot.set_my_commands([
             BotCommand("start", "Start the bot"),
             BotCommand("help", "Show all commands"),
         ])
+        # Bot 2 — admins additionally get broadcast / delivery controls (v4.7)
+        b2_admin = [BotCommand("start", "Start the bot"),
+                    BotCommand("help", "Show all commands"),
+                    BotCommand("broadcast", "Message every Bot 2 user"),
+                    BotCommand("setautodelete", "Auto-delete timer"),
+                    BotCommand("withfilemessages", "Deletion notice text"),
+                    BotCommand("checkram", "RAM usage")]
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await bot2.bot.set_my_commands(
+                    b2_admin, scope=BotCommandScopeChat(chat_id=admin_id))
+            except Exception as exc:
+                log.warning("bot2 admin menu for %s failed: %s", admin_id, exc)
     except Exception as exc:
         log.warning("set_my_commands failed: %s", exc)
 

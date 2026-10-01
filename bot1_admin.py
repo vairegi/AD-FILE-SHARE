@@ -38,7 +38,7 @@ from telegram.ext import ContextTypes
 import config
 import db
 import scanner
-from utils import admin_only, human_duration, parse_duration
+from utils import admin_only, format_ram_report, human_duration, parse_duration
 from telegram.helpers import escape_markdown
 
 log = logging.getLogger("bot1.admin")
@@ -904,49 +904,68 @@ async def cmd_clearbuttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addcovercaption <text|off> — extra text APPENDED after the original
-    caption of every posted cover photo (all pipelines, global)."""
+    caption of every posted cover photo (all pipelines, global).
+
+    v4.7: FORMATTING IS PRESERVED — bold, italic, mono, spoilers, block
+    quotes and links are captured as HTML via text_html and re-applied when
+    the cover posts (Bot 1 sends the caption with parse_mode=HTML)."""
     msg = update.effective_message or update.message
     text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
         await update.message.reply_text(
             "Usage: /addcovercaption <text>\n"
+            "Formatting (bold, quote, mono, links…) is kept as typed.\n"
             "Appended after the original caption of every posted cover.\n"
             "/addcovercaption off removes it.")
         return
     if text.lower() in ("off", "none", "reset", "clear", "-"):
-        await db.update_settings({"cover_caption_extra": None})
+        await db.update_settings({"cover_caption_extra": None,
+                                  "cover_caption_extra_html": None})
         await update.message.reply_text(
             "✅ Cover caption extra removed — covers post with their original "
             "caption only.")
         return
-    await db.update_settings({"cover_caption_extra": text})
+    html = (getattr(msg, "text_html", "") or "").partition(" ")[2].strip()
+    await db.update_settings({"cover_caption_extra": text,
+                              "cover_caption_extra_html": html or None})
     await update.message.reply_text(
-        "✅ Cover caption extra saved. Every new channel post caption becomes:\n\n"
-        f"original caption\n{text}")
+        "✅ Cover caption extra saved (formatting kept). Preview:\n\n"
+        + (html or text),
+        parse_mode="HTML" if html else None)
 
 
 @admin_only
 async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addfilecaption <text|off> — extra text APPENDED after the original
-    caption of every file Bot 2 delivers to users (global)."""
+    """/addfilecaption <text|off> — extra text APPENDED after every batch of
+    files Bot 2 delivers to users (global).
+
+    v4.7: FORMATTING IS PRESERVED — bold, italic, mono, spoilers, block
+    quotes and links are captured as HTML via text_html. Bot 2 now delivers
+    all files in ONE copyMessages batch (which takes no per-message caption),
+    so the extra is sent as ONE formatted message right after the files."""
     msg = update.effective_message or update.message
     text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
         await update.message.reply_text(
             "Usage: /addfilecaption <text>\n"
-            "Appended after the original caption of every delivered file.\n"
+            "Formatting (bold, quote, mono, links…) is kept as typed.\n"
+            "Sent right after every delivered batch of files.\n"
             "/addfilecaption off removes it.")
         return
     if text.lower() in ("off", "none", "reset", "clear", "-"):
-        await db.update_settings({"file_caption_extra": None})
+        await db.update_settings({"file_caption_extra": None,
+                                  "file_caption_extra_html": None})
         await update.message.reply_text(
-            "✅ File caption extra removed — delivered files keep their "
-            "original caption only.")
+            "✅ File caption extra removed — delivered files arrive with no "
+            "extra text.")
         return
-    await db.update_settings({"file_caption_extra": text})
+    html = (getattr(msg, "text_html", "") or "").partition(" ")[2].strip()
+    await db.update_settings({"file_caption_extra": text,
+                              "file_caption_extra_html": html or None})
     await update.message.reply_text(
-        "✅ File caption extra saved. Every delivered file caption becomes:\n\n"
-        f"original caption\n{text}")
+        "✅ File caption extra saved (formatting kept). Preview:\n\n"
+        + (html or text),
+        parse_mode="HTML" if html else None)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2264,6 +2283,13 @@ async def cmd_listpremiumuser(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # Command name -> handler, registered by bot1.build_bot1()
+@admin_only
+async def cmd_checkram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/checkram — RAM of the single process that hosts BOTH bots (the total
+    is what Render bills against), plus a per-bot estimate."""
+    await update.message.reply_text(format_ram_report(), parse_mode="HTML")
+
+
 COMMANDS = {
     "shortener": cmd_shortener,
     "shortenerapi": cmd_shortenerapi,
@@ -2291,6 +2317,7 @@ COMMANDS = {
     "clearbuttons": cmd_clearbuttons,
     "addcovercaption": cmd_addcovercaption,
     "addfilecaption": cmd_addfilecaption,
+    "checkram": cmd_checkram,
     "addadmin": cmd_addadmin,
     "setforcesub": cmd_setforcesub,
     "setautodelete": cmd_setautodelete,

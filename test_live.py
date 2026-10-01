@@ -26,6 +26,13 @@ async def run():
     import main as m
     import db
 
+    # offline MongoDB (v4.7): no server reachable in the sandbox
+    if not os.environ.get("MONGO_URI"):
+        from mongomock_motor import AsyncMongoMockClient
+        # Patch the client class so the REAL db.connect() (settings seed +
+        # indexes + migrations) runs unchanged, only offline.
+        db.AsyncIOMotorClient = AsyncMongoMockClient
+
     class FakeTg:
         """Answers any bot.* call with a harmless no-op (offline test)."""
         defaults = type("D", (), {"tzinfo": None})()  # needed by Update.de_json

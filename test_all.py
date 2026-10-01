@@ -27,6 +27,19 @@ import config  # noqa: E402
 import db      # noqa: E402
 import utils   # noqa: E402
 
+# ── offline MongoDB (v4.7 sandbox runs) ───────────────────────
+# No real Mongo server is reachable here: swap the Motor client for
+# mongomock-motor (API-compatible) so the whole suite runs offline.
+# Set MONGO_URI to run against a real server instead.
+if not os.environ.get("MONGO_URI"):
+    try:
+        from mongomock_motor import AsyncMongoMockClient
+        # Swap the client class so the REAL db.connect() runs its settings
+        # seed, index creation and migrations unchanged, only offline.
+        db.AsyncIOMotorClient = AsyncMongoMockClient
+    except ImportError:
+        pass
+
 RESULTS = []
 
 
@@ -86,6 +99,15 @@ class FakeBot:
         self.copied.append((chat_id, from_chat_id, message_id))
         self.copy_kwargs.append(kw)
         return types.SimpleNamespace(message_id=8000 + len(self.copied))
+
+    async def copy_messages(self, chat_id, from_chat_id, message_ids, **kw):
+        """v4.7: Bot API copyMessages — one batch call, one id per message."""
+        if not hasattr(self, "copied_batch"):
+            self.copied_batch = []
+        self.copied_batch.append((chat_id, from_chat_id, list(message_ids), kw))
+        base = 8500 + len(self.copied_batch) * 100
+        return [types.SimpleNamespace(message_id=base + i)
+                for i in range(len(message_ids))]
 
     async def forward_message(self, chat_id, from_chat_id, message_id, **kw):
         self.forwarded.append((chat_id, from_chat_id, message_id))
@@ -277,7 +299,7 @@ async def main():
                       "setpostchannel", "setdbchannel", "setposttime", "dripnow",
                       "rescandb", "scandb", "setschedule", "schedule",
                       "pauseposting", "resumeposting", "queueinfo", "queue_reset",
-                      "setpostmainchannel", "setposttag"}
+                      "setpostmainchannel", "setposttag", "checkram"}
     check("bot1 registers /start", "start" in cmds1)
     check("bot1 registers all admin commands", expected_admin <= cmds1,
           f"missing={expected_admin - cmds1}")
@@ -404,7 +426,8 @@ async def main():
     check("verify: user marked verified",
           (_u998.get("verified_until") or 0) > db.now()
           or any(v > db.now() for v in (_u998.get("verified") or {}).values()))
-    dtok = joined.split("deliver_jav_f99_")[1].split("'")[0].split('"')[0]
+    dtok = (joined.split("deliver_jav_f99_")[1].split("'")[0].split('"')[0]
+            .split("_")[0])  # v4.7: first segment = deliver token (dual-token link)
     ddoc = await db.get_token(dtok)
     check("verify: deliver token bound to same user+file",
           ddoc and ddoc["user_id"] == 998 and ddoc["file_id"] == "jav_f99"
@@ -425,8 +448,9 @@ async def main():
     await db.update_settings({"db_channel_id": -100999,
                               "auto_delete_minutes": 30})
     await bot2.process_delivery(fb, 998, 998, "jav_f99", dtok)
-    check("deliver: copy_message used (server-side)", len(fb.copied) == 1
-          and fb.copied[0][1] == -100999)
+    check("deliver: copyMessages batch used (server-side)",
+          len(getattr(fb, "copied_batch", [])) == 1
+          and fb.copied_batch[0][1] == -100999)
     check("deliver: token burned", (await db.get_token(dtok))["used"] is True)
     check("deliver: auto-delete note shown", "auto-deleted" in fb.sent[-1][1])
     due = await db.due_deletions()
@@ -444,8 +468,9 @@ async def main():
     joined = str(fb.sent[-1]) if fb.sent else ""
     check("deliver: multi-version delivers ALL versions (no chooser)",
           not any("Choose which version" in str(m[1]) for m in fb.sent)
-          and [c[2] for c in fb.copied[:3]] == [51, 53, 52],
-          extra=str(fb.copied))
+          and getattr(fb, "copied_batch", [])
+          and fb.copied_batch[-1][2] == [51, 52, 53],
+          extra=str(getattr(fb, "copied_batch", None)))
 
     # chooser callback delivers chosen version + srt
     fb.copied.clear(); fb.sent.clear()
@@ -637,6 +662,11 @@ async def main():
     check("collection empty before re-connect", await db.count_shorteners() == 0)
     check("migration guard flag was set", (await db.get_settings()).get("shorteners_migrated") is True)
     await db.close()
+    # offline mongomock: a fresh client is a fresh EMPTY database, so reuse
+    # the SAME client — the reconnect then simulates a REAL Render restart
+    # (process restarts, data persists), matching the v3.3 regression.
+    _saved_client = db._client
+    db.AsyncIOMotorClient = lambda *a, **k: _saved_client
     await db.connect()   # simulate Render process restart
     check("empty rotation STAYS empty after restart (v3.3 bug fix)",
           await db.count_shorteners() == 0)
@@ -1482,7 +1512,8 @@ async def main():
     fb = FakeBot()
     await bot1.do_post(fb, category="jav")
     check("cover caption: extra appended AFTER the original",
-          fb.photos[0][2].get("caption") == "original\n🔥 Daily drop")
+          fb.photos[0][2].get("caption") == "original\n🔥 Daily drop"
+          and fb.photos[0][2].get("parse_mode") is None)
     r = await run(adm.cmd_addcovercaption, text="/addcovercaption off")
     check("/addcovercaption off clears it",
           (await db.get_settings())["cover_caption_extra"] is None)
@@ -1490,6 +1521,7 @@ async def main():
     r = await run(adm.cmd_addfilecaption, text="/addfilecaption ⚡ grab it fast")
     check("/addfilecaption saved",
           (await db.get_settings())["file_caption_extra"] == "⚡ grab it fast")
+    await db.update_settings({"file_caption_extra_html": None})
     await db.update_settings({"auto_delete_minutes": 30})
     await db.upsert_item({"file_id": "jav_f450", "category": "jav", "db_message_id": 450,
                           "cover_message_id": 450, "caption": "c450",
@@ -1498,6 +1530,11 @@ async def main():
     await bot2.send_item(fb, 998, await db.get_item_by_file_id("jav_f450"), 0)
     check("file caption: extra appended AFTER the original on delivery",
           fb.copy_kwargs[0].get("caption") == "HD\n⚡ grab it fast")
+    # clean slate so the v4.7 batch-delivery block starts from defaults
+    await db.update_settings({"file_caption_extra": None,
+                              "file_caption_extra_html": None,
+                              "auto_delete_minutes": 0,
+                              "with_file_message": None})
     await db.update_settings({"file_caption_extra": None})
     fb = FakeBot()
     await bot2.send_item(fb, 998, await db.get_item_by_file_id("jav_f450"), 0)
@@ -2172,6 +2209,239 @@ async def main():
           and any(b.get("type") == "buttons" and
                   any("icollecteverything" in str(bt.get("url")) for bt in b["buttons"])
                   for b in bot1._menu_home_payload([{"key": "anime", "label": "Anime"}])["blocks"]))
+
+    # ══════════════════════════════════════════════════════════
+    #  v4.7 — bot2 force-sub gate, batch delivery, rich captions,
+    #         bot2 broadcast, /checkram
+    # ══════════════════════════════════════════════════════════
+    import bot2 as _b2
+    from telegram.ext import CommandHandler as _CH
+
+    def _mk_query(uid, data):
+        q = types.SimpleNamespace(from_user=FakeUser(uid), data=data,
+                                  answers=[], edits=[])
+        async def _a(text=None, show_alert=False):
+            q.answers.append((text, show_alert))
+        async def _e(text, **kw):
+            q.edits.append(text)
+        q.answer = _a
+        q.edit_message_text = _e
+        return q
+
+    # (a) db layer: per-bot audiences + held-file id collection
+    await db.touch_user(7001, bot="bot2")
+    await db.touch_user(7002, bot="bot1")
+    await db.touch_user(7002, bot="bot2")
+    await db.touch_user(7003)
+    _aud0 = set(await db.all_user_ids_for("bot2"))
+    check("v4.7: bot2 audience = only users who started bot2",
+          {7001, 7002} <= _aud0 and 7003 not in _aud0)
+    check("v4.7: bot1 audience unchanged (everyone)",
+          {7001, 7002, 7003} <= set(await db.all_user_ids()))
+    await db.add_deletion(7001, [11, 12], db.now() + 3600, bot="bot2")
+    await db.add_deletion(7001, [13], db.now() + 3600)
+    await db.add_deletion(7002, [21], db.now() + 3600, bot="bot1")
+    check("v4.7: held-file ids collected per chat",
+          await db.pending_delivery_message_ids(7001) == [11, 12, 13])
+
+    # (b) /checkram on bot1's panel
+    rep = utils.format_ram_report()
+    check("v4.7: ram report covers both bots",
+          "Both bots (whole process)" in rep and "Bot 1 (gate)" in rep
+          and "Bot 2 (delivery)" in rep and "MB" in rep)
+    r = await run(adm.cmd_checkram, text="/checkram")
+    check("v4.7: /checkram replies with the report", "RAM usage" in r)
+    check("v4.7: /checkram registered on bot1", "checkram" in adm.COMMANDS)
+
+    # (c) rich /addcovercaption (bold/underline kept as HTML)
+    upd = FakeUpdate(uid=999, text="/addcovercaption Visit now")
+    upd.message.text_html = '/addcovercaption <b>Visit</b> <u>now</u>'
+    await adm.cmd_addcovercaption(upd, FakeContext(bot=FakeBot()))
+    _s = await db.get_settings()
+    check("v4.7: cover caption stores plain + HTML variants",
+          _s.get("cover_caption_extra") == "Visit now"
+          and _s.get("cover_caption_extra_html") == "<b>Visit</b> <u>now</u>")
+    await db.upsert_item({"file_id": "jav_f470", "category": "jav",
+                          "db_message_id": 470, "cover_message_id": 470,
+                          "cover_file_id": "PHOTO_470", "caption": "orig",
+                          "videos": [{"db_message_id": 471, "caption": ""}],
+                          "srts": []})
+    fb = FakeBot()
+    await bot1._post_cover(fb, -1001, -1002,
+                           await db.get_item_by_file_id("jav_f470"),
+                           bot1.build_post_markup("https://t.me/x", 1, []))
+    check("v4.7: posted cover caption is HTML-formatted",
+          fb.photos and fb.photos[0][2].get("caption") ==
+          "orig\n<b>Visit</b> <u>now</u>"
+          and fb.photos[0][2].get("parse_mode") == "HTML")
+    upd = FakeUpdate(uid=999, text="/addcovercaption off")
+    await adm.cmd_addcovercaption(upd, FakeContext(bot=FakeBot()))
+    _s = await db.get_settings()
+    check("v4.7: cover caption off clears both variants",
+          _s.get("cover_caption_extra") is None
+          and _s.get("cover_caption_extra_html") is None)
+
+    # rich /addfilecaption
+    upd = FakeUpdate(uid=999, text="/addfilecaption hot stuff")
+    upd.message.text_html = '/addfilecaption <b>hot</b> <code>stuff</code>'
+    await adm.cmd_addfilecaption(upd, FakeContext(bot=FakeBot()))
+    _s = await db.get_settings()
+    check("v4.7: file caption stores plain + HTML variants",
+          _s.get("file_caption_extra") == "hot stuff"
+          and _s.get("file_caption_extra_html") ==
+          "<b>hot</b> <code>stuff</code>")
+
+    # (d) Bot 2 batch delivery — all videos + srt in ONE copyMessages call
+    await db.update_settings({"force_sub_channel_id": None,
+                              "force_sub_channel_ids": [],
+                              "db_channel_id": -100200,
+                              "with_file_message": None,
+                              "auto_delete_minutes": 0})
+    try:
+        await db.update_category("jav", {"force_sub_channel_id": None,
+                                         "force_sub_channel_ids": None})
+    except Exception:
+        pass
+    await db.upsert_item({"file_id": "jav_f480", "category": "jav",
+                          "db_message_id": 480, "caption": "c480",
+                          "videos": [{"db_message_id": 481, "caption": "v1"},
+                                     {"db_message_id": 482, "caption": "v2"},
+                                     {"db_message_id": 483, "caption": "v3"}],
+                          "srts": [{"db_message_id": 484}]})
+    fb = FakeBot()
+    _tok = await db.create_token(998, "jav_f480", 60, kind="deliver")
+    upd = FakeUpdate(uid=998)
+    await _b2.start(upd, FakeContext(bot=fb, args=[f"deliver_jav_f480_{_tok}"]))
+    _batch = getattr(fb, "copied_batch", [])
+    check("v4.7: 3 videos + srt delivered in ONE batch (all at once)",
+          len(_batch) == 1 and _batch[0][2] == [481, 482, 483, 484])
+    check("v4.7: file-caption extra sent once as HTML after the batch",
+          any("<b>hot</b>" in str(t) and "<code>stuff</code>" in str(t)
+              for _, t, _ in fb.sent))
+    check("v4.7: deliver token burned after batch delivery",
+          (await db.get_token(_tok)).get("used") is True)
+
+    # (e) dual-token Get File link: bot2 unpacks the deliver+verify pair
+    fb = FakeBot()
+    await bot1.deliver_now(fb, 556, 556,
+                           await db.get_item_by_file_id("jav_f480"))
+    _mk = fb.sent[-1][2].get("reply_markup")
+    _url = _mk.inline_keyboard[0][0].url
+    check("v4.7: Get File link carries BOTH tokens",
+          _url.startswith(
+              "https://t.me/deliverybot_test?start=deliver_jav_f480_")
+          and len(_url.split("_")) >= 5)
+    fb2 = FakeBot()
+    upd = FakeUpdate(uid=556)
+    await _b2.start(upd, FakeContext(bot=fb2,
+                                     args=[_url.split("start=", 1)[1]]))
+    check("v4.7: bot2 unpacks the dual-token link and delivers the batch",
+          len(getattr(fb2, "copied_batch", [])) == 1
+          and fb2.copied_batch[0][2] == [481, 482, 483, 484])
+
+    # (f) Bot 2's own force-sub gate
+    await db.update_settings({"force_sub_channel_ids": [-100300]})
+    fb = FakeBot(); fb.membership = False
+    _tok2 = await db.create_token(998, "jav_f480", 60, kind="deliver")
+    upd = FakeUpdate(uid=998)
+    await _b2.start(upd, FakeContext(bot=fb, args=[f"deliver_jav_f480_{_tok2}"]))
+    check("v4.7: bot2 blocks delivery until the channel is joined",
+          not getattr(fb, "copied_batch", [])
+          and any("join our channel" in str(t).lower() for _, t, _ in fb.sent))
+    check("v4.7: gated deliver token is NOT burned",
+          (await db.get_token(_tok2)).get("used") is False)
+    fb.membership = True
+    upd = FakeUpdate(uid=998)
+    upd.callback_query = _mk_query(998, "sub2:f_jav_f480")
+    await _b2.on_checksub2(upd, FakeContext(bot=fb))
+    check("v4.7: 'I've Joined' resumes delivery with the full batch",
+          len(getattr(fb, "copied_batch", [])) == 1
+          and fb.copied_batch[0][2] == [481, 482, 483, 484])
+
+    # (g) bare /start: gated, then held files re-sent ALL AT ONCE
+    fb = FakeBot(); fb.membership = False
+    await db.add_deletion(998, [481, 482], db.now() + 3600, bot="bot2")
+    upd = FakeUpdate(uid=998)
+    await _b2.start(upd, FakeContext(bot=fb, args=[]))
+    check("v4.7: bare /start is force-sub gated too",
+          not getattr(fb, "copied_batch", [])
+          and any("join our channel" in str(t).lower() for _, t, _ in fb.sent))
+    fb.membership = True
+    upd = FakeUpdate(uid=998)
+    upd.callback_query = _mk_query(998, "sub2:r")
+    await _b2.on_checksub2(upd, FakeContext(bot=fb))
+    check("v4.7: resume re-sends held files in ONE batch from the own chat",
+          getattr(fb, "copied_batch", [])
+          and fb.copied_batch[-1][0] == 998 and fb.copied_batch[-1][1] == 998)
+
+    # (h) Bot 2 /broadcast — audience = Bot 2 starters only
+    await db.update_settings({"force_sub_channel_ids": []})
+    bbot = FakeBot()
+    upd = FakeUpdate(uid=999, text="/broadcast b2 hello")
+    ctx = FakeContext(bot=bbot, args=["b2", "hello"])
+    await _b2.cmd_broadcast(upd, ctx)
+    check("v4.7: bot2 broadcast asks for the delete timer first",
+          "deleted from users" in upd.message.replies[-1]
+          and not bbot.copied and not bbot.forwarded)
+    upd.message.text = "never"
+    await _b2.broadcast_pending_reply(upd, ctx)
+    _aud = set(await db.all_user_ids_for("bot2"))
+    check("v4.7: bot2 broadcast reaches ONLY users who started bot2",
+          len(bbot.copied) == len(_aud) and _aud >= {7001, 7002, 998}
+          and all(c[0] in _aud for c in bbot.copied))
+    bbot = FakeBot()
+    upd = FakeUpdate(uid=999, text="/broadcast b2 timed")
+    ctx = FakeContext(bot=bbot, args=["b2", "timed"])
+    await _b2.cmd_broadcast(upd, ctx)
+    upd.message.text = "2h"
+    await _b2.broadcast_pending_reply(upd, ctx)
+    _pend = await db._db.deletions.find(
+        {"bot": "bot2",
+         "delete_at": {"$gt": db.now() + 7000, "$lt": db.now() + 7400}}
+    ).to_list(None)   # ~2h window: excludes longer-lived entries from (g)
+    check("v4.7: bot2 broadcast copies queued for deletion, tagged bot2",
+          len(_pend) == len(_aud)
+          and all(d.get("bot") == "bot2" for d in _pend))
+    await db._db.deletions.update_many(
+        {"bot": "bot2"}, {"$set": {"delete_at": db.now() - 1}})
+    bsw = FakeBot()
+    await _b2.sweep_deletions(FakeContext(bot=bsw))
+    check("v4.7: bot2 sweeper deletes its broadcast copies",
+          len(bsw.deleted) >= len(_aud))
+
+    # (i) '_g' verify link: shortener already passed -> fresh Get File button
+    _vt = await db.create_token(777, "jav_f480", 60, kind="verify")
+    fb = FakeBot()
+    upd = FakeUpdate(uid=777)
+    await bot1.start(upd, FakeContext(bot=fb,
+                                      args=[f"verify_jav_f480_{_vt}_g"]))
+    check("v4.7: '_g' link skips the timing gate and stays UNBURNED",
+          (await db.get_token(_vt)).get("used") is False
+          and not (await db.get_user(777) or {}).get("banned"))
+    _mk_g = None
+    for _, _t, _kw in fb.sent:
+        _m = _kw.get("reply_markup")
+        if _m and _m.inline_keyboard:
+            _u = getattr(_m.inline_keyboard[0][0], "url", "") or ""
+            if "deliver_jav_f480_" in _u:
+                _mk_g = _u
+    check("v4.7: '_g' link re-issues the Get File button",
+          _mk_g is not None and _mk_g.endswith("_g"))
+
+    # (j) help lists + handler registration
+    upd = FakeUpdate(uid=999)
+    await _b2.help_cmd(upd, FakeContext(bot=FakeBot()))
+    _ht = upd.message.replies[-1]
+    check("v4.7: bot2 /help lists the new admin commands",
+          "/broadcast" in _ht and "/checkram" in _ht
+          and "/setautodelete" in _ht and "/withfilemessages" in _ht)
+    check("v4.7: bot1 /help lists /checkram",
+          "/checkram" in (bot1.HELP_USER + bot1.HELP_ADMIN))
+    _app2 = _b2.build_bot2()
+    _cmds2 = {c for grp in _app2.handlers.values() for h in grp
+              if isinstance(h, _CH) for c in h.commands}
+    check("v4.7: bot2 registers /broadcast + /checkram",
+          {"broadcast", "checkram"} <= _cmds2)
 
     # ── cleanup ───────────────────────────────────────────────
     await db._client.drop_database("video_bots_dev_test")
