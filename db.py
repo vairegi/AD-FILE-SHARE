@@ -78,6 +78,8 @@ DEFAULT_SETTINGS = {
     "file_caption_extra": None,      # v4.0: appended to every delivered file caption (/addfilecaption)
     "cover_caption_extra_html": None,  # v4.7: HTML variant keeps bold/quote/mono/links
     "file_caption_extra_html": None,
+    "cover_caption_extra_html": None,  # v4.7: HTML variant keeps bold/quote/mono/links
+    "file_caption_extra_html": None,
     # legacy single-pipeline knobs, kept only as migration seeds:
     "auto_delete_minutes": 15,
     "post_channel_id": config.POST_CHANNEL_ID,
@@ -469,6 +471,15 @@ async def all_user_ids():
 
 
 async def all_user_ids_for(bot=None):
+    """Audience of ONE bot. bot2 -> only users who started Bot 2
+    (explicitly tagged). Any other value -> every user (legacy)."""
+    if bot == "bot2":
+        cur = _db.users.find({"bots": "bot2"}, {"user_id": 1})
+        return [d["user_id"] async for d in cur]
+    return await all_user_ids()
+
+
+async def all_user_ids_for(bot=None):
     """Audience of ONE bot. bot='bot2' -> only users who started Bot 2
     (explicitly tagged). Any other value -> every user (legacy behaviour).
     Tagged bots land in the `bots` set via touch_user(user_id, bot=...)."""
@@ -778,6 +789,35 @@ async def due_deletions(bot=None):
 
 async def remove_deletion(doc_id):
     await _db.deletions.delete_one({"_id": doc_id})
+
+
+async def pending_delivery_message_ids(chat_id):
+    """v4.7: every not-yet-deleted message id delivered to this chat."""
+    cur = _db.deletions.find({"chat_id": chat_id}, {"message_ids": 1})
+    out = set()
+    async for d in cur:
+        out.update(d.get("message_ids") or [])
+    return sorted(x for x in out if x)
+
+
+# --- pending deliveries (v4.7.1: Bot 2 force-sub resume) ---
+# Stored on the USER doc — NOT in the deep link or callback_data, because
+# Telegram caps /start payloads at 64 chars and callback_data at 64 bytes.
+async def set_pending_delivery(user_id, file_id):
+    await _db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"pending_delivery": {"file_id": file_id, "at": now()}}},
+        upsert=True)
+
+
+async def get_pending_delivery(user_id):
+    d = await _db.users.find_one({"user_id": user_id}, {"pending_delivery": 1})
+    return (d or {}).get("pending_delivery")
+
+
+async def clear_pending_delivery(user_id):
+    await _db.users.update_one(
+        {"user_id": user_id}, {"$unset": {"pending_delivery": ""}})
 
 
 async def pending_delivery_message_ids(chat_id):

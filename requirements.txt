@@ -8,3 +8,4 @@ telethon>=1.34
 httpx>=0.27
 python-dotenv>=1.0
 psutil>=5.9  # v4.7: /checkram process memory report
+psutil>=5.9  # v4.7: /checkram process memory report

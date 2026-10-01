@@ -903,12 +903,9 @@ async def cmd_clearbuttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addcovercaption <text|off> — extra text APPENDED after the original
-    caption of every posted cover photo (all pipelines, global).
-
-    v4.7: FORMATTING IS PRESERVED — bold, italic, mono, spoilers, block
-    quotes and links are captured as HTML via text_html and re-applied when
-    the cover posts (Bot 1 sends the caption with parse_mode=HTML)."""
+    """/addcovercaption <text|off> — extra appended after the original caption
+    of every posted cover photo (global). v4.7: formatting (bold, quote, mono,
+    spoilers, links) is preserved — captured as HTML via text_html."""
     msg = update.effective_message or update.message
     text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
@@ -934,15 +931,14 @@ async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="HTML" if html else None)
 
 
+
+
 @admin_only
 async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addfilecaption <text|off> — extra text APPENDED after every batch of
-    files Bot 2 delivers to users (global).
-
-    v4.7: FORMATTING IS PRESERVED — bold, italic, mono, spoilers, block
-    quotes and links are captured as HTML via text_html. Bot 2 now delivers
-    all files in ONE copyMessages batch (which takes no per-message caption),
-    so the extra is sent as ONE formatted message right after the files."""
+    """/addfilecaption <text|off> — extra sent after every batch of files Bot 2
+    delivers (global). v4.7: formatting preserved (HTML). Bot 2 delivers all
+    files in ONE copyMessages batch (no per-message caption), so the extra is
+    sent as ONE formatted message right after the files."""
     msg = update.effective_message or update.message
     text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
@@ -966,6 +962,8 @@ async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "✅ File caption extra saved (formatting kept). Preview:\n\n"
         + (html or text),
         parse_mode="HTML" if html else None)
+
+
 
 
 # ══════════════════════════════════════════════════════════════

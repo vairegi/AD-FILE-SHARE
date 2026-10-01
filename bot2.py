@@ -13,6 +13,7 @@ every video + subtitle of a post AT ONCE via a single copyMessages batch,
 and carries its own /broadcast + /checkram admin commands.
 """
 import asyncio
+import asyncio
 import logging
 import re
 
@@ -88,16 +89,17 @@ async def gate_ok(bot, user_id, category=None) -> bool:
     return True
 
 
-async def send_force_sub(bot, chat_id, sub_payload, category=None):
-    """Join prompt; '✅ I've Joined' resumes `sub_payload`:
-    'f_<file_id>' re-runs the delivery, 'r' re-sends the user's held files."""
+async def send_force_sub(bot, chat_id, category=None):
+    """Join prompt with a single 'I've Joined' button (callback 'sub2:g').
+    What to resume is read back from the DB — nothing long rides inside
+    callback_data (64-byte limit)."""
     rows = []
     for ch in await db.force_sub_channels(category):
         u = await db.force_sub_link(ch, category) or await _channel_link(bot, ch)
         if u:
             rows.append([InlineKeyboardButton("📢 Join Channel", url=u)])
     rows.append([InlineKeyboardButton("✅ I've Joined",
-                                      callback_data=f"sub2:{sub_payload}")])
+                                      callback_data="sub2:g")])
     await bot.send_message(
         chat_id,
         "🔒 To continue you must join our channel first.\n\n"
@@ -106,9 +108,9 @@ async def send_force_sub(bot, chat_id, sub_payload, category=None):
     )
 
 
-async def resume_delivery(bot, chat_id, user_id, file_id):
-    """Re-run the full delivery after the gate passes — mints a fresh
-    single-use token internally so every validation layer still applies."""
+async def resume_pending_delivery(bot, chat_id, user_id, file_id):
+    """Mint a FRESH single-use token, then run the full delivery path — every
+    validation layer still applies, and the token TTL restarts from now."""
     ttl = int((await db.get_settings()).get("token_ttl_minutes") or 10)
     token = await db.create_token(user_id, file_id, ttl, kind="deliver")
     await process_delivery(bot, chat_id, user_id, file_id, token)
@@ -148,20 +150,27 @@ async def resend_held_files(bot, chat_id, user_id):
 
 
 async def on_checksub2(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """'✅ I've Joined' under Bot 2's own force-sub prompt."""
+    """'I've Joined' under Bot 2's own force-sub prompt. Resumes the pending
+    delivery (stored in the DB, v4.7.1) with a fresh token, else re-sends the
+    user's held files."""
     query = update.callback_query
     user = query.from_user
-    payload = (query.data or "").split(":", 1)[-1]
-    file_id = payload[2:] if payload.startswith("f_") else None
-    category = await db.resolve_category(file_id) if file_id else None
+    pend = await db.get_pending_delivery(user.id)
+    category = None
+    if pend and pend.get("file_id"):
+        _item = await db.get_item_by_file_id(pend["file_id"])
+        category = ((_item or {}).get("category")
+                    or await db.resolve_category(pend["file_id"]))
     if await gate_ok(context.bot, user.id, category):
         await query.answer("Thanks for joining!")
         try:
             await query.edit_message_text("✅ Membership confirmed.")
         except Exception:
             pass
-        if file_id:
-            await resume_delivery(context.bot, user.id, user.id, file_id)
+        if pend and pend.get("file_id"):
+            await db.clear_pending_delivery(user.id)
+            await resume_pending_delivery(context.bot, user.id, user.id,
+                                          pend["file_id"])
         else:
             await resend_held_files(context.bot, user.id, user.id)
     else:
@@ -627,7 +636,7 @@ async def process_delivery(bot, chat_id, user_id, file_id, token):
 # ── handlers ──────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await db.touch_user(user.id, bot="bot2")   # v4.7: Bot 2's own audience
+    await db.touch_user(user.id, bot="bot2")   # v4.7: Bot 2 audience
     record = await db.get_user(user.id)
     if record and record.get("banned"):
         await update.message.reply_text(await _ban_msg())
@@ -636,35 +645,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if args and args[0].startswith("deliver_"):
         rest = args[0][len("deliver_"):]
-        # v4.7: Bot 1's Get File link may carry a SECOND (verify) token for
-        # the force-sub resume, marked with a trailing '_g':
-        #   deliver_<file_id>_<deliver_token>[_<verify_token>_g]
-        _dual = rest.endswith("_g")
-        if _dual:
-            rest = rest[:-2]
-        # rpartition: file_id may itself contain '_' (category-prefixed ids);
-        # the token is always the final '_' segment.
+        # v4.7.1: SINGLE-token link again (Telegram caps /start payloads
+        # at 64 chars). rpartition: file_id may contain '_'.
         file_id, _, token = rest.rpartition("_")
-        if _dual:
-            # tail segment is the VERIFY token — the deliver token is the
-            # segment before it.
-            file_id, _, token = file_id.rpartition("_")
-        # v4.7: Bot 2 enforces the force-sub gate ITSELF. The token is NOT
-        # burned when the gate fails — '✅ I've Joined' resumes the delivery.
         item = await db.get_item_by_file_id(file_id)
         category = (item or {}).get("category") or \
             await db.resolve_category(file_id)
         if not await gate_ok(context.bot, user.id, category):
-            await send_force_sub(context.bot, user.id, f"f_{file_id}",
-                                 category)
+            await db.set_pending_delivery(user.id, file_id)
+            await send_force_sub(context.bot, user.id, category)
             return
         await process_delivery(context.bot, user.id, user.id, file_id, token)
         return
 
-    # v4.7: a bare /start is gated too — after joining, every held
-    # (not-yet-deleted) file is re-sent ALL AT ONCE.
+    # v4.7: a bare /start is gated too — after joining, held files
+    # are re-sent ALL AT ONCE.
     if not await gate_ok(context.bot, user.id):
-        await send_force_sub(context.bot, user.id, "r")
+        await send_force_sub(context.bot, user.id)
         return
 
     await update.message.reply_text(WELCOME)

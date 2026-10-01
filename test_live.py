@@ -29,6 +29,11 @@ async def run():
     # offline MongoDB (v4.7): no server reachable in the sandbox
     if not os.environ.get("MONGO_URI"):
         from mongomock_motor import AsyncMongoMockClient
+        db.AsyncIOMotorClient = AsyncMongoMockClient
+
+    # offline MongoDB (v4.7): no server reachable in the sandbox
+    if not os.environ.get("MONGO_URI"):
+        from mongomock_motor import AsyncMongoMockClient
         # Patch the client class so the REAL db.connect() (settings seed +
         # indexes + migrations) runs unchanged, only offline.
         db.AsyncIOMotorClient = AsyncMongoMockClient

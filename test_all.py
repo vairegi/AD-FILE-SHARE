@@ -2321,23 +2321,49 @@ async def main():
     check("v4.7: deliver token burned after batch delivery",
           (await db.get_token(_tok)).get("used") is True)
 
-    # (e) dual-token Get File link: bot2 unpacks the deliver+verify pair
+    # (e) v4.7.1 regression: Get File link = ONE token, fits Telegram's
+    # 64-char /start payload limit even with a long category-prefixed file_id
+    await db.upsert_item({"file_id": "hindhentai_f123456", "category": "jav",
+                          "db_message_id": 490, "caption": "c490",
+                          "videos": [{"db_message_id": 491, "caption": ""}],
+                          "srts": []})
     fb = FakeBot()
     await bot1.deliver_now(fb, 556, 556,
-                           await db.get_item_by_file_id("jav_f480"))
-    _mk = fb.sent[-1][2].get("reply_markup")
-    _url = _mk.inline_keyboard[0][0].url
-    check("v4.7: Get File link carries BOTH tokens",
-          _url.startswith(
-              "https://t.me/deliverybot_test?start=deliver_jav_f480_")
-          and len(_url.split("_")) >= 5)
-    fb2 = FakeBot()
+                           await db.get_item_by_file_id("hindhentai_f123456"))
+    _url = fb.sent[-1][2]["reply_markup"].inline_keyboard[0][0].url
+    _payload = _url.split("start=", 1)[1]
+    _dtok = _payload.split("deliver_hindhentai_f123456_", 1)[1]
+    _ddoc = await db.get_token(_dtok)
+    check("v4.7.1: Get File link = ONE token, <=64 chars (Telegram limit)",
+          _payload.startswith("deliver_hindhentai_f123456_")
+          and len(_payload) <= 64 and not _payload.endswith("_g")
+          and _ddoc and _ddoc.get("kind") == "deliver")
+    fb = FakeBot()
     upd = FakeUpdate(uid=556)
-    await _b2.start(upd, FakeContext(bot=fb2,
-                                     args=[_url.split("start=", 1)[1]]))
-    check("v4.7: bot2 unpacks the dual-token link and delivers the batch",
-          len(getattr(fb2, "copied_batch", [])) == 1
-          and fb2.copied_batch[0][2] == [481, 482, 483, 484])
+    await _b2.start(upd, FakeContext(bot=fb, args=[_payload]))
+    check("v4.7.1: bot2 delivers from the single-token link end-to-end",
+          getattr(fb, "copied_batch", [])
+          and fb.copied_batch[-1][2] == [491])
+    # force-sub resume stores the pending delivery in the DB, not the link
+    await db.update_settings({"force_sub_channel_ids": [-100300]})
+    fb = FakeBot(); fb.membership = False
+    _tk = await db.create_token(557, "hindhentai_f123456", 60, kind="deliver")
+    upd = FakeUpdate(uid=557)
+    await _b2.start(upd, FakeContext(bot=fb, args=[f"deliver_hindhentai_f123456_{_tk}"]))
+    check("v4.7.1: gate stores pending delivery in DB, token NOT burned",
+          (await db.get_pending_delivery(557) or {}).get("file_id")
+          == "hindhentai_f123456"
+          and (await db.get_token(_tk)).get("used") is False)
+    fb.membership = True
+    upd = FakeUpdate(uid=557)
+    upd.callback_query = _mk_query(557, "sub2:g")
+    await _b2.on_checksub2(upd, FakeContext(bot=fb))
+    check("v4.7.1: 'I've Joined' resumes delivery from the DB pending record",
+          getattr(fb, "copied_batch", [])
+          and fb.copied_batch[-1][2] == [491]
+          and (await db.get_pending_delivery(557)) is None)
+    await db.update_settings({"force_sub_channel_ids": []})
+
 
     # (f) Bot 2's own force-sub gate
     await db.update_settings({"force_sub_channel_ids": [-100300]})
@@ -2408,25 +2434,6 @@ async def main():
     await _b2.sweep_deletions(FakeContext(bot=bsw))
     check("v4.7: bot2 sweeper deletes its broadcast copies",
           len(bsw.deleted) >= len(_aud))
-
-    # (i) '_g' verify link: shortener already passed -> fresh Get File button
-    _vt = await db.create_token(777, "jav_f480", 60, kind="verify")
-    fb = FakeBot()
-    upd = FakeUpdate(uid=777)
-    await bot1.start(upd, FakeContext(bot=fb,
-                                      args=[f"verify_jav_f480_{_vt}_g"]))
-    check("v4.7: '_g' link skips the timing gate and stays UNBURNED",
-          (await db.get_token(_vt)).get("used") is False
-          and not (await db.get_user(777) or {}).get("banned"))
-    _mk_g = None
-    for _, _t, _kw in fb.sent:
-        _m = _kw.get("reply_markup")
-        if _m and _m.inline_keyboard:
-            _u = getattr(_m.inline_keyboard[0][0], "url", "") or ""
-            if "deliver_jav_f480_" in _u:
-                _mk_g = _u
-    check("v4.7: '_g' link re-issues the Get File button",
-          _mk_g is not None and _mk_g.endswith("_g"))
 
     # (j) help lists + handler registration
     upd = FakeUpdate(uid=999)

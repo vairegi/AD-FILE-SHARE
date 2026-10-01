@@ -767,3 +767,21 @@ asserted to be a string.
 * **`/help` regrouped** on both bots; Bot 2 admin menu (broadcast,
   setautodelete, withfilemessages, checkram) registered via per-chat scopes.
 * New dep: `psutil>=5.9`.
+
+
+---
+
+## v4.7.1 — CRITICAL FIX: Get File link over Telegram's 64-char limit
+
+* **Bug:** v4.7 put TWO tokens in the Get File deep link
+  (`deliver_<file_id>_<token>_<token2>_g`). Telegram caps `/start` payloads at
+  **64 characters** — the payload was silently dropped, so Bot 2 received
+  nothing and delivered nothing.
+* **Fix:** the link is **single-token** again. Bot 2's force-sub gate now
+  stores the pending delivery in the **DB** (per user) and "✅ I've Joined"
+  resumes it with a fresh single-use token — no long data in the URL or in
+  callback_data (also 64-byte-capped). A bare `/start` on Bot 2 re-sends the
+  user's held files all at once after joining.
+* Also fixed: duplicate `/broadcast`+`/checkram` registration, orphaned
+  payload-style `send_force_sub`, and added a regression test asserting the
+  Get File payload is <= 64 chars for long category-prefixed file_ids.

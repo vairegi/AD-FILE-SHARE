@@ -163,3 +163,72 @@ def format_ram_report() -> str:
         "per-bot split is an estimate — Telegram/Render only see the total.",
     ]
     return "\n".join(lines)
+
+
+def format_ram_report() -> str:
+    """v4.7 /checkram: RAM usage of the ONE process that hosts BOTH bots.
+
+    Bot 1 and Bot 2 are two python-telegram-bot Applications inside a single
+    Python process, so the OS only tracks ONE footprint — the process total
+    IS what Render counts against the plan. The per-bot split below is an
+    in-process estimate (dispatcher thread stacks), not separate processes.
+    Prefers psutil; falls back to /proc/self so it also works without it."""
+    vm = None
+    peak = None
+    try:
+        import psutil
+        p = psutil.Process()
+        mi = p.memory_info()
+        total = getattr(mi, "rss", 0) or 0
+        vms = getattr(mi, "vms", 0) or 0
+        try:
+            with open("/proc/self/status") as fh:
+                for line in fh:
+                    if line.startswith("VmHWM:"):
+                        peak = int(line.split()[1]) * 1024
+                        break
+        except Exception:
+            peak = None
+        vm = psutil.virtual_memory()
+    except Exception:
+        def _read_kb(field):
+            try:
+                with open("/proc/self/status") as fh:
+                    for line in fh:
+                        if line.startswith(field):
+                            return int(line.split()[1]) * 1024
+            except Exception:
+                return None
+            return None
+        total = _read_kb("VmRSS:") or 0
+        vms = _read_kb("VmSize:") or 0
+        peak = _read_kb("VmHWM:")
+
+    def mb(n):
+        return f"{n / 1024 / 1024:.1f} MB" if n else "?"
+
+    # ~3 dispatcher/handler threads per bot, ~2 MB reserved stack each.
+    bot_share = 3 * 2 * 1024 * 1024
+    shared = max(total - 2 * bot_share, 0)
+    lines = [
+        "🖥 <b>RAM usage</b>",
+        "",
+        f"<b>Both bots (whole process):</b> {mb(total)}"
+        + (f" — peak {mb(peak)}" if peak else ""),
+        f"<b>Bot 1 (gate):</b> ~{mb(shared / 2 + bot_share)}",
+        f"<b>Bot 2 (delivery):</b> ~{mb(shared / 2 + bot_share)}",
+    ]
+    if vm is not None:
+        lines += [
+            "",
+            f"Server RAM: {mb(vm.used)} / {mb(vm.total)} ({vm.percent:.0f}% used)",
+            f"Free right now: {mb(vm.available)}",
+        ]
+    if vms:
+        lines.append(f"Virtual address space: {mb(vms)}")
+    lines += [
+        "",
+        "ℹ️ Both bots share ONE Python process (one Render service), so the "
+        "per-bot split is an estimate — Telegram/Render only see the total.",
+    ]
+    return "\n".join(lines)

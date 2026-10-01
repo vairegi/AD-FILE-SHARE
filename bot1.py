@@ -280,18 +280,15 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
 
 
 async def deliver_now(bot, chat_id, user_id, item):
-    """Issue a single-use handoff token into Bot 2 and send the Get File button."""
+    """Issue a single-use handoff token into Bot 2 and send the Get File button.
+    v4.7.1: SINGLE token in the link — Telegram caps /start payloads at 64
+    chars, so a dual-token payload would be dropped and Bot 2 would get
+    nothing. Bot 2's force-sub resume lives in the DB, not the URL."""
     settings = await db.get_settings()
     ttl = int(settings.get("token_ttl_minutes") or 10)
     token = await db.create_token(user_id, item["file_id"], ttl, kind="deliver")
-    # v4.7: the link ALSO carries a '_g' verify token. If Bot 2's own
-    # force-sub gate stops the user, their deliver token is NOT burned there
-    # and after joining they can come back through this verify token — the
-    # shortener is never solved twice.
-    verify_token = await db.create_token(user_id, item["file_id"], ttl,
-                                         kind="verify")
     deep = (f"https://t.me/{config.BOT2_USERNAME}"
-            f"?start=deliver_{item['file_id']}_{token}_{verify_token}_g")
+            f"?start=deliver_{item['file_id']}_{token}")
     text = settings.get("verify_msg") or "✅ Tap below to get your file."
     await bot.send_message(
         chat_id, text,
