@@ -904,7 +904,7 @@ async def cmd_clearbuttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addcovercaption <text|off> — extra appended after the original caption
-    of every posted cover photo (global). v4.7: formatting (bold, quote, mono,
+    of every posted cover photo (global). v4.8: formatting (bold, quote, mono,
     spoilers, links) is preserved — captured as HTML via text_html."""
     msg = update.effective_message or update.message
     text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
@@ -930,30 +930,27 @@ async def cmd_addcovercaption(update: Update, context: ContextTypes.DEFAULT_TYPE
         + (html or text),
         parse_mode="HTML" if html else None)
 
-
-
-
 @admin_only
 async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addfilecaption <text|off> — extra sent after every batch of files Bot 2
-    delivers (global). v4.7: formatting preserved (HTML). Bot 2 delivers all
-    files in ONE copyMessages batch (no per-message caption), so the extra is
-    sent as ONE formatted message right after the files."""
+    """/addfilecaption <text|off> — extra appended UNDER the caption of every
+    file Bot 2 delivers (global). v4.8: formatting preserved (HTML); the extra
+    rides in the REAL caption of each delivered file (per-file copies) — it is
+    never a separate message."""
     msg = update.effective_message or update.message
     text = ((getattr(msg, "text", None) or "").partition(" ")[2]).strip()
     if not text:
         await update.message.reply_text(
             "Usage: /addfilecaption <text>\n"
             "Formatting (bold, quote, mono, links…) is kept as typed.\n"
-            "Sent right after every delivered batch of files.\n"
+            "Appended under the caption of every delivered file.\n"
             "/addfilecaption off removes it.")
         return
     if text.lower() in ("off", "none", "reset", "clear", "-"):
         await db.update_settings({"file_caption_extra": None,
                                   "file_caption_extra_html": None})
         await update.message.reply_text(
-            "✅ File caption extra removed — delivered files arrive with no "
-            "extra text.")
+            "✅ File caption extra removed — delivered files keep their "
+            "original caption only.")
         return
     html = (getattr(msg, "text_html", "") or "").partition(" ")[2].strip()
     await db.update_settings({"file_caption_extra": text,
@@ -962,9 +959,6 @@ async def cmd_addfilecaption(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "✅ File caption extra saved (formatting kept). Preview:\n\n"
         + (html or text),
         parse_mode="HTML" if html else None)
-
-
-
 
 # ══════════════════════════════════════════════════════════════
 #  GENERAL (global)
@@ -1316,11 +1310,16 @@ async def cmd_banlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════
 def _verified_table_payload(users):
     """Bot API 10.1+ InputRichBlockTable payload — SAME proven shape as
-    /banlist (compact cells of InputRichText), is_compact=True so Telegram
-    renders it tight/small. 40 rows per page stays well under limits."""
+    /banlist (compact cells of InputRichText), is_compact=True. v4.8: each
+    Name is a RichTextUrl LINK to the user's profile (tg://user?id=...)."""
     def cell(text, code=False):
         fmt = [{"type": "code", "offset": 0, "length": len(text)}] if code else []
         return {"text": text, "entities": fmt}
+    def link_cell(text, user_id):
+        return {"text": text,
+                "entities": [{"type": "text_link",
+                              "offset": 0, "length": len(text),
+                              "url": f"tg://user?id={user_id}"}]}
     header = [cell("#"), cell("Name"), cell("Elapsed"), cell("Category"),
               cell("Link Type"), cell("Count")]
     rows, pages = [], []
@@ -1328,12 +1327,14 @@ def _verified_table_payload(users):
         name = (u.get("name") or
                 (f"@{u['username']}" if u.get("username") else None)
                 or str(u.get("user_id")))
+        name = str(name)[:20]
         el = u.get("elapsed")
         elapsed = f"{el:.0f}s" if el is not None else "—"
         cat = ", ".join(u.get("categories") or []) or "—"
         link = ", ".join(u.get("link_types") or []) or "—"
-        rows.append([cell(str(i)), cell(str(name)[:20]), cell(elapsed),
-                     cell(cat), cell(link), cell(str(u.get("count") or 1))])
+        rows.append([cell(str(i)), link_cell(name, u.get("user_id")),
+                     cell(elapsed), cell(cat), cell(link),
+                     cell(str(u.get("count") or 1))])
         if len(rows) == 40:
             pages.append(rows); rows = []
     if rows:
@@ -1351,6 +1352,11 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     midnight IST, one row per user (repeat verifications merge: count bumps,
     categories/link types append). Native compact rich table; falls back to
     paged monospace text if Telegram rejects the rich payload."""
+    raw_args = [a for a in (context.args or []) if a]
+    if raw_args and raw_args[0].isdigit():
+        await _verified_user_detail(update, context,
+                                    int(raw_args[0]), raw_args[1:])
+        return
     args = [a.lower() for a in (context.args or []) if a]
     offset = 1 if args and args[0] in ("yesterday", "yday", "-1") else 0
     users = await db.list_verified_today(offset)
@@ -1394,6 +1400,94 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not lines[-1].endswith("</pre>"):
             lines.append("</pre>")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+
+async def _verified_user_detail(update, context, user_id, extra_args):
+    """/verified_users <user_id> [yesterday] — per-FETCH detail for one user:
+    every file fetched that IST day, exact IST time, shortener solve time and
+    provider — compact rich table (text fallback for legacy rows)."""
+    offset = 1 if extra_args and str(extra_args[0]).lower() in (
+        "yesterday", "yday", "-1") else 0
+    doc = await db.get_verified_user(user_id, offset)
+    day = db.ist_today(offset)
+    if not doc:
+        await update.message.reply_text(
+            f"📭 No verifications for user {user_id} on {day} "
+            f"({'yesterday' if offset else 'today'}).")
+        return
+    name = (doc.get("name") or
+            (f"@{doc['username']}" if doc.get("username") else None)
+            or str(user_id))
+    profile = f"tg://user?id={user_id}"
+    events = doc.get("events") or []
+    if events:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        rows = []
+        for i, ev in enumerate(events, 1):
+            ist = _dt.datetime.fromtimestamp(
+                float(ev.get("at") or 0), tz=_ZI("Asia/Kolkata"))
+            file_id = str(ev.get("file_id") or "—")
+            flink = (f"https://t.me/{config.BOT1_USERNAME}"
+                     f"?start=file_{file_id}") if file_id != "—" else ""
+            label = str(ev.get("category") or file_id)[:14]
+            el = ev.get("elapsed")
+            rows.append([
+                {"text": str(i)},
+                ({"text": label,
+                  "entities": [{"type": "text_link", "offset": 0,
+                                "length": len(label), "url": flink}]}
+                 if flink else {"text": label}),
+                {"text": ist.strftime("%H:%M:%S")},
+                {"text": (f"{el:.0f}s" if el is not None else "—")},
+                {"text": str(ev.get("link_type") or "—")[:12]}])
+        header = [{"text": c} for c in ("#", "File", "IST time", "Solve", "Via")]
+        pl = {"chat_id": update.effective_chat.id,
+              "rich_message": {"blocks": [
+                  {"type": "table", "is_compact": True,
+                   "cells": [header] + rows}]},
+              "disable_notification": False}
+        try:
+            await update.message.reply_text(
+                f'👤 <a href="{profile}">{_h(name)}</a> — {day}: '
+                f'{int(doc.get("count") or 1)} fetch(es)',
+                parse_mode="HTML", disable_web_page_preview=True)
+            await context.bot._post("sendRichMessage", data=pl)
+            return
+        except Exception as exc:
+            log.warning("rich user detail failed (%s); text fallback", exc)
+    lines2 = [f'👤 <a href="{profile}">{_h(name)}</a> (id <code>{user_id}</code>)',
+              f"Day: {day} ({'yesterday' if offset else 'today'})",
+              f"Fetches: {int(doc.get('count') or 1)}",
+              f"Categories: {_h(', '.join(doc.get('categories') or []) or '—')}",
+              f"Providers: {_h(', '.join(doc.get('link_types') or []) or '—')}",
+              f"Last solve time: {(str(int(doc.get('elapsed'))) + 's') if doc.get('elapsed') is not None else '—'}"]
+    if events:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        lines2.append("")
+        for i, ev in enumerate(events, 1):
+            ist = _dt.datetime.fromtimestamp(
+                float(ev.get("at") or 0), tz=_ZI("Asia/Kolkata"))
+            fid = str(ev.get("file_id") or "—")
+            flink = (f"https://t.me/{config.BOT1_USERNAME}?start=file_{fid}"
+                     if fid != "—" else "")
+            el = ev.get("elapsed")
+            entry = (f'{i}. <a href="{flink}">{_h(fid)}</a>'
+                     if flink else f"{i}. {_h(fid)}")
+            lines2.append(
+                f"{entry} — {ist.strftime('%H:%M:%S')} IST — "
+                f"{(f'{el:.0f}s' if el is not None else '—')} — "
+                f"{_h(str(ev.get('link_type') or '—'))}")
+    else:
+        lines2.append("")
+        lines2.append("ℹ️ Per-file times start recording from v4.8; "
+                      "older verifications only have the totals above.")
+    await update.message.reply_text("\n".join(lines2), parse_mode="HTML",
+                                    disable_web_page_preview=True)
+
+
 
 
 def _md_to_html(text):
@@ -2288,6 +2382,12 @@ async def cmd_checkram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_ram_report(), parse_mode="HTML")
 
 
+@admin_only
+async def cmd_checkram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/checkram — RAM of the single process that hosts BOTH bots."""
+    await update.message.reply_text(format_ram_report(), parse_mode="HTML")
+
+
 COMMANDS = {
     "shortener": cmd_shortener,
     "shortenerapi": cmd_shortenerapi,
@@ -2315,6 +2415,7 @@ COMMANDS = {
     "clearbuttons": cmd_clearbuttons,
     "addcovercaption": cmd_addcovercaption,
     "addfilecaption": cmd_addfilecaption,
+    "checkram": cmd_checkram,
     "checkram": cmd_checkram,
     "addadmin": cmd_addadmin,
     "setforcesub": cmd_setforcesub,

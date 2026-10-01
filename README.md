@@ -785,3 +785,30 @@ asserted to be a string.
 * Also fixed: duplicate `/broadcast`+`/checkram` registration, orphaned
   payload-style `send_force_sub`, and added a regression test asserting the
   Get File payload is <= 64 chars for long category-prefixed file_ids.
+
+
+---
+
+## v4.7 / v4.7.1 / v4.8 — consolidated update
+
+* **Bot 2 force-sub gate** (same /setforcesub list as Bot 1): gates both
+  delivery and a bare /start. v4.7.1: the pending delivery lives in the DB —
+  the Get File link stays SINGLE-token (Telegram caps /start payloads at 64
+  chars; the v4.7 dual-token link was silently dropped). "I've Joined"
+  resumes the pending delivery with a fresh token; a gated bare /start
+  re-sends the user's held files all at once after joining.
+* **Bot 2 /broadcast** — same UX as Bot 1 (timer question first, paced
+  ~3/sec, 429 retry_after, restart-safe deletion queue tagged bot2);
+  audience = ONLY users who started Bot 2.
+* **/checkram** on both bots: process RSS (what Render bills), peak, per-bot
+  estimate, server RAM. New dep: psutil.
+* **/help regrouped** on both bots; Bot 2 admin menu registered per-chat.
+* **v4.8 — /addfilecaption rides UNDER each file's own caption** (per-file
+  copy_message with the extra appended, formatting kept as HTML). All files
+  still arrive back-to-back in one go; one auto-delete entry per post.
+  /addcovercaption keeps formatting the same way.
+* **v4.8 — /verified_users: names are profile links** (tg://user?id=…).
+* **v4.8 — /verified_users <user_id> [yesterday]**: per-fetch detail — rich
+  table with one row per fetch: file (linked back into the Download flow),
+  exact IST time, shortener solve time, provider. Per-fetch events start
+  recording at deploy; older days show totals only.

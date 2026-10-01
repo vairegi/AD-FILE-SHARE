@@ -127,7 +127,9 @@ HELP_ADMIN = (
     "/ban &lt;user_id&gt; · /unban &lt;user_id&gt; · /banlist\n"
     "/banmessage &lt;text|reply|reset&gt; — the banned-user notice\n"
     "/addadmin &lt;user_id&gt; — promote an admin\n"
-    "/verified_users [yesterday] — today's verifications as a table\n"
+    "/verified_users [yesterday] — rich table; names link to profiles (v4.8)\n"
+    "/verified_users &lt;user_id&gt; — that user's fetches today (file, IST time, solve time)\n"
+    "/checkram — RAM usage: both bots together + per-bot estimate"
     "/checkram — RAM usage: both bots together + per-bot estimate"
     "\n\n<b>▸ Genres &amp; browse menu</b> (v4.4)\n"
     "/addgenre &lt;pipeline&gt; &lt;genre&gt; — add a genre (one-time caption scan, then auto)\n"
@@ -417,6 +419,9 @@ async def process_verify(bot, chat_id, user_id, file_id, token,
         await db.record_verification(
             user_id, name=_name, username=username, elapsed=elapsed,
             category=_cat0, link_type=_lt)
+        await db.add_verification_event(
+            user_id, file_id=file_id, category=_cat0,
+            elapsed=elapsed, link_type=_lt)   # v4.8: per-fetch detail
     except Exception as exc:
         log.warning("verification log failed (never blocks delivery): %s", exc)
     settings = await db.get_settings()
@@ -527,12 +532,13 @@ async def _post_cover(bot, post_channel, db_channel, item, markup, styled=False)
     _cc_extra = _s_cc.get("cover_caption_extra")
     caption_pm = None
     if _cc_html:
-        # v4.7: the /addcovercaption extra keeps its formatting — the stored
-        # HTML is appended as HTML so bold/quote/mono/links survive the post.
         caption = (caption + "\n" + str(_cc_html).strip()).strip()
         caption_pm = "HTML"
     elif _cc_extra:
         caption = (caption + "\n" + str(_cc_extra).strip()).strip()
+        # v4.8: /addcovercaption extra keeps its formatting (HTML).
+        # v4.7: the /addcovercaption extra keeps its formatting — the stored
+        # HTML is appended as HTML so bold/quote/mono/links survive the post.
     photo_fid = item.get("cover_file_id")
     api_kwargs = ({"reply_markup": _build_styled_markup(markup).to_dict()}
                   if styled else None)

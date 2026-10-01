@@ -76,6 +76,8 @@ DEFAULT_SETTINGS = {
     "post_buttons": [],              # v4.0: extra channel-post buttons (/addbutton) — {label, url, color}
     "cover_caption_extra": None,     # v4.0: appended to every posted cover caption (/addcovercaption)
     "file_caption_extra": None,      # v4.0: appended to every delivered file caption (/addfilecaption)
+    "cover_caption_extra_html": None,  # v4.7+: HTML variant keeps bold/quote/mono/links
+    "file_caption_extra_html": None,
     "cover_caption_extra_html": None,  # v4.7: HTML variant keeps bold/quote/mono/links
     "file_caption_extra_html": None,
     "cover_caption_extra_html": None,  # v4.7: HTML variant keeps bold/quote/mono/links
@@ -471,6 +473,15 @@ async def all_user_ids():
 
 
 async def all_user_ids_for(bot=None):
+    """Audience of ONE bot. bot2 -> only users who started Bot 2 (explicitly
+    tagged). Any other value -> every user (legacy behaviour)."""
+    if bot == "bot2":
+        cur = _db.users.find({"bots": "bot2"}, {"user_id": 1})
+        return [d["user_id"] async for d in cur]
+    return await all_user_ids()
+
+
+async def all_user_ids_for(bot=None):
     """Audience of ONE bot. bot2 -> only users who started Bot 2
     (explicitly tagged). Any other value -> every user (legacy)."""
     if bot == "bot2":
@@ -821,6 +832,35 @@ async def clear_pending_delivery(user_id):
 
 
 async def pending_delivery_message_ids(chat_id):
+    """v4.7: every not-yet-deleted message id delivered to this chat."""
+    cur = _db.deletions.find({"chat_id": chat_id}, {"message_ids": 1})
+    out = set()
+    async for d in cur:
+        out.update(d.get("message_ids") or [])
+    return sorted(x for x in out if x)
+
+
+# --- pending deliveries (v4.7.1: Bot 2 force-sub resume) ---
+# Stored on the USER doc — NOT in the deep link or callback_data, because
+# Telegram caps /start payloads at 64 chars and callback_data at 64 bytes.
+async def set_pending_delivery(user_id, file_id):
+    await _db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"pending_delivery": {"file_id": file_id, "at": now()}}},
+        upsert=True)
+
+
+async def get_pending_delivery(user_id):
+    d = await _db.users.find_one({"user_id": user_id}, {"pending_delivery": 1})
+    return (d or {}).get("pending_delivery")
+
+
+async def clear_pending_delivery(user_id):
+    await _db.users.update_one(
+        {"user_id": user_id}, {"$unset": {"pending_delivery": ""}})
+
+
+async def pending_delivery_message_ids(chat_id):
     """v4.7: every not-yet-auto-deleted message id delivered to this chat —
     i.e. the files the user currently holds, used by Bot 2's sub_ resume to
     re-deliver everything at once after the force-sub gate passes."""
@@ -1012,6 +1052,26 @@ async def list_verified_today(offset_days=0):
     cur = _db.verification_logs.find(
         {"date": ist_today(offset_days)}).sort("count", -1)
     return [d async for d in cur]
+
+
+async def add_verification_event(user_id, file_id=None, category=None,
+                                 elapsed=None, link_type=None, date=None):
+    """v4.8: one sub-document per successful fetch — powers the per-user
+    detail view (/verified_users <id>): exact IST time, which file, how long
+    the shortener took, which provider."""
+    await _db.verification_logs.update_one(
+        {"date": date or ist_today(), "user_id": user_id},
+        {"$push": {"events": {"file_id": file_id, "category": category,
+                              "elapsed": (float(elapsed)
+                                          if elapsed is not None else None),
+                              "link_type": link_type, "at": now()}}},
+        upsert=True)
+
+
+async def get_verified_user(user_id, offset_days=0):
+    """v4.8: one user's verification row (with per-event detail) for a day."""
+    return await _db.verification_logs.find_one(
+        {"date": ist_today(offset_days), "user_id": user_id})
 
 
 async def purge_old_verifications():
