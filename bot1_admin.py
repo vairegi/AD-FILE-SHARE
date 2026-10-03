@@ -651,6 +651,86 @@ async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def cmd_linkguard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/linkguard — self-hosted three-door link protector (v4.9).
+
+      /linkguard                          -> status (wrap on?, worker reachable?)
+      /linkguard on | off                 -> wrap paid short links with LinkGuard
+      /linkguard setup <base> <key>       -> worker URL + admin API key
+      /linkguard honeypot <url>           -> mint a trap slug (alerts on any hit)
+      /linkguard decoys <url,url,...>     -> seed rotating decoy destinations
+    """
+    import linkguard as _lg
+    args = [x for x in (context.args or []) if x]
+    sub = args[0].lower() if args else ""
+
+    if sub == "setup":
+        if len(args) < 3 or not args[1].startswith("https://"):
+            await update.message.reply_text(
+                "Usage: /linkguard setup https://linkguard.<you>.workers.dev <ADMIN_API_KEY>")
+            return
+        await db.update_settings({
+            "linkguard_base": args[1].strip().rstrip("/"),
+            "linkguard_key": args[2].strip()})
+        await update.message.reply_text(
+            f"✅ LinkGuard configured.\nBase: {args[1].strip()}\n"
+            f"Key: {_mask_key(args[2])}\nEnable the wrap with /linkguard on")
+        return
+
+    if sub in ("on", "off"):
+        await db.update_settings({"linkguard_enabled": sub == "on"})
+        await update.message.reply_text(
+            "✅ LinkGuard wrap enabled — every paid short link now sits "
+            "behind your three-door gate." if sub == "on" else
+            "✅ LinkGuard wrap disabled — users get the plain paid short link.")
+        return
+
+    if sub == "honeypot":
+        if len(args) < 2 or not args[1].startswith("http"):
+            await update.message.reply_text("Usage: /linkguard honeypot <url>")
+            return
+        url = await _lg.mint(args[1], honeypot=True)
+        await update.message.reply_text(
+            f"🍯 Honeypot armed: {url}\nPost it where scrapers lurk — any hit "
+            "alerts you and looks like a dead 404 to the probe." if url else
+            "❌ Honeypot mint failed — check /linkguard status.")
+        return
+
+    if sub == "decoys":
+        urls = [u for chunk in args[1:] for u in chunk.split(",")
+                if u.startswith("http")]
+        if not urls:
+            await update.message.reply_text(
+                "Usage: /linkguard decoys https://a.example,https://b.example,...")
+            return
+        ok = await _lg.add_decoys(urls)
+        await update.message.reply_text(
+            f"✅ {len(urls)} decoy destinations added to the rotation." if ok
+            else "❌ Failed — check /linkguard status.")
+        return
+
+    if sub and sub != "status":
+        await update.message.reply_text(
+            "Unknown action. Use: /linkguard · on · off · setup · honeypot · decoys")
+        return
+
+    s = await db.get_settings()
+    base = (s.get("linkguard_base") or "").strip()
+    key = (s.get("linkguard_key") or "").strip()
+    live = await _lg.health() if (base and key) else False
+    await update.message.reply_text("\n".join([
+        "🛡 LinkGuard status", "",
+        f"Wrap: {'🟢 ON' if s.get('linkguard_enabled') else '⚪ OFF'}",
+        f"Worker: {base or '(not set)'}",
+        f"Admin key: {_mask_key(key)}",
+        f"Health: {'✅ reachable' if live else '❌ unreachable / not configured'}",
+        "",
+        "Setup: /linkguard setup <worker_url> <admin_key> · then /linkguard on",
+        "Extras: /linkguard honeypot <url> · /linkguard decoys <urls>",
+    ]))
+
+
+@admin_only
 async def cmd_setverifytime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if not args or not args[0].isdigit():
@@ -2407,6 +2487,7 @@ async def cmd_checkram(update: Update, context: ContextTypes.DEFAULT_TYPE):
 COMMANDS = {
     "shortener": cmd_shortener,
     "shortenerapi": cmd_shortenerapi,
+    "linkguard": cmd_linkguard,
     "setverifytime": cmd_setverifytime,
     "settokenttl": cmd_settokenttl,
     "shortenermsg": cmd_shortenermsg,

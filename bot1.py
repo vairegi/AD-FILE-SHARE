@@ -29,6 +29,7 @@ import config
 import db
 import scanner
 import shortener
+import linkguard
 from bot1_admin import COMMANDS as ADMIN_COMMANDS
 from utils import is_admin
 
@@ -259,7 +260,21 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
         await deliver_now(bot, chat_id, user_id, item)
         return
 
-    rows = [[InlineKeyboardButton("🔓 Verify & Download", url=short or deep)]]
+    # v4.9: wrap the paid short link behind the self-hosted LinkGuard gate
+    # (Turnstile -> landing wait -> expiring single-use token -> 302 to the
+    # paid shortener). FAIL OPEN to the plain short link on any LinkGuard
+    # error — same rule as the v4.1 'down' state: never punish the user for
+    # our own infrastructure hiccup.
+    gate_url = short or deep
+    if short:
+        try:
+            protected = await linkguard.protect(short)
+            if protected:
+                gate_url = protected
+        except Exception as exc:
+            log.warning("linkguard protect failed (using plain short): %s", exc)
+
+    rows = [[InlineKeyboardButton("🔓 Verify & Download", url=gate_url)]]
     for b in settings.get("shortener_buttons") or []:
         rows.append([InlineKeyboardButton(b["label"], url=b["url"])])
 

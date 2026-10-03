@@ -827,3 +827,23 @@ Bot 1's group-1 text handlers (broadcast timer answer, edit/add wizard) are now 
 ## v4.8.3 — delivery restored to the proven per-file path
 
 The v4.7 copyMessages batch call failed in production (400 'Chat not found' from Telegram on every Get File). Delivery is back to per-file copy_message — every video + subtitle still arrives back-to-back in one go, and /addfilecaption rides UNDER each file's caption. Failure logs now name the exact channel + message id.
+
+---
+
+## v4.9.0 (2026-10-03) — LinkGuard: self-hosted three-door link protection
+
+New optional layer in front of the paid shorteners: our own Cloudflare
+Worker (`linkguard-worker/`) adds Turnstile proof-of-humanity, a nonce-bound
+landing session with a 15s wait and decoy fan-out, and a final
+HMAC-signed, single-use, 90s, IP+UA-bound, Referer-allowlisted `/finish`
+redirect. The paid shortener (VPLinks/AroLinks) still runs AFTER our gate —
+the user journey gains three doors, loses nothing.
+
+Bot side: new `linkguard.py` client + `/linkguard` admin command
+(setup / on / off / status / honeypot / decoys). In `send_shortener_gate`
+the paid short link is minted first, then wrapped with LinkGuard; ANY
+LinkGuard failure fails OPEN to the plain short link (same rule as v4.1's
+'down' state — users never pay for our outage). The 150s anti-bypass gate
+is untouched: the landing wait is 15s by design. Honeypot hits, IP/UA
+mismatches and binding anomalies DM the admins via Bot 1.
+See linkguard-worker/ARCHITECTURE.md and DEPLOYMENT.md.
