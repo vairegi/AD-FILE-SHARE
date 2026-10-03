@@ -235,8 +235,24 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
     # inside Bot 2's Get File link (deliver_now) carries '_g'.
     deep = (f"https://t.me/{config.BOT1_USERNAME}"
             f"?start=verify_{item['file_id']}_{token}")
+    # v4.9.1: mint the Door-3 EXIT grant first - the paid shortener's
+    # destination becomes /finish2?s=..&t=.. (lg_s cookie + UA + shortener
+    # Referer + single-use 60-min grant), NOT the raw deep link. A copied
+    # shortener URL is now worthless outside the original verified browser
+    # session. Runs only when LinkGuard is enabled (finish2 needs the
+    # landing session cookie); fail-open to the raw deep link on any error.
+    shortener_target = deep
+    grant_slug = None
+    if await linkguard.enabled():
+        try:
+            grant = await linkguard.mint_return_grant(deep)
+            if grant:
+                shortener_target = grant["finish2_url"]
+                grant_slug = grant["slug"]
+        except Exception as exc:
+            log.warning("linkguard mint2 failed (shortener wraps raw deep link): %s", exc)
     short, state, site, failures = await shortener.shorten(
-        deep, user_id=user_id, with_status=True)
+        shortener_target, user_id=user_id, with_status=True)
     # v4.1: record on the token whether a LIVE shortener served it — the
     # anti-bypass ban in process_verify only applies to 'active' tokens.
     await db.set_token_shortener(token, site, state=state)
@@ -268,7 +284,7 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
     gate_url = short or deep
     if short:
         try:
-            protected = await linkguard.protect(short)
+            protected = await linkguard.protect(short, grant_slug=grant_slug)
             if protected:
                 gate_url = protected
         except Exception as exc:

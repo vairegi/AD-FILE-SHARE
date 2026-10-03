@@ -549,6 +549,17 @@ def _mask_key(key):
     return f"{key[:4]}...{key[-4:]}"
 
 
+async def _sync_ref_hosts():
+    """v4.9.1: best-effort push of the ACTIVE shortener domains to LinkGuard's
+    /finish2 Referer allowlist after every /shortenerapi change."""
+    try:
+        import linkguard as _lg
+        if await _lg.enabled():
+            await _lg.push_ref_hosts()
+    except Exception:
+        pass
+
+
 @admin_only
 async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/shortenerapi — multi-shortener round-robin dashboard (v3.2).
@@ -591,6 +602,7 @@ async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Shortener '{doc['site']}' added to the rotation.\n"
             f"Base: {doc['api_base']}\nKey: {_mask_key(doc['api_key'])}\n"
             f"Live self-test: {live}")
+        await _sync_ref_hosts()
         return
 
     if sub in ("pause", "resume"):
@@ -607,6 +619,7 @@ async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  if sub == "pause" else " It is back in the rotation.")
         await update.message.reply_text(
             f"{icon} '{args[1].lower()}' is now {target}.{extra}")
+        await _sync_ref_hosts()
         return
 
     if sub in ("remove", "delete"):
@@ -619,6 +632,7 @@ async def cmd_shortenerapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await update.message.reply_text(
             f"🗑 '{args[1].lower()}' removed from the database and rotation.")
+        await _sync_ref_hosts()
         return
 
     if sub and sub not in ("status", "list"):
@@ -657,6 +671,7 @@ async def cmd_linkguard(update: Update, context: ContextTypes.DEFAULT_TYPE):
       /linkguard                          -> status (wrap on?, worker reachable?)
       /linkguard on | off                 -> wrap paid short links with LinkGuard
       /linkguard setup <base> <key>       -> worker URL + admin API key
+      /linkguard refhosts                 -> push shortener Referer allowlist
       /linkguard honeypot <url>           -> mint a trap slug (alerts on any hit)
       /linkguard decoys <url,url,...>     -> seed rotating decoy destinations
     """
@@ -685,6 +700,19 @@ async def cmd_linkguard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ LinkGuard wrap disabled — users get the plain paid short link.")
         return
 
+    if sub == "refhosts":
+        hosts = await _lg.shortener_hosts()
+        ok = await _lg.push_ref_hosts()
+        if ok:
+            listing = "\n".join(f"• {h}" for h in hosts) or "(none active)"
+            await update.message.reply_text(
+                f"✅ Referer allowlist pushed to LinkGuard ({len(hosts)} hosts):\n"
+                + listing)
+        else:
+            await update.message.reply_text(
+                "❌ Push failed - check /linkguard status.")
+        return
+
     if sub == "honeypot":
         if len(args) < 2 or not args[1].startswith("http"):
             await update.message.reply_text("Usage: /linkguard honeypot <url>")
@@ -711,7 +739,7 @@ async def cmd_linkguard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if sub and sub != "status":
         await update.message.reply_text(
-            "Unknown action. Use: /linkguard · on · off · setup · honeypot · decoys")
+            "Unknown action. Use: /linkguard · on · off · setup · refhosts · honeypot · decoys")
         return
 
     s = await db.get_settings()
@@ -726,7 +754,7 @@ async def cmd_linkguard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Health: {'✅ reachable' if live else '❌ unreachable / not configured'}",
         "",
         "Setup: /linkguard setup <worker_url> <admin_key> · then /linkguard on",
-        "Extras: /linkguard honeypot <url> · /linkguard decoys <urls>",
+        "Extras: /linkguard refhosts · honeypot <url> · decoys <urls>",
     ]))
 
 

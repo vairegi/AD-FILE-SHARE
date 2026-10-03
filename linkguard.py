@@ -1,5 +1,11 @@
-"""LinkGuard client (v1.0) — bot-side helper for the self-hosted three-door
+"""LinkGuard client (v1.1) — bot-side helper for the self-hosted three-door
 link protector running on Cloudflare Workers.
+
+v1.1: adds the Door-3 EXIT grant (mint_return_grant) — the paid shortener's
+destination becomes /finish2?s=..&t=.. instead of the raw Telegram deep link,
+so a copied shortener URL is worthless outside the original verified browser
+session. Also adds push_ref_hosts() to sync the /finish2 Referer allowlist
+from the live /shortenerapi registry.
 
 The Worker holds the slug -> destination mapping; the bots only ever see the
 short URL. All calls are signed with the shared ADMIN_API_KEY. Fail-open: on
@@ -8,6 +14,7 @@ paid-shortener path (mirroring shortener.py's 'down' semantics — never punish
 the user for our outage).
 """
 import logging
+from urllib.parse import urlparse
 
 import httpx
 
@@ -31,24 +38,84 @@ async def enabled() -> bool:
     return bool(s.get("linkguard_enabled"))
 
 
-async def mint(destination: str, ttl_days=None, honeypot: bool = False):
-    """Create a protected slug for `destination`. Returns the short URL or None."""
+async def shortener_hosts():
+    """Hostnames of every ACTIVE paid shortener — the /finish2 Referer
+    allowlist (v1.1). Derived from the live /shortenerapi registry, so any
+    provider added via '/shortenerapi add' is covered automatically."""
+    hosts = []
+    try:
+        for e in await db.active_shorteners():
+            h = urlparse((e.get("api_base") or "").strip()).hostname
+            if h:
+                hosts.append(h.lower())
+    except Exception as exc:
+        log.warning("shortener_hosts failed: %s", exc)
+    return sorted(set(hosts))
+
+
+async def mint(destination: str, ttl_days=None, honeypot: bool = False,
+               grant_slug: str = None):
+    """Create a protected slug for `destination`. Returns the short URL or None.
+    grant_slug (v1.1) links this public slug to its finish2 exit grant."""
+    base, key = await _cfg()
+    if not base:
+        return None
+    payload = {"destination": destination,
+               "ttl_days": ttl_days, "honeypot": honeypot}
+    if grant_slug:
+        payload["grant_slug"] = grant_slug
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(f"{base}/api/admin/mint",
+                                  headers={"x-admin-key": key},
+                                  json=payload)
+            r.raise_for_status()
+            return (r.json() or {}).get("url")
+    except Exception as exc:
+        log.warning("linkguard mint failed: %s", exc)
+        return None
+
+
+async def mint_return_grant(final_destination: str):
+    """v1.1: mint the Door-3 EXIT grant for the Telegram deep link.
+    Returns {'slug', 'finish2_url', 'expires_at'} or None (fail-open).
+    ONLY call this when the front gate is enabled — finish2 requires the
+    landing session cookie to exist."""
     base, key = await _cfg()
     if not base:
         return None
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.post(
-                f"{base}/api/admin/mint",
+                f"{base}/api/admin/mint2",
                 headers={"x-admin-key": key},
-                json={"destination": destination,
-                      "ttl_days": ttl_days, "honeypot": honeypot},
+                json={"final_destination": final_destination,
+                      "ref_hosts": await shortener_hosts()},
             )
             r.raise_for_status()
-            return (r.json() or {}).get("url")
+            d = r.json() or {}
+            if d.get("finish2_url") and d.get("slug"):
+                return d
     except Exception as exc:
-        log.warning("linkguard mint failed: %s", exc)
-        return None
+        log.warning("linkguard mint2 failed: %s", exc)
+    return None
+
+
+async def push_ref_hosts() -> bool:
+    """v1.1: replace the Worker's global shortener-Referer allowlist with the
+    current ACTIVE /shortenerapi domains."""
+    base, key = await _cfg()
+    if not base:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(f"{base}/api/admin/ref_hosts",
+                                  headers={"x-admin-key": key},
+                                  json={"hosts": await shortener_hosts()})
+            return bool(r.json().get("ok"))
+    except Exception as exc:
+        log.warning("linkguard ref_hosts push failed: %s", exc)
+        return False
 
 
 async def revoke(slug: str) -> bool:
@@ -93,8 +160,8 @@ async def health() -> bool:
         return False
 
 
-async def protect(long_url: str):
+async def protect(long_url: str, grant_slug: str = None):
     """Mint a LinkGuard short URL for long_url, or None (fail-open)."""
     if not await enabled():
         return None
-    return await mint(long_url)
+    return await mint(long_url, grant_slug=grant_slug)
