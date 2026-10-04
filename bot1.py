@@ -115,6 +115,13 @@ HELP_ADMIN = (
     "/setverifytime &lt;hours&gt; · /settokenttl &lt;minutes&gt;\n"
     "/shortenermsg · /shortenerbotmsg · /verifymsg\n"
     "/shortenerbtn &lt;label&gt; | &lt;url&gt; · /clearshortenerbtns\n"
+    "\n"
+
+    "🛡 &lt;b&gt;LinkGuard (link protection)&lt;/b&gt;\n"
+
+    "/linkguard · /linkguard on|off · /linkguard setup &lt;url&gt; &lt;key&gt;\n"
+
+    "/linkguard refhosts · /linkguard honeypot &lt;url&gt; · /linkguard decoys &lt;urls&gt;\n"
     "\n<b>▸ Channel posts</b>\n"
     "/addbutton &lt;label&gt; | &lt;link&gt; [| green|blue|red] — extra button under every post\n"
     "/buttons · /removebutton &lt;n&gt; · /clearbuttons — manage extra buttons\n"
