@@ -1,849 +1,271 @@
-# Telegram Video Bots — single-service, two-bot deployment
+================================================================================
+v52 - LIVE WORKER SESSIONS (/addworker) + RICH-TABLE /stats
+================================================================================
+Files changed: db.py, session_manager.py, bot.py, botapi.py, richboard.py.
 
-A production-ready Python project hosting **two Telegram bots inside ONE process**
-so they fit comfortably on a single Render free-tier Web Service (512 MB).
+/addworker <session string> adds a scraping worker LIVE — validated, stored in
+Mongo (config.extra_sessions), attached to the rotation with no redeploy. Bare
+/addworker lists all workers ([env] / [bot#k]); /removeworker <bot#> removes a
+bot-added one. /stats now renders a compact Bot API rich table (one row per
+worker, emoji membership matrix) with a chunked plain-text fallback.
 
-* **Bot 1 — Gate / Link bot**: drip-posts daily covers to a public channel,
-  runs the force-subscribe gate, the monetised shortener verification gate,
-  and carries the full admin panel.
-* **Bot 2 — File Delivery bot**: validates a short-lived single-use token and
-  delivers the video by **server-side copy** from the private Database Channel.
+================================================================================
+v48 - CAPTION REWRITE + WORKING /avoid (Render bot)
+================================================================================
+Files changed: botapi.py  (README.md, README_PATCH.txt updated). No other file
+touched. Deploy: replace botapi.py in the repo root and redeploy Render.
 
-```
-Telegram ──► /bot1/webhook ──┐
-Telegram ──► /bot2/webhook ──┤  single FastAPI + uvicorn process
-                             └─► shared MongoDB Atlas cluster
-```
+FIX 1 - every @username in a DB->DB2 caption becomes @NSFW_Universe
+  * _clean_caption no longer DELETES handles; _swap_mentions rewrites them.
+  * Catches plain "@user", markdown-wrapped **@user** / __@user__ / `@user`,
+    unicode-styled handles (math-sans-bold @𝘼𝘿... "adult",
+    small caps, circled letters), fullwidth "＠user" and "@user_bot".
+  * Styling is folded away first (NFKD + combining-mark strip), so a styled
+    handle folds to its ASCII letters before the swap.
+  * A caption already containing @NSFW_Universe is left untouched (no doubling).
+  * URLs (t.me / telegram.me / http) are still stripped exactly as before.
 
----
+FIX 2 - /avoid and /avoidtext now actually strip text out of captions
+  WHY IT FAILED: the old code did `t.replace(a, "")` - a byte-exact match. Your
+  entries ("Bagairat 1 And 2 Full Movie...", "You😂 naughty 😈 And
+  Something", "💗Channel -@AdultX_Horizon", "Due TO COPYRIGHT ISSUES..")
+  never matched the live caption because the CAPTION differed in SPACING, LETTER
+  CASE, ".." vs "...", or used a unicode-STYLED handle instead of ASCII.
+  NOTE: text sent as its OWN message was already dropped; only caption text
+  survived - exactly the symptom reported.
 
-## 1. The user flow in one picture
+  NEW MATCHING (two passes per avoid string):
+   1) whole-line pass - line key = NFKD-fold, lowercase, strip leading list
+      number, drop all punctuation/emoji; an entry matches a line when the key
+      equals the line key OR covers >=50% of it. So "12. text" also matches a
+      bare "text" line, ANY list number matches, and "Due TO COPYRIGHT ISSUES.."
+      matches "...ISSUES..." in the caption.
+   2) inline pass - whitespace- and dot-flexible regex (re.I) over the line,
+      using the folded entry, so embedded occurrences are removed too.
+  LEFT-OVER DEBRIS: after the strip, any line with no LETTER left at all is
+  removed - bare "1." / "8." list numbers, "┏━━━" rule lines
+  and emoji-only residue can no longer reappear in DB2. Normal lines such as
+  "1080p Sub MKV | Episode 3" are never touched.
 
-1. Admin uploads videos to the private **Database Channel**
-   (`cover → 1-2 videos → optional .srt` posts).
-2. `/scandb <channel_id>` (Telethon userbot) indexes the whole channel into
-   MongoDB, grouped into items, oldest first, `posted: false`.
-3. Every day at `post_time`, a cover (thumbnail + caption + a green full-width
-   **Download** button, plus any `/addbutton` extras) is posted to the public
-   **Posting Channel**; the item is flipped to `posted: true`.
-4. User taps **Download** → Bot 1 DM (`/start file_<id>`).
-5. **Gate 1 — force-subscribe**: not a member → *Join Channel* + *I've Joined ✅*.
-6. **Gate 2 — shortener**: sends a VPLinks-wrapped `verify_…` deep link back to Bot 1.
-7. User finishes the shortener, lands back, is marked verified **for one file only**,
-   and receives a **Get File** button → Bot 2.
-8. Bot 2 validates the token (single-use, TTL, bound to that user) and **copies**
-   the video from the Database Channel to the user.
-9. The delivered message is queued for **auto-deletion** after the configured window.
+TESTS RUN IN SANDBOX (real _clean_caption extracted from the patched file):
+  20/20 checks pass - 6 mention cases (plain, styled, bold, mono, fullwidth,
+  styled+underscore), 8 /avoid cases (exact, case+dots, multiline, numbered
+  paste, styled-vs-ASCII, dash+renumbered, rule dust, handle-only), 6 end-to-end
+  checks (realistic DB2 caption, idempotency, no over-strip, all-avoided -> empty,
+  long caption preserved). All 14 repo modules compile.
+================================================================================
 
----
+================================================================================
+v46 — DUPLICATE-DETECTION HARDENING (Render bot)
+================================================================================
+Files changed: dedup.py, botapi.py (README.md, README_PATCH.txt updated).
 
-## 2. Files
+WHY: identical DB2 cover captions sometimes skipped, sometimes not. Root cause
+was index FRESHNESS, not the fuzzy matcher:
+  1) _FPS loaded from Mongo once per process and never refreshed — a fingerprint
+     pushed by the LAPTOP script was invisible to the long-running Render bot
+     until its next restart.
+  2) note_scraped()'s Mongo push failed silently -> RAM-only fingerprint, lost
+     on restart.
+  3) note_scraped() fingerprinted the RAW target caption, not the CLEANED
+     caption that actually lands in DB2 (/avoid, /replaceword, link strip).
 
-| File | Purpose |
-|------|---------|
-| `main.py` | FastAPI app: lifespan starts/stops both bots, registers webhooks, `/health`, both webhook routes |
-| `bot1.py` | Bot 1 handlers, posting queue, gates, deep links |
-| `bot1_admin.py` | All Bot 1 admin commands (each guarded by `@admin_only`) |
-| `bot2.py` | Bot 2 handlers, token validation, delivery + auto-delete queue |
-| `db.py` | Motor/MongoDB layer and all indexes |
-| `scanner.py` | Telethon channel-history scanner (`/scandb`, `/rescandb`) |
-| `shortener.py` | VPLinks/GPLinks API client (`?api=KEY&url=…&format=text`) |
-| `config.py` | Environment-variable loading (no hardcoded secrets) |
-| `utils.py` | Flexible duration parser, `human_duration`, `@admin_only` |
-| `requirements.txt` | Dependencies |
-| `runtime.txt` | Pins Python 3.11.9 for Render |
-| `.env.example` | Copy to `.env` for local runs |
+NEW IN v46
+  * Mongo->RAM refresh (REFRESH_TTL = 300s): ensure_index() re-merges Mongo every
+    5 min WITHOUT dropping what RAM already holds, so laptop-script fingerprints
+    are honoured live. Fixes the intermittent skip.
+  * DB2 AUTO-INDEX — no more /dupescan needed:
+      - db2_mirror hook: every cover the bot mirrors into DB2 is fingerprinted
+        from its CLEANED caption the instant it lands (stored fp == DB2 fp).
+      - tail_scan_db2(): incremental, cursor-based scan (db2_cover_index
+        .last_indexed_msg_id) that indexes ONLY new DB2 covers — idempotent, so
+        covers posted into DB2 BY HAND get auto-indexed within 30 min.
+      - startup tail-scan + every 30 min (DEDUP_TAIL_INTERVAL, sibling-aware:
+        one scan per unique DB2 per cycle).
+  * ADMIN ALERTS: an instant DM on EVERY duplicate skip (flood-wait-guarded,
+    serialized), PLUS a per-batch summary every 10 (empty batch = no DM, so
+    /pause won't send "0 skipped").
+  * remember() retries its Mongo push and logs a loud warning on failure.
+  * All new background work is wrapped in try/except so one error never kills
+    the bot; single-process / Render-safe.
 
----
+ALL PREVIOUS BEHAVIOUR IS UNCHANGED (exact-or->=90 fuzzy match, per-DB2 sibling
+sharing, cover-only scanning, auto-grow, /dupescan, /pause|/resume skip detail).
+TESTING: py_compile PASS on all 14 files; 20-assertion mocked suite PASS
+(tail-scan add + idempotent + cursor, external-push refresh, sibling propagation,
+instant alert x10 + single batch summary + empty-batch no-op, no-double-index).
+================================================================================
 
-## 3. Environment variables (Render dashboard)
+# Telegram MTProto Userbot — Post/File Scraper
 
-| Variable | Bot 1 | Bot 2 | Notes |
-|---|:---:|:---:|---|
-| `BOT1_TOKEN` | ✅ | — | from @BotFather |
-| `BOT2_TOKEN` | — | ✅ | from @BotFather |
-| `BOT1_USERNAME` | ✅ | ✅ | no `@`, used for deep links |
-| `BOT2_USERNAME` | ✅ | ✅ | no `@`, used for deep links |
-| `MONGO_URI` | ✅ | ✅ | same Atlas cluster for both |
-| `MONGO_DB_NAME` | ✅ | ✅ | e.g. `video_bots` |
-| `ADMIN_IDS` | ✅ | — | comma-separated Telegram user IDs |
-| `DB_CHANNEL_ID` | ✅ | ✅ | DB channel is used by both — set it on **both** services |
-| `POST_CHANNEL_ID` | ✅ | — | optional seed; changeable later |
-| `FORCE_SUB_CHANNEL_ID` | ✅ | — | optional seed; changeable later |
-| `RENDER_EXTERNAL_URL` | ✅ | ✅ | e.g. `https://my-bots.onrender.com` |
-| `BOT1_WEBHOOK_SECRET` / `BOT2_WEBHOOK_SECRET` | ✅ | ✅ | any random string |
-| `SHORTENER_API_KEY` | ✅ | — | your VPLinks API token |
-| `API_ID` / `API_HASH` / `SESSION_USER` | ✅ | — | only needed for `/scandb` |
+Scrapes a target channel post-by-post: clicks **Download** → @Fubuki_xRobot
+**Short link** → sends link to a **bypass group** → clicks the tagged **Open link**
+→ Fubuki final link → @Rias_Gremory_Robot → forwards **cover post + video(s) + .srt**
+to your database channel. Progress/config/stats live in MongoDB.
 
-> Both bots share one MongoDB database — **every variable must be set on the
-> single Render service**. (If you ever split into two services, set `DB_CHANNEL_ID`,
-> `MONGO_URI` and the usernames on both.)
+## Deploy (Render free web service)
+1. Push this repo to GitHub.
+2. Render → New → Web Service → connect repo (or use render.yaml blueprint).
+3. Env vars: `API_ID`, `API_HASH`, `STRING_SESSION`, `MONGO_URI`, plus
+   `BOT_TOKEN` (from @BotFather) and `ADMIN_USER_ID` (your numeric id from
+   @userinfobot) to enable the **control bot with a tappable / command menu**.
+4. Free instances sleep — ping `https://<app>.onrender.com/health` every ~10 min
+   with an uptime monitor (UptimeRobot etc.).
 
----
+## Two ways to control it
 
-## 4. Zip the project and push to a new GitHub repo
+**A) Control bot (recommended):** open a chat with YOUR bot (the BOT_TOKEN one).
+Tap `/` — a menu lists every command. Tap `/target`, `/bypass` or `/adddb`
+with NO argument: the bot asks for the id, you send it, it validates and
+saves it. Add all three one by one, then tap `/start`.
 
-```bash
-# from the parent of the project folder
-zip -r telegram-video-bots.zip tgbots
+**B) Userbot commands:** type these in any chat (Saved Messages recommended):
 
-# create an empty repo on github.com first (no README, no .gitignore),
-# then:
-cd tgbots
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/<you>/<repo>.git
-git push -u origin main
-```
-
-`.gitignore` already excludes `.env`, `__pycache__/` and the session files, so
-**no secrets are committed**.
-
----
-
-## 5. Deploy on Render (free tier, manual — no render.yaml)
-
-Free-tier instances cannot use Blueprints, so create the service by hand:
-
-1. Render dashboard → **New +** → **Web Service**.
-2. Connect the GitHub repo you just pushed.
-3. Settings:
-   * **Runtime**: `Python 3`
-   * **Environment → Python Version**: `3.11.9` (or add env var `PYTHON_VERSION=3.11.9`).
-     Without this, Render deploys on its newest Python (3.14) — the `runtime.txt`
-     file alone is not always honored on current Render.
-   * **Build Command**: `pip install -r requirements.txt`
-   * **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-   * **Instance Type**: Free
-   * **Health Check Path**: `/health`
-4. Add every variable from the table above under **Environment**.
-5. Deploy. When it goes live, copy the service URL into `RENDER_EXTERNAL_URL`
-   and redeploy — the app registers the webhooks itself on startup.
-
-> Free instances sleep after ~15 min of inactivity and cold-start in ~30-60 s.
-> Telegram retries failed webhook deliveries, so no updates are lost, but the
-> first message after a sleep can take a little while.
-
-### Setting the webhooks manually (optional)
-
-The app sets them automatically, but you can force it:
-
-```bash
-curl "https://api.telegram.org/bot<BOT1_TOKEN>/setWebhook" \
-  -d "url=https://<service>.onrender.com/bot1/webhook" \
-  -d "secret_token=<BOT1_WEBHOOK_SECRET>"
-
-curl "https://api.telegram.org/bot<BOT2_TOKEN>/setWebhook" \
-  -d "url=https://<service>.onrender.com/bot2/webhook" \
-  -d "secret_token=<BOT2_WEBHOOK_SECRET>"
-```
-
----
-
-## 6. One-time setup checklist
-
-1. Create both bots with @BotFather; note tokens and usernames.
-2. Create the **Database Channel** and the **Posting Channel**; add **both bots
-   as admins** of the Database Channel (needed for `copy_message`).
-3. If using force-subscribe, add **Bot 1 as an admin** of that channel and turn on
-   **join request approval** so pending requests can be captured.
-4. Fill `.env` (local) or the Render environment, deploy.
-5. In Bot 1 as an admin, create your first pipeline (categories replace the
-   old single-pipeline commands):
-   ```
-   /addcategory jav Jav           (guided wizard: DB channel -> posting
-                                   channel -> main channel -> tag -> time)
-   /setforcesub <channel_id>      (or /setforcesub off)
-   /shortenerapi add vplink https://vplink.in/api YOUR_KEY
-   /shortener on
-   /setverifytime 6
-   /setautodelete 7day jav
-   ```
-   The wizard offers a **Scan now** button to index the DB channel
-   (the existing ~200-300 videos) right after setup.
-6. Check `/categories` and `/stats`, then `/dripnow jav` to post the first cover.
-7. Adding another category later (Anime, Movies, …) is one command,
-   zero redeploy: `/addcategory anime Anime` — then answer the wizard.
-
-### Generating `SESSION_USER` (Telethon)
-
-Run once **locally** (not on Render):
-
-```bash
-pip install telethon
-python - <<'PY'
-from telethon.sync import TelegramClient
-from telethon.sessions import StringSession
-api_id = int(input("API_ID: "))
-api_hash = input("API_HASH: ")
-with TelegramClient(StringSession(), api_id, api_hash) as c:
-    print("\nSESSION_USER =\n", c.session.save())
-PY
-```
-
-Paste the printed string into the `SESSION_USER` variable.
-
----
-
-## 7. Command reference
-
-### Bot 1 — admin
-
-**Pipelines (categories) — the core of v2**
-
-| Command | Effect |
+| Command | Action |
 |---|---|
-| `/addcategory <key> <label>` | guided wizard: DB channel -> Posting channel -> Main channel -> tag -> daily time (IST) |
-| `/categories` | full dashboard of every pipeline (channels, queue, posted counts, settings) with Post-now / Pause / Edit / Delete buttons |
-| `/editcategory <key>` | re-run the wizard to change a pipeline's settings |
-| `/delcategory <key>` | remove a pipeline (purge data optional) |
-| `/use <key>` | set the ACTIVE pipeline for the scoped commands below |
-
-**Scoped commands** — act on the active pipeline (`/use`), or append a key
-(e.g. `/dripnow anime`). With only ONE pipeline configured they target it
-automatically.
-
-| Command | Effect |
-|---|---|
-| `/broadcast` (reply) · `/broadcast <text>` | asks for a delete timer (`2h`, `30m`, `1h 2m`, `never`), then broadcasts; copies auto-delete from every user when due |
-| `/stats` | users, verified, banned + per-pipeline breakdown |
-| `/ban <id>` · `/unban <id>` | toggle a ban |
-| `/addadmin <id>` | promote an admin without redeploying |
-| `/setforcesub <id \| off> [category]` | global default; per-category override with a trailing key |
-| `/setautodelete <time> [category]` | per-category auto-delete timer |
-| `/setpostchannel <id> [category]` | destination posting channel |
-| `/setdbchannel <id> [category]` | source Database Channel |
-| `/setpostmainchannel <id \| off> [category]` | main-channel forwarding |
-| `/setposttag <text \| off> [category]` | tag line above each main forward |
-| `/setposttime <HH:MM> [category]` | daily post time (**IST**) |
-| `/setschedule <HH:MM> [category]` | set time (IST) + enable |
-| `/schedule on\|off [category]` | enable/disable daily posting |
-| `/pauseposting` · `/resumeposting` | pause/resume one pipeline |
-| `/dripnow [category]` | post the next queued item immediately |
-| `/queueinfo [category]` | next 10 queued posts with links |
-| `/queue_reset N [category]` | rewind the queue to post number N |
-| `/protect on\|off [category]` | per-category content protection |
-| `/rescandb [category]` | re-index the pipeline's DB channel (keeps `posted` flags) |
-| `/scandb <channel_id> [category]` | point a pipeline at a DB channel + index it |
-
-**Shortener gate (global)**
-
-| Command | Effect |
-|---|---|
-| `/shortener on\|off\|status` | toggle or inspect the gate |
-| `/shortenerapi` | rotation dashboard — `add`/`pause`/`resume`/`remove` shorteners |
-| `/setverifytime <hours>` | verification validity (default 6) — per category |
-| `/settokenttl <minutes>` | Bot 1 → Bot 2 handoff token TTL |
-| `/shortenermsg <text>` | landing/overlay heading |
-| `/shortenerbotmsg <text>` | DM text prompting the shortener |
-| `/verifymsg <text>` | text shown after verification |
-| `/shortenerbtn <label> \| <url>` | add a secondary button |
-| `/clearshortenerbtns` | remove all secondary buttons |
-
-**Channel posts & captions (global, v4.0)**
-
-| Command | Effect |
-|---|---|
-| `/addbutton <label> \| <link> [| green\|blue\|red]` | extra button under every new channel post (omit the color for the default transparent look) |
-| `/buttons` · `/removebutton <n>` · `/clearbuttons` | list / remove one / remove all extra buttons |
-| `/addcovercaption <text\|off>` | text appended after every posted cover caption |
-| `/addfilecaption <text\|off>` | text appended after every delivered file caption |
-| `/addsticker` · `/removesticker` | sticker posted to the MAIN channel after each post (skipped when no main channel) |
-
-**Genres & browse menu (v4.4)**
-
-| Command | Effect |
-|---|---|
-| `/addgenre <pipeline> <genre>` | register a genre under a pipeline; runs a ONE-TIME caption scan in the background (result stored in MongoDB — never rescanned) |
-| `/delgenre <pipeline> <genre>` | remove a genre and its stored match list |
-| `/genres [pipeline]` | list genres with matched/posted counts (all pipelines when omitted) |
-| `/onbrowse` · `/offbrowse` | enable/disable the `/browse` menu globally |
-
-### Bot 1 — user
-
-| Command | Effect |
-|---|---|
-| `/start` | welcome (carries a 📂 Browse button) / handles `file_*` and `verify_*` deep links |
-| `/browse` | multi-level menu: category → genre → posted items; works in DMs and groups; results deep-link into the gated Download flow |
-| `/help` | command list |
-
-### Bot 2 — user
-
-| Command | Effect |
-|---|---|
-| `/start` | welcome / handles `deliver_*` links |
-| `/setautodelete <time>` | personal auto-delete override |
-
-Durations accept `30min`, `2hour`, `12hour`, `1day`, `7day`, `never`
-(a bare number means minutes). Compound forms like `1h 2m` also work (v4.0).
-
----
-
-## 8. Notes & limitations
-
-* **Large files are fine.** Delivery uses `copy_message`, which Telegram performs
-  server-side — the bot never downloads the file, so the 20 MB Bot API download
-  limit and the source-channel identity are both irrelevant.
-* **One verification = one file.** The `verify_` token is single-use and bound to
-  the user ID, so a forwarded link is refused by Bot 2.
-* **Queue position lives in MongoDB**, so restarts and redeploys never repeat or
-  skip an item.
-* **`/scandb` needs Telethon credentials.** Without `API_ID`/`API_HASH`/`SESSION_USER`
-  the rest of the bots still run; only the history scan is unavailable.
-* **The force-sub gate fails open** if `get_chat_member` errors (e.g. Bot 1 is not
-  an admin of that channel) so real users are never locked out — the failure is
-  logged. `get_chat_member` is the only check performed, as required.
-
----
-
-## 9. Legal notice
-
-This system is intended **only** for content the operator owns or is licensed to
-distribute. Deploy it with media you hold the rights to.
-
-## v2.4 — Strict per-post verification + admin shortener bypass (2026-09-19)
-
-- **Strict per-post verification**: the shortener gate is shown on EVERY Download tap. Solving the link for one post never unlocks another post — or the same post again. `users.verified` / `verified_until` are now STATS ONLY (they feed `/stats` + `/categories` counts) and never skip the gate. Applies automatically to all current AND future categories/channels.
-- **Admin bypass**: admins (env `ADMIN_IDS` + `/addadmin`) receive the file instantly without the shortener. Force-sub still applies to admins.
-
-## v2.5 — Auto-delete reaches every pipeline + /withfilemessages (2026-09-19)
-
-- **Fixed the "1 hour" bug**: /setautodelete now applies the timer GLOBALLY **and** to every existing pipeline. Previously a pipeline's own older auto_delete_minutes silently overrode the global value, so a 7-day setting still showed "1 hour".
-- **New /withfilemessages [time] <text>** (Bot 2, admin-only): sets your own post-delivery notice. An optional leading time (7day / 1hour / 30min / never) also sets the auto-delete timer for all files; `{N Duration}` inside the text is replaced with the real time left before deletion.
-
-## v2.7 — /addcategory wizard crash fix (2026-09-19)
-
-- **Root cause of the silent freeze at step 5/5**: the wizard seeded `data` with
-  `"key"` and `_wizard_finish` passed it again via `**data`, crashing with
-  `TypeError: create_category() got multiple values for argument 'key'`. Fixed —
-  both reserved keys are popped before the DB call.
-- The wizard can no longer die silently: finish/step errors are caught, logged,
-  and reported to the admin ("Nothing was saved — please retry"), and the
-  session is reset instead of leaving the bot unresponsive.
-- Step 4 prompt now explains what the "tag line" is (caption above each
-  main-channel forward; optional).
-
-## v2.8 — /addcategory "Scan now" fix (2026-09-19)
-
-- **DuplicateKeyError on scan**: the `raw` collection had a legacy unique index on `message_id` alone; a second pipeline's scan crashed because every DB channel restarts message_id at 1. db.connect() now drops the stale index at startup; the compound (category, message_id) unique index is the correct key.
-- **AttributeError 'NoneType' reply_text**: "Scan now" is a button callback (update.message is None) — the scan error handler crashed while reporting the failure. _run_scan now replies via context.bot.send_message and works from commands and callbacks alike.
-
-## v2.9 — Complete stale-index sweep + callback-safe scan (2026-09-19)
-
-- v2.8 dropped the legacy `raw.message_id` unique index; the SAME legacy pattern also existed on `files.db_message_id` (plus a leftover `files.posted_1`), which crashed the scan one step later with another DuplicateKeyError. db.connect() now drops ALL of them at startup. Adding any future pipeline scans cleanly.
-- `_run_scan` replies via context.bot.send_message so "Scan now" (a button callback) always reports success/failure instead of freezing.
-- `_wizard_finish` pops the reserved `key` field before `**data` (the TypeError that silently killed /addcategory) and reports failures to the admin.
-
-## v3.0 — Multi-version posts deliver everything (2026-09-19)
-
-- Bot 2 no longer asks "🎬 Choose which version you want:". When a post has multiple videos in the DB channel, ALL versions are delivered in one go. Subtitle files attach once (with the first video); the auto-delete notice is posted once, after the last file. Old "dl:" buttons already sent to users still work (they deliver that single version).
-
-## v3.1 — MKV/AVI/WebM delivery fix (2026-09-19)
-
-- Videos uploaded as Telegram **documents** (`.mkv`, `.avi`, `.webm`, and `.mp4`
-  sent as files) were misclassified as subtitles, so items had no videos and
-  users got "This file is no longer available." Both classifiers (userbot scan +
-  live channel_post) now treat any `video/*` mime-type document as a video.
-- After deploying, re-scan the affected pipeline(s) (`/rescandb` or Scan now) so
-  already-uploaded MKV files are indexed correctly. New uploads work immediately.
-
----
-
-## v3.2 (2026-09-20) — multi-shortener round-robin + instant anti-bypass ban
-
-**Multi-shortener rotation.** `/shortenerapi` is now a management dashboard
-for MULTIPLE shorteners instead of one global key:
-
-- `/shortenerapi` — lists every saved shortener: site name, masked key,
-  API base, 🟢 Active / ⏸ Paused.
-- `/shortenerapi add <site> <api_base> <api_key>` — add to the rotation
-  (validates the URL, rejects duplicate names, then runs a live self-test).
-  Example: `/shortenerapi add gplink https://gplinks.in/api YOURKEY`
-- `/shortenerapi pause <site>` — stays in the list but is SKIPPED in rotation.
-- `/shortenerapi resume <site>` — back into rotation.
-- `/shortenerapi remove <site>` — deleted from the database completely.
-- The old single-key syntax (bare key / `url` / `clearkey`) was REMOVED.
-
-How rotation works: every Download tap advances THAT USER'S own round-robin
-cursor (stored on the user doc) and picks from the ACTIVE shorteners only —
-paused entries are filtered out before the pick, so they can never serve a
-link. Fail-open: if EVERY shortener is paused, the user gets the file
-directly (same as today's disabled-gate behavior; logged as a warning).
-Each verify token records which shortener served it (`shortener_site`).
-
-Storage: new `shorteners` MongoDB collection (unique index on `site`). On
-first startup the legacy single key (settings.shortener_api_key, else the
-SHORTENER_API_KEY env var) is migrated in as `vplink` — no key needs to be
-re-entered, and the old settings fields stay untouched as a safety net.
-
-**Instant anti-bypass ban.** The verify timing gate no longer gives 3
-strikes: ONE too-fast attempt burns the token and bans the user immediately.
-The admin alert (username, elapsed seconds, /unban hint) is unchanged.
-
----
-
-## v3.3 (2026-09-20) — hotfix: shortener re-add after remove
-
-**Bug:** after `/shortenerapi remove <site>` removed the LAST entry, the
-v3.2 migration (which runs whenever the collection is empty) re-seeded
-`vplink` from the legacy/env key on the next process start — so re-adding
-the same name with a different base failed with "already exists".
-**Fix:** migration now runs exactly ONCE (guard flag
-`settings.shorteners_migrated`); an empty rotation stays empty forever.
-The SHORTENER_API_KEY env var is no longer read at runtime — the
-`shorteners` collection (managed only via /shortenerapi) is the single
-source of truth. `add` now also tells you the existing entry's base when
-a name is taken, and how to replace it.
-
----
-
-## v3.4 (2026-09-20) — multiple force-sub channels + shortener note
-
-**Force-sub now supports MULTIPLE channels.** `/setforcesub <channel_id>`
-APPENDS to the required list instead of replacing the previous one (global
-default), `/setforcesub <channel_id> <category>` appends per-category, and
-`/setforcesub off` clears the list. Users must be members of ALL required
-channels; the gate message shows one Join button per channel. Backward
-compatible: the old single `force_sub_channel_id` value is honoured until
-you set the new list.
-
-**Shortener self-test clarification:** the ⚠️ on adding `vplink` was NOT a
-bot bug — the base `https://vplinks.com/api` has no working TLS (connection
-fails), while `https://vplink.in/api` works with the same key. Always use
-the exact API base from your provider dashboard.
-
----
-
-## v3.5 (2026-09-20) — force-sub gate bypass fix + admin tooling
-
-**CRITICAL FIX — Gate 1 bypass.** `gate_ok` accepted ANY join request ever
-recorded (`has_join_request(user_id)`, unscoped), so a user who once tapped
-"request to join" on any channel skipped force-sub forever. Join requests
-are now stored per-channel (`{user_id, chat_id}`) and a request only passes
-the channel it was made for. Note: pre-v3.5 request records have no channel
-id and no longer grant a pass — affected users simply re-request once.
-
-**/setforcesub auto join-request link.** Setting a channel now calls
-`create_chat_invite_link(creates_join_request=True)` and stores the link;
-the gate's Join button uses it, so every gated user lands in the channel's
-pending-requests list (backup audience if a channel is ever banned).
-
-**New admin commands:** `/forcesublist` (dashboard: global + per-category
-channels with their invite links), `/forcesubremove <channel_id|category|global>`,
-`/banmessage <text>` (or reply to a message, or `reset`), `/banlist` — each
-entry formatted `1 - @username Elapsed: 46.7s \`/unban 8416709177\`` with the
-command in inline code for one-tap copy.
-
----
-
-## v3.6 (2026-09-20) — hotfix: custom ban message at ban moment + forcesub link backfill
-
-**Fix 1 — `/banmessage` now applies at the ban moment.** The anti-bypass
-instant-ban in bot1.py sent a hardcoded message; it now uses the custom
-`ban_message` (falling back to the default). The custom text is used in ALL
-ban spots: instant-ban, /start in both bots, Bot 2 delivery + buttons.
-
-**Fix 2 — `/forcesublist` backfills join-request links.** Channels set
-before v3.5 had no stored invite link, so the dashboard showed "(no
-join-request link stored)". The dashboard now creates the join-request link
-on the fly (create_chat_invite_link, creates_join_request=True), stores it,
-and displays it — run /forcesublist once after deploying and every channel
-gets its link. The gate button picks it up automatically.
-
-**Cosmetic:** /forcesublist and /forcesubremove moved from "General" to the
-"Access & content" section of the /admin help list.
-
----
-
-## v3.7 (2026-09-22) — /banlist as a native rich-message table
-
-`/banlist` now renders as a real table using Bot API 10.1+ Rich Messages
-(`sendRichMessage` -> `InputRichBlockTable`, `is_compact: true`): columns
-# / User / Detail / Tap-to-copy, with the `/unban <id>` cell in code style
-so one tap copies only the command. Long lists (70-80+) are split into
-45-row table pages automatically (rich-message limits: 32k chars / 500
-blocks / 20 columns). If Telegram rejects the rich payload on any client
-or rollout stage, the bot automatically falls back to paged inline-code
-text messages (40 rows each) — the list can never fail to display.
-
----
-
-## v3.8 (2026-09-22) — rich-table fix + /addsticker
-
-**Fix — rich banlist table.** Telegram rejected the v3.7 payload
-("can't find field cells"): `InputRichBlockTable` takes `cells` of
-`InputRichText` ({text, entities}), not block rows. Corrected. The text
-fallback also moved from Markdown to HTML so @usernames can never break
-parsing on long lists (the "byte offset 1460" crash).
-
-**New — /addsticker.** Admin sends `/addsticker`, then forwards/sends any
-sticker; the bot saves it and posts it immediately after every channel
-post in every pipeline (a tap-able tag sticker under each post).
-`/removesticker` turns it off. Non-admin stickers are ignored; the intake
-auto-aborts if the next message isn't a sticker.
-
----
-
-## v3.9 (2026-09-22) — /addsticker fix + rich /shortenermsg
-
-**Fix — /addsticker never captured the sticker.** The intake handler was
-registered in handler group 0 with a catch-all filter, so forwarded
-stickers were silently swallowed and never saved. It now lives in its own
-later group with a stickers-only filter — sticker captured, confirmed, and
-posted after every channel post.
-
-**Enhancement — /shortenermsg accepts rich input.** Plain text, Markdown
-styles (bold/italic/underline/strike/spoiler), ```pre blocks```, inline
-`code`, links, quotes and blockquotes all survive: message entities are
-converted to HTML and stored (shortener_msg_html). Reply to any formatted
-message with /shortenermsg to copy its rich text. The gate sends the
-heading with parse_mode=HTML when a rich version exists; the plain-text
-fallback path is unchanged.
-
----
-
-## v4.0 (2026-09-25) — colored post buttons, sticker→main channel, caption commands, timed broadcasts
-
-**Colored channel-post buttons (Bot API 9.4 `InlineKeyboardButton.style`).**
-The default `#N 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱` button is now always GREEN (`style=success`)
-and full-width. New global commands:
-
-- `/addbutton <label> | <link> [| green|blue|red]` — add an extra button
-  under the Download button of EVERY new channel post (all pipelines).
-  Omit the color for the default transparent look.
-- `/buttons` — list extras · `/removebutton <n>` — remove one ·
-  `/clearbuttons` — remove all.
-
-Layout: the Download row stays full-width; extras sit TWO per row (a single
-extra takes the whole row). Colors ride through PTB's `api_kwargs`
-passthrough because python-telegram-bot 21.x predates the Bot API 9.4
-`style` field. If Telegram ever rejects a styled post, the bot automatically
-reposts the same message with unstyled buttons — a post is never lost.
-Main-channel forwards carry the same buttons (colorless on a real forward —
-Telegram forwards cannot carry a custom markup).
-
-**Fix — /addsticker destination.** The post sticker now goes to the
-pipeline's MAIN posting channel (`post_main_channel_id`) instead of the
-base posting channel; pipelines without a main channel skip the sticker.
-(This also removes a latent NameError — the old line referenced an
-undefined `settings` variable.)
-
-**New — /addcovercaption · /addfilecaption (global).** Extra text APPENDED
-after the original caption: cover captions apply to the posted cover photo,
-file captions to every file Bot 2 delivers. `<cmd> off` clears it.
-
-**Timed /broadcast.** `/broadcast` (reply mode AND inline text) no longer
-sends immediately: the bot asks "After how many hours or minutes should
-this broadcast message be deleted from users?", accepts `2h`, `30m`,
-`1h 2m` or `never` (utils.parse_duration now understands compound
-durations), then broadcasts. Every delivered copy is queued in the existing
-`deletions` collection tagged `bot: "bot1"` — only the sending bot can
-delete its messages — and removed by a new Bot-1 sweeper job
-(restart-safe, non-blocking). `never` keeps the broadcast forever;
-`/cancel` aborts a pending broadcast.
-
----
-
-### v4.0.1 (2026-09-25) — /addbutton multi-button + reply fixes
-
-- `/addbutton` now accepts MULTIPLE buttons in one command — a color word
-  ends a button, so
-  `/addbutton 💸𝗣𝗿𝗲𝗺𝗶𝘂𝗺💸 | https://t.me/NSFW_Universe/6 | red 🦋𝐁𝐀𝐂𝐊𝐔𝐏🦋 | https://t.me/NSFW_Universe | blue`
-  adds both as half-width buttons on one row. (Was wrongly rejecting the
-  second label as an "unknown color".)
-- Confirmation replies no longer crash with Telegram's
-  `unsupported start tag "n"` 400 error; the whole reply is escaped and
-  link previews are suppressed.
-- `/addbutton`, `/addcovercaption`, `/addfilecaption` no longer crash on
-  edited messages (`update.message` can be None — they now use
-  `update.effective_message`).
-
----
-
-## v4.1 (2026-09-25) — shortener failover + outage no-ban
-
-**Failover across providers.** `shortener.shorten` now tries EVERY active
-shortener (per-user round-robin start, e.g. vplink then arolink) and uses
-the first one that answers — when one provider's server is down the other
-takes over automatically.
-
-**Outage = direct delivery, never a ban.** If NO provider can serve (all
-down, all paused, or none configured), the gate skips verification entirely
-and hands the user the Get File button directly — previously users received
-the raw deep link, "solved" it in seconds, and were auto-banned by the
-sub-150s anti-bypass rule. Every outage delivers an admin alert naming the
-failed provider(s) (check the `/shortenerapi` dashboard).
-
-**Ban rule is now outage-aware.** Each verify token records whether a live
-shortener served it (`shortener_state`: `active`/`down`). The instant
-sub-150s ban applies ONLY to `active` tokens — tokens issued during an
-outage can never ban a user. Zero-tolerance banning for genuine bypass
-scripts is unchanged.
-
----
-
-## v4.2 (2026-09-25) — broadcast flood-limit fix
-
-**Fix — /broadcast silently dropped most users.** The loop sent one
-forwardMessage every ~50 ms and counted every Telegram `429 Too Many
-Requests` as a permanent failure. On back-to-back broadcasts the Render log
-showed 1,059 calls with zero 200 OK, and "Sent" collapsed 349 → 129.
-Users were NOT blocking the bot — Telegram was rate-limiting it.
-
-The broadcast loop is now paced (~3 messages/sec, under Telegram's global
-limit), honors the `retry_after` value from every 429, and retries the same
-user up to 3 times — so every reachable user eventually receives the
-message. Only users who still fail after all retries (they blocked the bot
-or deactivated) count as failures. Before starting, the bot now tells the
-admin the approximate duration; the webhook already answers Telegram
-instantly, so the bot stays fully responsive during a long broadcast.
-
----
-
-## v4.3 (2026-09-25) — /verified_users daily report
-
-**New — `/verified_users` (admin).** A native compact rich-message table
-(`InputRichBlockTable`, `is_compact=True` — same proven shape as `/banlist`)
-of everyone who verified SINCE MIDNIGHT IST, one row per user:
-
-| # | Name | Elapsed | Category | Link Type | Count |
-
-- **Live capture**: `process_verify` records every successful verification
-  (name, username, elapsed seconds, pipeline category, serving shortener).
-- **Same user = one row**: repeat verifications bump `Count`, show the
-  LATEST elapsed time, and append new categories / link types.
-- **Link Type**: the provider that served their link (`vplink`, `arolink`);
-  files delivered during a shortener outage (v4.1 failsafe) appear as
-  `Direct (outage)`.
-- **Daily session, IST**: rows are keyed by IST date; the report always
-  reads "today", so midnight starts fresh automatically. A daily 00:00 IST
-  job deletes anything older than today+yesterday.
-- **`/verified_users yesterday`** shows the previous day's table.
-- Falls back to a paged monospace table if Telegram rejects the rich
-  payload — the report can never fail to display.
-
----
-
-## v4.4 (2026-09-26) — dynamic genre browse menu (rich messages)
-
-**New — `/browse` multi-level menu (users).** One inline message that edits
-itself in place (ephemeral view): every ENABLED pipeline → its genres →
-posted items (10 per page, Prev/Next). Works in DMs and groups; new
-pipelines appear automatically. Result buttons deep-link into the existing
-`/start file_…` flow, so force-sub, the shortener gate and the Bot 2 token
-handoff apply exactly like channel posts — the menu can never bypass
-monetization. `/start` also carries a 📂 Browse button.
-
-**New — genre registry (admin).** `/addgenre <pipeline> <genre>` runs a
-ONE-TIME background caption scan and persists the matches in MongoDB
-(`genres` collection) — the database is never re-scanned for that genre.
-New uploads are matched incrementally at index time (in-memory regex per
-genre, zero extra queries), and `/rescandb` refreshes all genre lists of
-the pipeline once. Matching is format-proof: `#Romance! 💕`, bold, mono,
-quotes and emoji all count (captions are stored as plain text), and
-whole-phrase matching keeps `romance` from matching `romancer`.
-`/delgenre` and `/genres` manage the registry.
-
-**New — `/onbrowse` / `/offbrowse` (admin).** Global switch for the menu
-(channel-post Download buttons are unaffected).
-
-Safety: banned users are rejected at every menu level; stale taps on
-deleted pipelines/genres re-render the parent menu instead of erroring;
-callback data stays under Telegram's 64-byte limit by construction
-(genre slugs are capped at 24 chars).
-
----
-
-## v4.5 (2026-09-26) — /browse becomes true RICH messages + EPHEMERAL views (Bot API 10.3)
-
-**Fix — the v4.4 menu used a standard InlineKeyboardMarkup under a plain
-message.** The owner asked for Telegram's Rich Messages with embedded
-buttons and ephemeral views; v4.5 implements exactly that.
-
-**Rich messages.** Every /browse level (categories → genres → posted items)
-is now an `InputRichMessage` sent via `sendRichMessage` and edited via
-`editMessageText(rich_message=…)`: a `heading` block, a `paragraph` block,
-and buttons EMBEDDED as `InputRichBlockButtons` rows of `RichMessageButton`
-(`callback_data` for navigation, `url` + `style: success` for item deep
-links). No inline keyboard markup is attached anywhere in the menu.
-
-**Ephemeral views (groups).** The first /browse render in a group/supergroup
-sends with `ephemeral_message_parameters.receiver_user_id` — visible only to
-the user who opened it. Taps inside it arrive carrying
-`Message.ephemeral_message_id` (read from PTB `api_kwargs`, since PTB has no
-rich/ephemeral models) and are edited in place via `editEphemeralMessageText`
-(chat_id + receiver_user_id + ephemeral_message_id), per the Bot API 10.3
-rule that callbacks FROM ephemeral messages must not use
-`replace_callback_query_message`.
-
-**Private chats.** Ephemeral views are a group-only feature per the docs, so
-DMs render the same rich message normally (edited with `editMessageText`).
-
-**No library upgrade.** python-telegram-bot ships no rich/ephemeral helpers
-(verified against the latest release), so all calls use `bot._post(...)` —
-the raw-API path already proven in production by /banlist and
-/verified_users. If Telegram rejects the rich call, the user gets a clear
-"update your Telegram app" notice (per owner decision: no inline-keyboard
-fallback).
-
-Everything else from v4.4 is unchanged: genre registry, one-time backfill
-scan persisted in MongoDB, lazy incremental matching, posted-only results,
-/onbrowse /offbrowse, ban checks, 64-byte callback budget, deep links into
-the gated Download flow.
-
-
-### v4.5.1 (2026-09-26) — hotfix: rich-text node format rejected by the API
-
-**Fix — every /browse attempt fell into the error path.** v4.5 built rich
-text as `{"type": "plain", "text": ...}`; Telegram's Bot API rejects that
-shape, so `sendRichMessage`/`editMessageText` returned Bad Request and the
-handler wrongly blamed the client ("app too old"). Rich-text nodes now use
-the proven production shape `{"text": ..., "entities": [...]}` — the exact
-format the live `/banlist` and `/verified_users` rich tables send. The error
-handler now also shows the real API error text instead of a generic notice,
-so any future failure is diagnosable from a screenshot.
-
-
-### v4.5.2 (2026-09-26) — hotfix: plain RichText is a bare string, not an object
-
-**Fix — `sendRichMessage` returned `400 Can't parse inputrichblock: can't
-find field "type"` on every /browse.** The docs define RichText as "either a
-**String** for plain text, an Array of RichText, or any of the typed
-classes" — there is NO plain-text object. v4.5 sent `{"type": "plain"}` and
-v4.5.1 sent `{"text": ..., "entities": []}` (that object shape is only valid
-for table CELLS — a different type — which is why /banlist renders fine).
-All plain text nodes (block text and button labels) are now bare JSON
-strings. Regression test added: every plain text node in the menu payload is
-asserted to be a string.
-
-
-## v4.6 (2026-09-26) — VIP users + genre suggestion line
-
-* **/browse**: a "Suggest a genre — @icollecteverything" line + embedded link
-  button now renders directly below the category list.
-* **VIP / premium users** (shortener bypass):
-  * `/addpremiumuser <id|@username> <duration>` — durations: `7h`, `1day`,
-    `3day`, `1week`, `30day`, `12hour` … topping up adds onto remaining time.
-  * `/removepremiumuser <id|@username>` — revoke.
-  * `/listpremiumuser` — rendered as an `InputRichBlockTable`
-    (User | Added | Days left | Expires); the user's name is a
-    `RichTextUrl` profile link (`tg://user?id=…`). Expired rows are purged
-    automatically on every call; expiry itself is implicit
-    (`expiry > now`), so no background job is needed.
-  * Premium users skip the shortener on every gated path that funnels through
-    `process_file`. Force-sub still applies (same as the admin bypass).
-* New Mongo collection: `premium_users`
-  `{user_id, added_at, expiry, duration_seconds, added_by}`.
-* Tests added: duration parsing, grant/revoke, implicit expiry +
-  purge, bypass wiring (checked in source order before `send_shortener_gate`),
-  and `InputRichBlockTable` serialization (header cells + `tg://` link cell).
-
----
-
-## v4.7 — Bot 2 force-sub, batch delivery, rich captions, /checkram
-
-* **Bot 2 enforces its OWN force-subscribe gate** (same `/setforcesub` list as
-  Bot 1). A user must satisfy it in BOTH bots: Bot 1 gates the shortener, Bot 2
-  gates delivery AND a bare `/start`. Token is NOT burned when the gate fails —
-  "✅ I've Joined" resumes delivery; a gated bare `/start` re-sends all held
-  (not-yet-deleted) files AT ONCE after joining. The Get File link now carries
-  a second `verify..._g` token so a user who already solved the shortener is
-  never asked to solve it again after joining on Bot 2.
-* **Batch delivery**: all videos + subtitles of a post arrive in ONE
-  `copyMessages` call (server-side, order preserved). `/addfilecaption` extra
-  is sent once as a formatted message after the batch (copyMessages takes no
-  per-message caption). The legacy `dl:` chooser path is unchanged.
-* **Rich caption extras**: `/addcovercaption` and `/addfilecaption` preserve
-  bold, italic, mono, quotes, spoilers and links (captured as HTML via
-  `text_html`; both plain + HTML variants stored for backward compatibility).
-* **Bot 2 `/broadcast`**: same UX as Bot 1 (asks for the auto-delete timer
-  first, paced ~3/sec with 429 retry_after, restart-safe deletion queue tagged
-  `bot="bot2"`) — but the audience is ONLY users who started Bot 2
-  (`touch_user(user_id, bot=...)` tags each starter; Bot 1 keeps the full list).
-* **`/checkram`** (both bots, admin-only): process RSS = what Render bills
-  against, peak RSS, per-bot estimate (single process → estimate), server RAM.
-* **`/help` regrouped** on both bots; Bot 2 admin menu (broadcast,
-  setautodelete, withfilemessages, checkram) registered via per-chat scopes.
-* New dep: `psutil>=5.9`.
-
-
----
-
-## v4.7.1 — CRITICAL FIX: Get File link over Telegram's 64-char limit
-
-* **Bug:** v4.7 put TWO tokens in the Get File deep link
-  (`deliver_<file_id>_<token>_<token2>_g`). Telegram caps `/start` payloads at
-  **64 characters** — the payload was silently dropped, so Bot 2 received
-  nothing and delivered nothing.
-* **Fix:** the link is **single-token** again. Bot 2's force-sub gate now
-  stores the pending delivery in the **DB** (per user) and "✅ I've Joined"
-  resumes it with a fresh single-use token — no long data in the URL or in
-  callback_data (also 64-byte-capped). A bare `/start` on Bot 2 re-sends the
-  user's held files all at once after joining.
-* Also fixed: duplicate `/broadcast`+`/checkram` registration, orphaned
-  payload-style `send_force_sub`, and added a regression test asserting the
-  Get File payload is <= 64 chars for long category-prefixed file_ids.
-
-
----
-
-## v4.7 / v4.7.1 / v4.8 — consolidated update
-
-* **Bot 2 force-sub gate** (same /setforcesub list as Bot 1): gates both
-  delivery and a bare /start. v4.7.1: the pending delivery lives in the DB —
-  the Get File link stays SINGLE-token (Telegram caps /start payloads at 64
-  chars; the v4.7 dual-token link was silently dropped). "I've Joined"
-  resumes the pending delivery with a fresh token; a gated bare /start
-  re-sends the user's held files all at once after joining.
-* **Bot 2 /broadcast** — same UX as Bot 1 (timer question first, paced
-  ~3/sec, 429 retry_after, restart-safe deletion queue tagged bot2);
-  audience = ONLY users who started Bot 2.
-* **/checkram** on both bots: process RSS (what Render bills), peak, per-bot
-  estimate, server RAM. New dep: psutil.
-* **/help regrouped** on both bots; Bot 2 admin menu registered per-chat.
-* **v4.8 — /addfilecaption rides UNDER each file's own caption** (per-file
-  copy_message with the extra appended, formatting kept as HTML). All files
-  still arrive back-to-back in one go; one auto-delete entry per post.
-  /addcovercaption keeps formatting the same way.
-* **v4.8 — /verified_users: names are profile links** (tg://user?id=…).
-* **v4.8 — /verified_users <user_id> [yesterday]**: per-fetch detail — rich
-  table with one row per fetch: file (linked back into the Download flow),
-  exact IST time, shortener solve time, provider. Per-fetch events start
-  recording at deploy; older days show totals only.
-
-
-## v4.8.1 — edit wizard skip
-
-/editcategory now accepts **skip** on EVERY step (DB channel, posting channel, main channel, tag, time): the current value is kept untouched. Add-mode behaviour is unchanged.
-
-
-## v4.8.2 — wizard answers no longer swallowed
-
-Bot 1's group-1 text handlers (broadcast timer answer, edit/add wizard) are now scoped with pending-state filters — PTB runs only the first matching handler per group, and the broadcast handler's bare text filter was eating wizard answers like `skip`. Wizard answers route to the wizard; broadcast answers route to the broadcast flow; neither blocks the other.
-
-
-## v4.8.3 — delivery restored to the proven per-file path
-
-The v4.7 copyMessages batch call failed in production (400 'Chat not found' from Telegram on every Get File). Delivery is back to per-file copy_message — every video + subtitle still arrives back-to-back in one go, and /addfilecaption rides UNDER each file's caption. Failure logs now name the exact channel + message id.
-
----
-
-## v4.9.0 (2026-10-03) — LinkGuard: self-hosted three-door link protection
-
-New optional layer in front of the paid shorteners: our own Cloudflare
-Worker (`linkguard-worker/`) adds Turnstile proof-of-humanity, a nonce-bound
-landing session with a 15s wait and decoy fan-out, and a final
-HMAC-signed, single-use, 90s, IP+UA-bound, Referer-allowlisted `/finish`
-redirect. The paid shortener (VPLinks/AroLinks) still runs AFTER our gate —
-the user journey gains three doors, loses nothing.
-
-Bot side: new `linkguard.py` client + `/linkguard` admin command
-(setup / on / off / status / honeypot / decoys). In `send_shortener_gate`
-the paid short link is minted first, then wrapped with LinkGuard; ANY
-LinkGuard failure fails OPEN to the plain short link (same rule as v4.1's
-'down' state — users never pay for our outage). The 150s anti-bypass gate
-is untouched: the landing wait is 15s by design. Honeypot hits, IP/UA
-mismatches and binding anomalies DM the admins via Bot 1.
-See linkguard-worker/ARCHITECTURE.md and DEPLOYMENT.md.
+| `/target <id>` | set target channel |
+| `/bypass <id-or-@bot>` | set bypass bot **#1** (the pool's first entry) — group id OR bot @username (e.g. `@dex_fekkyeww_bot`) |
+| `/addbypass` | **v39** add another bypass bot to the pool (wizard or `/addbypass @bot`) |
+| `/removebypass <n>` | **v39** remove pool bot #n (see `/bypasslist`) |
+| `/bypasslist` | **v39** show the bypass pool + domain rules |
+| `/domainbypass` | **v39** map a short-link domain to ONE bypass bot (wizard, or `/domainbypass babylinks.in @BypassBot_A`) — those links go ONLY to that bot; `aerolinks.*` wildcards work |
+| `/deldomain <n>` | **v39** remove domain rule #n |
+| `/altbypass <id-or-@bot>` | last-resort fallback — tried after every pool bot fails; both failing DMs the admin the post link |
+
+`/targets` shows each target's DB channel as a tappable invite link (minted by the userbot, which is admin there, and cached).
+| `/linkbutton [text]` | list LINK_BOT button labels, or add one — matched immediately, **no restart** |
+
+Each target's LINK_BOT is discovered per-post from the Download button's own `t.me/<bot>?start=...` URL, and MEDIA_BOT is discovered from LINK_BOT's final reply — so different target channels can use completely different bot pairs with no config.
+| `/removelinkbutton <n>` | remove custom label #n (see `/linkbutton` for numbers) |
+| `/adddb <id>` | set database channel |
+| `/lastpost [n]` | show the newest real post in target n (default 1) |
+| `/start` | start scraping |
+| `/pause [n]` | pause — bare = ALL targets; `/pause 2` = only target 2, others keep scraping. Persisted in MongoDB (crash-safe) |
+| `/resume [n]` | bare = resume everything; `/resume 2` = resume only target 2 from its saved message id |
+| `/status` `/current` | live stage & current post |
+| `/progress` | posts done, **last scraped post**, resume point, media sent, failures + reasons |
+| `/ping` | check the bot is alive (works in control bot AND userbot) |
+| `/checkram` |
+| `/stats` | **v40** list every connected userbot: acc number + name + @username + id |
+| `/invite [n] <link>` | **v40** userbot n (or ALL if no n) joins a channel (public @name or private t.me/+ link); each confirms the channel it joined |
+| `/leave [n] <id|link>` | **v40** userbot n (or ALL) leaves a channel |
+| `/avoid "txt"` | **v40** GLOBAL DB2 strip — removed from every target's DB2 caption (per-target /avoidtext still works on top) |
+| `/replaceword "old" "new"` | **v40** GLOBAL DB2 replace — rewrites text in every DB2 caption before the avoid strip (empty "new" deletes) | **v39.1** show RAM usage — process MB + container used/limit (Render 512 MB cap) |
+| `/skip` `/stop` | skip current post / stop |
+| `/replace <ch> "old" "new"` | userbot edits every post containing `old` in that channel, replacing all occurrences |
+| `/replace "old" "new"` | BOT edits every DB2-mirror post containing `old` (2-arg form) |
+| `/deletetext <ch> "text"` | userbot removes `text` from every matching post in that channel |
+| `/massdlt <chat> <start_link> <end_link>` | userbot deletes every message between the two message links (inclusive) — chunked + paced, flood-safe |
+| `/massdlt_status` `/massdlt_stop` | watch / stop the mass-delete |
+| `/forward <target> <source> <start_link> <end_link>` | userbot copies a message range into another channel — by reference, no "Forwarded from" tag, zero download |
+| `/forward_status` `/forward_stop` `/forward_resume` | watch / stop / resume a forward (cursor saved in MongoDB, survives crashes) |
+| `/add <channel> @bot1 [@bot2 …]` | userbot adds the bot(s) to the channel as ADMIN with as many rights as the userbot itself has |
+| `/addadmin [user id]` | owner adds a bot admin (full control-bot access); bare = list owner + admins |
+| `/removeadmin <user id>` | owner removes a bot admin |
+| `/setdb2 <n> <id\|off>` | set/clear a target's DB2 clean-mirror channel |
+| `/avoidtext [n] ["text"]` | DB2: list or add a credit string to strip from mirrored captions |
+| `/removeavoid <n> <#>` | remove an avoid string |
+| `/targatelinkmode <n> button\|caption [text]` | **v42** change how target n's download link is found — inline Download button, or a hidden hyperlink behind the exact caption trigger text |
+| `/keepimages on\|off` | **v42** GLOBAL switch (default ON): OFF = every image the media bot sends is discarded; only videos/.srt/text reach the DB |
+| `/scan4duplicates <channel_id>` | **v43.3** find duplicate posts in a DB2 channel — scans **cover-post (photo) captions only** (video/.srt captions ignored), compares ONLY the story description (hashtag lines like `#uncensored #recommended`, the `Episode/Subtitle/Censorship/Rating/Network:` block and the `edited` tail stripped first), first-10-words fuzzy match (≥75%, difflib), clustered report with `t.me/c/…` links, chunked output; **read by the USERBOT** (bots are blocked from channel history — the userbot must be a member, use `/invite`); runs async without blocking the scraper |
+
+## v42 updates
+- **Caption download links:** the `/target` wizard now asks (after DB/DB2) "Is the download link in a Button or in the Caption?". Caption mode asks for the EXACT text holding the hidden hyperlink and stores mode + trigger per target in MongoDB. Scraping that target extracts the embedded URL (`MessageEntityTextUrl`, exact Unicode-folded match — 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗛𝗲𝗿𝗲 == "Download Here") instead of looking for a Download button: a `t.me/<bot>?start=…` caption link continues through the normal LINK_BOT → Short-link → bypass chain, while any other URL is treated as the short link itself and goes straight to bypass. Change the mode later with `/targatelinkmode` (progress is kept).
+- **Restricted targets** ("Restrict saving content" / `noforwards`): the cover post can't be copied by reference, so the userbot downloads the cover image, re-uploads it to the DB channel as a NEW message with the exact original caption/buttons, and deletes the temp file immediately after (on success AND on failure). Videos/.srt collected from the media bot are unaffected, and the fresh DB cover mirrors to DB2 normally.
+- **`/targets` board:** button TTL raised from 150s to 30 minutes, and sending a NEW board instantly expires the chat's previous board — buttons on older scrolled-up boards show the "board expired" popup and change nothing.
+
+## DB2 clean mirror (bot-powered)
+Each target can have a second **DB2** channel (set in the `/target` wizard — it
+now asks for it after the DB channel — or later with `/setdb2 <n> <id>`). When
+the userbot posts new content into a target's DB channel, the **control BOT**
+automatically re-posts it into DB2 with a **cleaned caption**: every
+`/avoidtext` string is removed, plus ALL links (`t.me/…`, `http(s)://…`) and
+`@username` mentions are auto-stripped, and embedded-link formatting is
+dropped (captions are re-sent as plain text). Media, spoiler flags and
+buttons are preserved; posts arrive as fresh bot posts with no forward tag.
+**Requirement:** the BOT must be admin in both the DB channel (to see its
+posts) and DB2 (to post). Because DB2 posts are the bot's own, they can be
+re-edited flood-free with `/replace "old" "new"` (2 args = every DB2 channel,
+edited by the BOT; the 3-arg `/replace <ch> "old" "new"` form still uses the
+userbot on any channel).
+
+## MTProto bulk jobs (mass delete / forward / add-bot)
+All three run as paced background jobs, exactly like the bulk editor: one
+action every few seconds (`MASS_DELETE_DELAY` / `FORWARD_DELAY`, ~3s default,
+tunable via Render env), deletions go out in chunks of `MASS_DELETE_CHUNK`
+(default 100 ids per call) so even a 2000-message range is deleted
+piece-by-piece with rests — Telegram never sees a burst. FloodWait errors
+are slept through in place and the same work retried (up to
+`BULK_MAX_FLOOD`, default 900s). While any job runs, the scraper
+auto-pauses (Telegram's flood bucket is account-wide) and auto-resumes
+after; a summary is DM'd to the admin when a run finishes. `/forward`
+persists its cursor in MongoDB after every message, so `/forward_stop`, a
+crash, or a redeploy can be picked up with `/forward_resume`. `/add` needs
+the userbot to already be an admin with add-admins permission in that
+channel; it grants each bot as many admin rights as the userbot itself has there (group-only rights are skipped in channels).
+
+`/targets` and `/progress` show each channel's **title as a tappable link** instead of a bare id: private targets link to their last scraped post (`t.me/c/…` — works for any member, no invite link needed), DB channels use their cached invite link (falling back to the plain title).
+
+Extra admins: `/addadmin <user id>` (owner only) gives another Telegram user FULL control-bot access — every command, like the owner. Bare `/addadmin` lists owner + admins; `/removeadmin <user id>` revokes one. The list lives in MongoDB, so it survives restarts/redeploys.
+
+Bulk edits are **Telegram-safe paced**: after scanning, a background worker edits ONE message every `BULK_EDIT_DELAY` seconds (default 2.5s — tune via Render env), sleeps through FloodWait errors in place and retries the same message (up to `BULK_MAX_FLOOD`, default 900s), and posts live progress into the status message every 10 edits. The control bot stays responsive during long runs. 500-message run at default pacing ≈ 21 min. During a bulk edit the scraper auto-pauses (the flood bucket is account-wide — scraper sends share the same limit as edits) and auto-resumes when the run finishes; pacing is jittered (+0–1.5s random).
+
+`/help` and the tappable menu are generated from the same command list, so every command above appears in both. Telegram caches the "/" menu — if it looks stale after a redeploy, close/reopen the bot chat.
+
+## Flood-wait protection (v3)
+If Telegram returns FloodWaitError at login or mid-scrape, the process now
+SLEEPS in place for the required seconds instead of crashing — so Render never
+enters a crash-restart loop and Telegram's flood timer is never refreshed.
+
+## Crash resilience
+Progress (last processed message id) is written to MongoDB after EVERY post.
+If Render crashes or restarts, the bot resumes from that exact point —
+nothing is scraped twice.
+
+## Copy-mode delivery (v17)
+The cover post and all media arrive in the DB channel as FRESH posts with NO
+"Forwarded from" tag — the userbot re-sends each message's media by its
+Telegram file reference (send_file with msg.media), so Telegram copies the
+file server-to-server. Nothing is downloaded to disk or RAM (no temp files,
+stays flat on the 512MB free tier even for 700MB+ videos), and every file
+keeps its original format: playable video with thumbnail/duration/filename,
+spoiler flag, caption and buttons all preserved. Every send is VERIFIED:
+Telegram can silently accept a send whose file reference is dead (message
+created with no media — nothing appears in the channel); the bot detects
+this, deletes the empty message, refetches the source for a fresh
+reference and retries. Everything the media bot sends is mirrored —
+videos, stickers, photos AND text notes (like its deletion warnings).
+Media collection waits for the actual VIDEO to arrive before its
+quiet-timer can end collection — the media bot posts stickers instantly
+but uploads videos slowly, and a post with ZERO videos is failed +
+retried, never archived as sticker-only.
+
+IDs: use the numeric id (e.g. `-1001234567890`) or @username.
+The account must be a member of the target channel, bypass group (with
+post permission), and admin (post rights) in the DB channel.
+
+## Parallel multi-userbot scraping (v39)
+With 2+ sessions (`STRING_SESSION`, `STRING_SESSION2`, …) the scraper no longer rotates sequentially — it runs all available accounts **in parallel on the current target's pending posts** (account 1 → post #1, account 2 → post #2, …). A single remaining post goes to any one free account. Delivery into the DB channel is **serialized per DB channel**: one post's complete bundle (cover FIRST, then all its media) always lands before the next bundle starts, so posts never interleave (DB2 inherits the same order). Progress advances only past **contiguously finished** posts, so an out-of-order finish or a flood-parked account never makes the scraper skip a post. When a target is fully caught up the scraper moves to the next resumed target and fans its posts across all accounts the same way. A single account still uses the original sequential path. `/pause` lets in-flight posts finish; `/skip` aborts all in-flight posts.
+
+## Bypass routing (v39)
+Each captured short link's **domain** picks its bypass bot: a `/domainbypass` rule sends it ONLY to that bot, while any other link tries each pool bot (`/bypass` + `/addbypass`) in order, then `/altbypass` as the last resort. Every bot gets **2 attempts**; a 2nd failure fires an instant ⚠️ **Bypass Failure Alert** to the owner + all `/addadmin` admins (failed link, bypass bot, userbot, target channel, post msg id), and the post is skipped per the normal error policy — no crash, no stuck loop.
+
+## Multi-session later
+`session_manager.py` already round-robins — add more StringSessions to scale.
+
+## Duplicate protection (v45)
+
+Before a post's download chain even starts, the scraper checks its COVER caption against a fingerprint index built from the target's **DB2** channel (DB2 captions are the clean, credit-stripped copies):
+
+* **Fingerprint** — the story paragraph only (everything before the first `➪ Episode:-` metadata bullet; metadata-keyword lines also cut when the bullet is absent), NFKD-folded so 𝗯𝗼𝗹𝗱/𝘪𝘵𝘢𝘭𝘪𝘤/mono/fancy fonts collapse to plain text, URLs and @mentions stripped, tokens <3 chars and pure numbers dropped.
+* **Match** — exact fingerprint hit, else rapidfuzz `token_set_ratio >= 90`. A match SKIPS the whole post (no Download click, no bypass, no DB/DB2 bundle) and advances progress like a normal skip.
+* **One scan, ever** — built automatically in the background when you /target (or /setdb2) a channel with DB2, cached in MongoDB + RAM. /pause, /resume and restarts NEVER re-scan. `/dupescan <n>` forces a rebuild (e.g. after mass-editing DB2 captions). Bare `/dupescan` lists per-target index sizes.
+* **Auto-grows** — every successfully scraped cover is added to the index, so a repost of a NEW post is caught later with zero DB2 re-scanning.
+* **Per-target** — targets sharing one DB2 each load their own copy of the same fingerprints, so a cover already in the shared DB2 is skipped for BOTH targets.
+* **Notifications** — skips are DM'd in batches of 10 per target, plus a mandatory flush when that target is paused (bare /pause flushes all); /status shows the per-target dupe counter.
+
+### Duplicate protection — v45.1 updates
+
+* **Shared DB2 = shared index** — targets pointing at the SAME DB2 channel share one fingerprint set: scanning once indexes every sibling, every auto-added fingerprint propagates to all of them, and `/dupescan 7` when target 8 shares the DB2 answers "shares the existing index — no rescan". A forced `/dupescan <n>` rebuild refreshes the whole DB2 group.
+* **Pause/resume reporting** — `/pause <n>` appends that target's pending skip details (post ids + % match) to its reply; `/resume <n>` reports the target's session dupe total and clears any pending batch; bare `/pause` still DMs every target's batch.
+* **Build note** — requirements pins `rapidfuzz>=3.14.6,<4`, which publishes cp314 wheels: Render's default Python 3.14 builds natively (remove the `PYTHON_VERSION=3.11.9` override).
