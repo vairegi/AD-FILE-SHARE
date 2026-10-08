@@ -830,6 +830,24 @@ The v4.7 copyMessages batch call failed in production (400 'Chat not found' from
 
 ---
 
+## v4.9.4 (2026-10-08) — Bandwidth leak fix + dedup removal
+
+* **Root cause of the 4.44 GB / 7-day Render "Service-Initiated" usage:** two
+  unbounded `to_list(None)` fetches streamed the whole `files` collection
+  from Atlas on every call. Render counts Atlas->Render bytes as
+  service-initiated egress, so usage grows with every queued post — which is
+  why an identical repo with a small DB shows ~300 MB.
+* `queue_reset_to_position`: server-side `skip(n-1).limit(1)` + a
+  `{"db_message_id": 1}` projection (~100 bytes instead of megabytes).
+* `rematch_genres`: only docs with a non-empty string caption are pulled
+  (the only docs that can ever match a genre), same small projection.
+* **dedup.py REMOVED** — the owner forwards files personally, so no
+  duplicate scan is wanted. It was already dead code: nothing in
+  bot1/bot2/bot1_admin/main/db/scanner imported it. Zero behaviour change.
+* Confirmed clean: the Download-click path is `tokens.find_one` +
+  `files.find_one({"file_id": ...})` — specific-ID lookups only, never a
+  whole-collection scan.
+
 ## v4.9.0 (2026-10-03) — LinkGuard: self-hosted three-door link protection
 
 New optional layer in front of the paid shorteners: our own Cloudflare

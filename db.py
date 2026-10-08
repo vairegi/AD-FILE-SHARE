@@ -677,8 +677,12 @@ async def rematch_genres(category):
     genres = await list_genres(key)
     if not genres:
         return 0
-    docs = await _db.files.find({"category": key},
-                                {"file_id": 1, "caption": 1}).to_list(None)
+    # v4.9.4: only pull docs that CAN match a genre (non-empty string
+    # caption). Was: stream every file doc in the category from Atlas on
+    # every rescan; videos/srts without captions can never match anyway.
+    docs = await _db.files.find(
+        {"category": key, "caption": {"$type": "string", "$ne": ""}},
+        {"file_id": 1, "caption": 1}).to_list(None)
     for gdoc in genres:
         hits = [d["file_id"] for d in docs
                 if d.get("file_id")
@@ -899,10 +903,16 @@ async def queue_reset_to_position(n, category=None):
     if n < 1:
         return None
     base = {"category": _norm_key(category)} if category else {}
-    order = await _db.files.find(base).sort("db_message_id", 1).to_list(None)
-    if n > len(order):
+    # v4.9.4: server-side skip+limit with a projection. Was: pull EVERY doc
+    # in the category just to read the Nth db_message_id — megabytes of
+    # Atlas->Render egress per call (Render counts it as service-initiated
+    # bandwidth, and it grows with every post you queue). Now ~100 bytes.
+    order = await _db.files.find(
+        base, {"db_message_id": 1}
+    ).sort("db_message_id", 1).skip(n - 1).limit(1).to_list(1)
+    if not order:          # n beyond the end of the queue -> invalid position
         return None
-    target = order[n - 1]
+    target = order[0]
     tid = target["db_message_id"]
     await _db.files.update_many(
         {**base, "db_message_id": {"$lt": tid}, "posted": False},
