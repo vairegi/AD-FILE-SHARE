@@ -2578,3 +2578,87 @@ COMMANDS = {
     "removepremiumuser": cmd_removepremiumuser,
     "listpremiumuser": cmd_listpremiumuser,
 }
+
+from utils import is_admin  # v4.9.5 (harmless if already imported)
+
+# ── v4.9.5: LinkGuard observe-mode admin commands ─────────────────────
+async def cmd_lgobserve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /lgobserve on [minutes] | off — learn shortener exit hosts."""
+    if not await is_admin(update.effective_user.id):
+        return
+    import linkguard
+    args = context.args or []
+    on = not args or args[0].lower() != "off"
+    minutes = 60
+    if on and len(args) > 1:
+        try:
+            minutes = max(1, min(int(args[1]), 720))
+        except ValueError:
+            pass
+    res = await linkguard.set_observe(on, minutes)
+    if res is None:
+        await update.message.reply_text("❌ Worker unreachable — check /linkguard setup.")
+    else:
+        await update.message.reply_text(
+            f"👁 Observe-mode {'ON for ' + str(minutes) + ' min' if on else 'OFF'}.\n"
+            + ("Now solve ONE arolink yourself, then run /lghosts." if on else ""))
+
+
+async def cmd_lghosts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /lghosts — list referer hosts learned during observe-mode."""
+    if not await is_admin(update.effective_user.id):
+        return
+    import linkguard
+    res = await linkguard.observed_hosts()
+    if res is None:
+        await update.message.reply_text("❌ Worker unreachable.")
+        return
+    hosts = res.get("hosts") or []
+    state = "ON" if res.get("observe_on") else "OFF"
+    if not hosts:
+        await update.message.reply_text(
+            f"👁 Observe-mode: {state}\nNo hosts learned yet.")
+        return
+    lines = [f"• {h['host']}  (hits: {h['hits']})" for h in hosts]
+    await update.message.reply_text(
+        f"👁 Observe-mode: {state}\nLearned hosts:\n" + "\n".join(lines)
+        + "\n\nApprove with: /lgallow <host>")
+
+
+async def cmd_lgallow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /lgallow <host> — approve a host into the Referer allowlist."""
+    if not await is_admin(update.effective_user.id):
+        return
+    import linkguard
+    if not context.args:
+        await update.message.reply_text("Usage: /lgallow <host>")
+        return
+    res = await linkguard.add_ref_host(context.args[0])
+    if res and res.get("ok"):
+        await update.message.reply_text(f"✅ {res.get('added')} added to the allowlist.")
+    else:
+        await update.message.reply_text(f"❌ Failed: {(res or {}).get('error', 'worker unreachable')}")
+
+
+async def cmd_lgclear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /lgclear — wipe the learned-hosts list."""
+    if not await is_admin(update.effective_user.id):
+        return
+    import linkguard
+    res = await linkguard.clear_observed()
+    await update.message.reply_text("🧹 Learned-hosts list cleared."
+                                    if res is not None else "❌ Worker unreachable.")
+
+
+LINKGUARD_ADMIN_COMMANDS = {
+    "lgobserve": cmd_lgobserve,
+    "lghosts": cmd_lghosts,
+    "lgallow": cmd_lgallow,
+    "lgclear": cmd_lgclear,
+}
+
+
+
+# v4.9.5: register LinkGuard admin commands
+for _lg_name, _lg_fn in LINKGUARD_ADMIN_COMMANDS.items():
+    COMMANDS.setdefault(_lg_name, _lg_fn)

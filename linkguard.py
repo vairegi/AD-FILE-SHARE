@@ -165,3 +165,43 @@ async def protect(long_url: str, grant_slug: str = None):
     if not await enabled():
         return None
     return await mint(long_url, grant_slug=grant_slug)
+
+# ── v1.2: observe-mode + host-learning admin calls ────────────────────
+async def _admin_post(path: str, payload=None):
+    """POST an admin route on the LinkGuard worker; None on failure."""
+    base, key = await _cfg()
+    if not base:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(f"{base}{path}",
+                                  headers={"x-admin-key": key},
+                                  json=payload or {})
+            if r.status_code == 200:
+                return r.json()
+            log.warning("linkguard admin %s -> HTTP %s: %s", path,
+                        r.status_code, r.text[:200])
+    except Exception as exc:
+        log.warning("linkguard admin %s failed: %s", path, exc)
+    return None
+
+
+async def set_observe(on: bool, minutes: int = 60):
+    """Turn observe-mode on/off on the worker (learn shortener exit hosts)."""
+    return await _admin_post("/api/admin/observe",
+                             {"on": bool(on), "minutes": int(minutes)})
+
+
+async def observed_hosts():
+    """List referer hosts the worker learned while observing."""
+    return await _admin_post("/api/admin/observed_hosts")
+
+
+async def add_ref_host(host: str):
+    """Approve one host into the /finish2 Referer allowlist."""
+    return await _admin_post("/api/admin/ref_hosts_add", {"host": host})
+
+
+async def clear_observed():
+    return await _admin_post("/api/admin/observed_clear")
+

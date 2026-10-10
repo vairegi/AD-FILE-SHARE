@@ -504,6 +504,23 @@ fallback path is unchanged.
 
 ---
 
+## v4.9.5 (2026-10-10) — LinkGuard observe-mode (arolink false-bypass fix)
+
+* **Bug:** legit users who fully solved the arolink shortener were shown
+  "Bypass detected — verification incomplete". Cause: paid shorteners exit
+  through ad-network intermediate hosts whose Referer was not in the
+  /finish2 allowlist (static list only knew arolinks.com / vplink.in).
+  vplink mostly keeps its own referer (~8/10) — arolink never did (0/10).
+* **Fix (worker v1.2, now versioned in this repo as worker.js):**
+  observe-mode records the real exit hosts instead of false-denying, plus
+  admin routes /api/admin/observe, /observed_hosts, /ref_hosts_add,
+  /observed_clear. Cookie + UA + single-use HMAC grant checks are
+  untouched — copied links stay worthless.
+* **Bot commands:** /lgobserve on|off [min], /lghosts, /lgallow <host>,
+  /lgclear (admins only; in /help).
+* Also folds in v4.9.4 (Render bandwidth fix: bounded files queries;
+  dedup.py removed — owner forwards files personally).
+
 ## v4.0 (2026-09-25) — colored post buttons, sticker→main channel, caption commands, timed broadcasts
 
 **Colored channel-post buttons (Bot API 9.4 `InlineKeyboardButton.style`).**
