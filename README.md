@@ -504,6 +504,19 @@ fallback path is unchanged.
 
 ---
 
+## v4.9.6 (2026-10-14) — Premium management fixed & completed
+
+* **Bug:** /addpremiumuser granted premium but the confirmation crashed
+  with `NameError: name 'utils' is not defined` (missing module import).
+  The DB write succeeded; only the reply failed.
+* /addpremiumuser now accepts NEGATIVE durations to remove time
+  (e.g. /addpremiumuser 123 -10day), plus alias /reducepremiumuser.
+* /listpremiumuser shows every premium user with days-left/added/expiry.
+* /removepremiumuser <id> revokes premium (shortener applies again).
+* /verified_users also lists premium users (they never touch the
+  shortener so they never appear in verification logs); numeric
+  /verified_users <id> shows the premium block too.
+
 ## v4.9.5 (2026-10-10) — LinkGuard observe-mode (arolink false-bypass fix)
 
 * **Bug:** legit users who fully solved the arolink shortener were shown

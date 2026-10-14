@@ -1416,6 +1416,24 @@ async def premium_remove(user_id: int) -> bool:
     return bool(r.deleted_count)
 
 
+async def premium_reduce(user_id: int, seconds: int) -> dict | None:
+    """v4.9.6: subtract seconds from a user's premium expiry. If the expiry
+    lands at/below now, the premium row is deleted (fully expired). Returns
+    the updated doc, or None if the user had no premium row."""
+    user_id = int(user_id)
+    prev = await premium_get(user_id)
+    if not prev:
+        return None
+    new_expiry = float(prev.get("expiry") or 0) - int(seconds)
+    if new_expiry <= now():
+        await premium_remove(user_id)
+        return {**prev, "expiry": new_expiry, "expired": True}
+    prev["expiry"] = new_expiry
+    await _db[PREMIUM_COLLECTION].update_one(
+        {"user_id": user_id}, {"$set": {"expiry": new_expiry}})
+    return prev
+
+
 async def premium_get(user_id: int):
     return await _db[PREMIUM_COLLECTION].find_one({"user_id": int(user_id)})
 

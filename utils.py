@@ -232,3 +232,9 @@ def format_ram_report() -> str:
         "per-bot split is an estimate — Telegram/Render only see the total.",
     ]
     return "\n".join(lines)
+
+
+def human_duration_seconds(secs):
+    """v4.9.6: human-readable duration from raw seconds (premium replies).
+    Delegates to the existing human_duration so wording stays identical."""
+    return human_duration(int(secs))

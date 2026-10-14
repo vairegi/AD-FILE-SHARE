@@ -40,6 +40,7 @@ import db
 import scanner
 from utils import admin_only, format_ram_report, human_duration, parse_duration
 from telegram.helpers import escape_markdown
+import utils  # v4.9.6: human_duration in premium replies
 
 log = logging.getLogger("bot1.admin")
 
@@ -1485,21 +1486,49 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     offset = 1 if args and args[0] in ("yesterday", "yday", "-1") else 0
     users = await db.list_verified_today(offset)
     day = db.ist_today(offset)
+    # v4.9.6: premium users skip the shortener, so they never appear in
+    # verification logs — always surface them, even on a zero-verification day.
+    prem_all = await db.premium_list(include_expired=False)
     if not users:
-        await update.message.reply_text(
-            f"📭 No verifications recorded for {day} "
-            f"({'yesterday' if offset else 'today so far'}).")
+        msg = (f"📭 No verifications recorded for {day} "
+               f"({'yesterday' if offset else 'today so far'}).")
+        if prem_all:
+            lines = []
+            for p in prem_all:
+                left_s = max(0.0, float(p.get("expiry") or 0) - db.now())
+                lines.append(f"👑 {int(p['user_id'])} — left "
+                             f"{utils.human_duration_seconds(left_s)}")
+            msg += ("\n\n👑 Premium users (skip shortener — not in verified list):\n"
+                    + "\n".join(lines))
+        await update.message.reply_text(msg)
         return
     total_verifs = sum(int(u.get("count") or 1) for u in users)
+    # v4.9.6: premium users never touch the shortener, so they never appear in
+    # verification_logs — surface them alongside instead of hiding them.
+    prem = prem_all
+    prem_ids = {int(p["user_id"]) for p in prem}
     header_txt = (f"✅ Verified users — {day} "
                   f"({'yesterday' if offset else 'since midnight IST'}): "
-                  f"{len(users)} users · {total_verifs} verifications")
+                  f"{len(users)} users · {total_verifs} verifications"
+                  + (f" · 👑 {len(prem_ids)} premium (skip shortener)"
+                     if prem_ids else ""))
     payloads = _verified_table_payload(users)
     try:
         await update.message.reply_text(header_txt)
         for pl in payloads:
             pl["chat_id"] = update.effective_chat.id
             await context.bot._post("sendRichMessage", data=pl)
+        if prem:
+            lines = []
+            for p in prem:
+                left_s = float(p.get("expiry") or 0) - db.now()
+                lines.append(
+                    f"👑 {int(p['user_id'])} — left "
+                    f"{utils.human_duration_seconds(max(0, left_s))}, added "
+                    f"{db.ist_str(p.get('added_at')) if hasattr(db, 'ist_str') else p.get('added_at')}")
+            await update.message.reply_text(
+                "👑 Premium users (skip shortener — not in the verified list):\n"
+                + "\n".join(lines))
         return
     except Exception as exc:
         log.warning("rich verified table failed (%s); text fallback", exc)
@@ -1539,6 +1568,14 @@ async def _verified_user_detail(update, context, user_id, extra_args):
         await update.message.reply_text(
             f"📭 No verifications for user {user_id} on {day} "
             f"({'yesterday' if offset else 'today'}).")
+        prem_doc = await db.premium_get(user_id)
+        if prem_doc:
+            left_s = max(0.0, float(prem_doc.get("expiry") or 0) - db.now())
+            state = "ACTIVE" if left_s > 0 else "EXPIRED"
+            await update.message.reply_text(
+                f"👑 Premium: {state}" +
+                (f" — {utils.human_duration_seconds(left_s)} left."
+                 if left_s > 0 else ""))
         return
     name = (doc.get("name") or
             (f"@{doc['username']}" if doc.get("username") else None)
@@ -1608,6 +1645,18 @@ async def _verified_user_detail(update, context, user_id, extra_args):
         lines2.append("")
         lines2.append("ℹ️ Per-file times start recording from v4.8; "
                       "older verifications only have the totals above.")
+    # v4.9.6: premium users never touch the shortener — show their status too.
+    prem_doc = await db.premium_get(user_id)
+    if prem_doc and float(prem_doc.get("expiry") or 0) > db.now():
+        left_s = float(prem_doc["expiry"]) - db.now()
+        lines2.append("")
+        lines2.append(
+            f"👑 Premium: ACTIVE — {utils.human_duration_seconds(left_s)} left "
+            f"(expires in {left_s/86400:.2f} day(s)). This user skips the shortener.")
+    elif prem_doc:
+        lines2.append("")
+        lines2.append("👑 Premium: EXPIRED.")
+
     await update.message.reply_text("\n".join(lines2), parse_mode="HTML",
                                     disable_web_page_preview=True)
 
@@ -2308,23 +2357,23 @@ _PREM_UNITS = {
 
 
 def _premium_duration(text):
-    """'7h' / '1day' / '1 day' / '3day' / '1week' / '30day' / '12hour' -> seconds.
-    Returns None when nothing parseable. A bare number means minutes (same
-    convention as the rest of the bot's duration parser)."""
-    import re
-    s = (text or "").strip().lower()
-    if not s:
-        return None
-    total, found = 0, False
-    for num, unit in re.findall(r"(\d+)\s*([a-z]+)", s):
-        if unit in _PREM_UNITS:
-            total += int(num) * _PREM_UNITS[unit]
-            found = True
-    if found:
-        return total or None
-    if s.isdigit():
-        return int(s) * 60
-    return None
+    """Parse '30day'/'1week'/'7h' etc. into seconds. v4.9.6: a leading '-'
+    returns NEGATIVE seconds (premium time reduction)."""
+    import re as _re
+    neg = False
+    t = (text or "").strip().lower().replace(" ", "")
+    if t.startswith("-"):
+        neg, t = True, t[1:]
+    secs = utils.parse_duration(t) if hasattr(utils, "parse_duration") else None
+    if secs is None:
+        m2 = _re.fullmatch(r"(\d+)(s|m|h|day|days|d|week|weeks|w)", t)
+        if not m2:
+            return None
+        n, unit = int(m2.group(1)), m2.group(2)
+        secs = n * {"s": 1, "m": 60, "h": 3600, "d": 86400, "day": 86400,
+                    "days": 86400, "w": 604800, "week": 604800,
+                    "weeks": 604800}[unit]
+    return -secs if neg else secs
 
 
 async def _resolve_premium_target(arg, context):
@@ -2439,7 +2488,8 @@ async def cmd_addpremiumuser(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "Usage: /addpremiumuser <id|@username> <duration>\n"
             "Examples: /addpremiumuser 123456789 7h\n"
-            "          /addpremiumuser 123456789 1day · 3day · 1week · 30day")
+            "          /addpremiumuser 123456789 1day · 3day · 1week · 30day\n"
+            "          /addpremiumuser 123456789 -10day  (remove time)")
         return
     uid = await _resolve_premium_target(args[0], context)
     if not uid:
@@ -2448,10 +2498,30 @@ async def cmd_addpremiumuser(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "(use a numeric id or @username).")
         return
     secs = _premium_duration(" ".join(args[1:]))
-    if not secs or secs < 60:
+    if not secs or (0 < secs < 60):
         await update.message.reply_text(
             "\u274C Invalid duration. Use s/m/h/day/week — "
-            "e.g. 7h, 1day, 3day, 1week, 30day.")
+            "e.g. 7h, 1day, 3day, 1week, 30day (prefix with - to remove time, "
+            "e.g. -10day).")
+        return
+    # v4.9.6: a negative duration REMOVES time (e.g. /addpremiumuser 123 -10day
+    # undoes a mistaken grant). Positive grants extend as before.
+    if secs < 0:
+        doc = await db.premium_reduce(uid, -secs)
+        if doc is None:
+            await update.message.reply_text(
+                f"\u274C {uid} has no premium to reduce.")
+            return
+        if doc.get("expired"):
+            await update.message.reply_text(
+                f"\u2705 Removed {utils.human_duration(-secs)} from {uid} —\n"
+                "that used up all remaining time: premium is now EXPIRED.")
+            return
+        left = (doc["expiry"] - db.now()) / 86400
+        await update.message.reply_text(
+            f"\u2705 Removed {utils.human_duration(-secs)} from {uid}\n"
+            f"Premium left: {utils.human_duration_seconds(doc['expiry'] - db.now())} "
+            f"({left:.2f} day(s)).")
         return
     doc = await db.premium_add(uid, secs, update.effective_user.id)
     left = (doc["expiry"] - db.now()) / 86400
@@ -2575,6 +2645,7 @@ COMMANDS = {
     "offbrowse": cmd_offbrowse,
     # v4.6: VIP / premium users (shortener bypass)
     "addpremiumuser": cmd_addpremiumuser,
+    "reducepremiumuser": cmd_addpremiumuser,   # v4.9.6: explicit alias for negative durations
     "removepremiumuser": cmd_removepremiumuser,
     "listpremiumuser": cmd_listpremiumuser,
 }
