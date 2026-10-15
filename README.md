@@ -504,6 +504,18 @@ fallback path is unchanged.
 
 ---
 
+## v4.9.7 (2026-10-15) — /bantimecontrol + /help overhaul
+
+* **New:** /bantimecontrol <time> — the anti-bypass minimum solve time
+  is no longer hard-coded at 150 s. Stored in DB (survives restarts),
+  applies immediately (60 s cache busted on set), range 10s–3600s.
+  No args shows the current value.
+* **Fix:** /help showed the literal text '<b>LinkGuard (link protection)</b>'
+  — the tags were double-escaped. Also removed a duplicated /checkram line.
+* **/help regrouped:** new 👑 Premium section (add/reduce/remove/list),
+  LinkGuard section now includes /lgobserve /lghosts /lgallow /lgclear,
+  /bantimecontrol listed under Users & system.
+
 ## v4.9.6 (2026-10-14) — Premium management fixed & completed
 
 * **Bug:** /addpremiumuser granted premium but the confirmation crashed

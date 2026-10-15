@@ -58,7 +58,26 @@ def _is_gone(exc) -> bool:
 
 # A genuine shortener visit (redirect chain + on-page timer + captcha)
 # cannot complete faster than this. Faster == bypass script.
+# v4.9.7: this is now just the DEFAULT — the live threshold is a DB setting,
+# tunable at runtime with /bantimecontrol (60 s in-process cache keeps the
+# per-request DB cost at ~zero).
 BYPASS_MIN_SECONDS = 150
+_bypass_min_cache = {"value": None, "ts": 0.0}
+
+
+async def bypass_min_seconds() -> int:
+    """Current anti-bypass minimum solve time in seconds (DB-backed)."""
+    import time as _t
+    c = _bypass_min_cache
+    if c["value"] is not None and _t.time() - c["ts"] < 60:
+        return c["value"]
+    try:
+        v = int((await db.get_settings()).get("bypass_min_seconds")
+                or BYPASS_MIN_SECONDS)
+    except Exception:
+        v = BYPASS_MIN_SECONDS
+    c["value"], c["ts"] = v, _t.time()
+    return v
 
 # Category post times are always interpreted in IST (Asia/Kolkata).
 IST = "Asia/Kolkata"
@@ -115,13 +134,15 @@ HELP_ADMIN = (
     "/setverifytime &lt;hours&gt; · /settokenttl &lt;minutes&gt;\n"
     "/shortenermsg · /shortenerbotmsg · /verifymsg\n"
     "/shortenerbtn &lt;label&gt; | &lt;url&gt; · /clearshortenerbtns\n"
-    "\n"
-
-    "🛡 &lt;b&gt;LinkGuard (link protection)&lt;/b&gt;\n"
-
+    "\n<b>🛡 LinkGuard (link protection)</b>\n"
     "/linkguard · /linkguard on|off · /linkguard setup &lt;url&gt; &lt;key&gt;\n"
-
     "/linkguard refhosts · /linkguard honeypot &lt;url&gt; · /linkguard decoys &lt;urls&gt;\n"
+    "/lgobserve on|off [min] · /lghosts · /lgallow &lt;host&gt; · /lgclear\n"
+    "\n<b>👑 Premium</b>\n"
+    "/addpremiumuser &lt;id|@user&gt; &lt;time&gt; — grant/extend (1day · 1week · 30day)\n"
+    "/reducepremiumuser &lt;id&gt; -&lt;time&gt; — remove time (e.g. -10day)\n"
+    "/removepremiumuser &lt;id|@user&gt; — revoke premium\n"
+    "/listpremiumuser — every premium user: added, days left, expiry\n"
     "\n<b>▸ Channel posts</b>\n"
     "/addbutton &lt;label&gt; | &lt;link&gt; [| green|blue|red] — extra button under every post\n"
     "/buttons · /removebutton &lt;n&gt; · /clearbuttons — manage extra buttons\n"
@@ -133,12 +154,12 @@ HELP_ADMIN = (
     "/broadcast &lt;message&gt; — copy to all Bot 1 users (asks for a delete timer)\n"
     "/stats — overview + per-pipeline breakdown\n"
     "/ban &lt;user_id&gt; · /unban &lt;user_id&gt; · /banlist\n"
+    "/bantimecontrol &lt;time&gt; — anti-bypass min solve time (default 150s)\n"
     "/banmessage &lt;text|reply|reset&gt; — the banned-user notice\n"
     "/addadmin &lt;user_id&gt; — promote an admin\n"
-    "/verified_users [yesterday] — rich table; names link to profiles (v4.8)\n"
-    "/verified_users &lt;user_id&gt; — that user's fetches today (file, IST time, solve time)\n"
-    "/checkram — RAM usage: both bots together + per-bot estimate"
-    "/checkram — RAM usage: both bots together + per-bot estimate"
+    "/verified_users [yesterday] — rich table; premium users included (v4.9.6)\n"
+    "/verified_users &lt;user_id&gt; — that user's fetches + premium status\n"
+    "/checkram — RAM usage: both bots together + per-bot estimate\n"
     "\n\n<b>▸ Genres &amp; browse menu</b> (v4.4)\n"
     "/addgenre &lt;pipeline&gt; &lt;genre&gt; — add a genre (one-time caption scan, then auto)\n"
     "/delgenre &lt;pipeline&gt; &lt;genre&gt; · /genres [pipeline] — manage genres\n"
@@ -390,11 +411,12 @@ async def process_verify(bot, chat_id, user_id, file_id, token,
 
     # ── anti-bypass timing gate ───────────────────────────────
     elapsed = db.now() - float(doc.get("created_at") or 0)
-    # v4.1: only treat a sub-150s return as a bypass when the token's link was
-    # served by a LIVE shortener. Tokens issued while every provider was down
-    # ('down') reached the user as a direct link — instant return is expected
-    # and must NEVER ban them.
-    if (elapsed < BYPASS_MIN_SECONDS
+    # v4.1: only treat a sub-threshold return as a bypass when the token's link
+    # was served by a LIVE shortener. Tokens issued while every provider was
+    # down ('down') reached the user as a direct link — instant return is
+    # expected and must NEVER ban them.
+    _bypass_min = await bypass_min_seconds()   # v4.9.7: /bantimecontrol
+    if (elapsed < _bypass_min
             and doc.get("shortener_state", "active") != "down"
             and not via_gate):   # v4.7: '_g' links already passed Gate 2
         await db.mark_token_used(token)  # burn the bypassed link
@@ -414,7 +436,7 @@ async def process_verify(bot, chat_id, user_id, file_id, token,
                     f"🚨 User {user_id} auto-banned for bypassing the "
                     f"verification link (instant ban, no warnings).\n"
                     f"Username: {uname}\n"
-                    f"Elapsed: {elapsed:.1f}s\n"
+                    f"Elapsed: {elapsed:.1f}s (min {_bypass_min}s)\n"
                     f"/unban {user_id} to reverse")
             except Exception as exc:
                 log.warning("admin alert to %s failed: %s", aid, exc)

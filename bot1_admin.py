@@ -2733,3 +2733,44 @@ LINKGUARD_ADMIN_COMMANDS = {
 # v4.9.5: register LinkGuard admin commands
 for _lg_name, _lg_fn in LINKGUARD_ADMIN_COMMANDS.items():
     COMMANDS.setdefault(_lg_name, _lg_fn)
+
+
+# ── v4.9.7: anti-bypass timing gate control ───────────────────────────
+@admin_only
+async def cmd_bantimecontrol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /bantimecontrol <time> — set the anti-bypass minimum solve time.
+    Users returning from the shortener faster than this are auto-banned.
+    No args = show current value. Stored in DB: survives restarts."""
+    args = context.args or []
+    if not args:
+        cur = int((await db.get_settings()).get("bypass_min_seconds") or 150)
+        await update.message.reply_text(
+            f"⏱ Anti-bypass minimum solve time: {cur}s "
+            f"({utils.human_duration(cur)})\n"
+            "Set it with: /bantimecontrol <time> — e.g. 150s · 3m · 5m\n"
+            "Anyone returning faster than this is auto-banned.")
+        return
+    raw = "".join(args).strip().lower()
+    secs = utils.parse_duration(raw)
+    if secs is None:
+        import re as _re
+        m = _re.fullmatch(r"(\d+)(?:s|sec|secs|seconds?)?", raw)
+        if m:
+            secs = int(m.group(1))
+    if secs is None or secs < 10 or secs > 3600:
+        await update.message.reply_text(
+            "❌ Invalid time. Allowed range 10s–3600s — "
+            "e.g. /bantimecontrol 150s or /bantimecontrol 3m.")
+        return
+    await db.update_settings({"bypass_min_seconds": int(secs)})
+    import bot1 as _b1          # deferred: bot1 imports this module at startup
+    _b1._bypass_min_cache["value"] = None    # apply immediately, no restart
+    await update.message.reply_text(
+        f"✅ Anti-bypass minimum solve time set to {int(secs)}s "
+        f"({utils.human_duration(int(secs))}).\n"
+        "Anyone returning from the shortener faster than this is auto-banned. "
+        "Applies immediately and survives restarts.")
+
+
+COMMANDS["bantimecontrol"] = cmd_bantimecontrol
+
