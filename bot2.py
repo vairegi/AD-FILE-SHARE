@@ -860,6 +860,32 @@ async def process_delivery(bot, chat_id, user_id, file_id, token):
 
     await db.mark_token_used(token)
 
+    # v4.9.9: premium users skip the shortener, so Gate 2 (bot1) never logs
+    # them. Log their fetch HERE instead — same row format as regular users
+    # (elapsed 0s, real category, real count, 👑 premium in Via) — so
+    # /verified_users and /verified_users <id> show them exactly like regular
+    # users. Regular users are already logged at Gate 2, so this only fires
+    # for premium (no double-counting).
+    try:
+        if await db.premium_active(user_id):
+            try:
+                _fu = update.effective_user
+            except Exception:
+                _fu = None
+            _ud = await db.get_user(user_id) or {}
+            await db.record_verification(
+                user_id,
+                name=(getattr(_fu, "full_name", None)
+                      or getattr(_fu, "first_name", None)
+                      or _ud.get("name") or _ud.get("first_name")),
+                username=(getattr(_fu, "username", None)
+                          or _ud.get("username")),
+                elapsed=0.0,
+                category=item.get("category"),
+                link_type="👑 premium")
+    except Exception as exc:
+        log.warning("premium fetch log failed: %s", exc)
+
     # v4.8.3: per-file copy_message delivery (the pre-v4.7 proven path).
     # The copyMessages batch failed on production with 400 "Chat not found";
     # per-file copies keep working AND let /addfilecaption ride UNDER each

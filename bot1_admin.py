@@ -1465,10 +1465,7 @@ def _verified_table_payload(users):
                 or str(u.get("user_id")))
         name = str(name)[:20]
         el = u.get("elapsed")
-        if "_premium_left_s" in u:
-            elapsed = f"{u['_premium_left_s'] / 86400:.1f}d left"
-        else:
-            elapsed = f"{el:.0f}s" if el is not None else "—"
+        elapsed = f"{el:.0f}s" if el is not None else "—"
         cat = ", ".join(u.get("categories") or []) or "—"
         link = ", ".join(u.get("link_types") or []) or "—"
         rows.append([cell(str(i)), link_cell(name, u.get("user_id")),
@@ -1503,10 +1500,12 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # v4.9.6: premium users skip the shortener, so they never appear in
     # verification logs — always surface them, even on a zero-verification day.
     prem_all = await db.premium_list(include_expired=False)
-    if not users and not prem_all:
+    if not users:
         await update.message.reply_text(
             f"📭 No verifications recorded for {day} "
-            f"({'yesterday' if offset else 'today so far'}).")
+            f"({'yesterday' if offset else 'today so far'})."
+            + (f" 👑 {len(prem_all)} premium active (no fetches today)."
+               if prem_all else ""))
         return
     total_verifs = sum(int(u.get("count") or 1) for u in users)
     # v4.9.6: premium users never touch the shortener, so they never appear in
@@ -1518,26 +1517,8 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
                   f"{len(users)} users · {total_verifs} verifications"
                   + (f" · 👑 {len(prem_ids)} premium (skip shortener)"
                      if prem_ids else ""))
-    # v4.9.8: premium users become rows in the SAME table — name linked like
-    # everyone else, 👑 premium in Link Type, days-left in Elapsed.
-    prem_rows = []
-    for p in prem:
-        uid_p = int(p["user_id"])
-        try:
-            udoc = await db.get_user(uid_p) or {}
-        except Exception:
-            udoc = {}
-        prem_rows.append({
-            "user_id": uid_p,
-            "name": udoc.get("name") or udoc.get("first_name"),
-            "username": udoc.get("username"),
-            "elapsed": None,
-            "categories": [],
-            "link_types": ["👑 premium"],
-            "count": None,
-            "_premium_left_s": max(0.0, float(p.get("expiry") or 0) - db.now()),
-        })
-    users = users + prem_rows
+    # v4.9.9: premium fetches are logged at delivery (bot2), so premium users
+    # are REAL rows in `users` already — no synthetic merging anymore.
     payloads = _verified_table_payload(users)
     try:
         await update.message.reply_text(header_txt)

@@ -504,6 +504,22 @@ fallback path is unchanged.
 
 ---
 
+## v4.9.9 (2026-10-15) — premium users logged as real fetch rows
+
+* **Root cause of 'premium rows show no category/count':** premium
+  users skip the shortener, so Gate 2 never logged them — there was
+  no data to show. Now bot2 logs every premium fetch at delivery
+  (record_verification with elapsed=0, real category, real count,
+  link_type='👑 premium'). Regular users still log at Gate 2 only —
+  no double-counting.
+* /verified_users: premium users are normal table rows — name
+  (profile-linked), 0s elapsed, real categories, real count, 👑 premium
+  in Link Type. The v4.9.8 synthetic merge is removed.
+* /verified_users <id>: premium users with fetches get the SAME
+  per-file detail table as regular users (plus premium status dates).
+  The premium-only card remains as the fallback when they have not
+  fetched anything that day.
+
 ## v4.9.8 (2026-10-15) — /verified_users: premium users inside the table
 
 * Premium users are now ROWS in the main /verified_users rich table:
