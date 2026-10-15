@@ -504,6 +504,17 @@ fallback path is unchanged.
 
 ---
 
+## v4.9.8 (2026-10-15) — /verified_users: premium users inside the table
+
+* Premium users are now ROWS in the main /verified_users rich table:
+  name (profile-linked like everyone), days-left in Elapsed, 👑 premium
+  in Link Type. The separate '👑 Premium users...' message is gone.
+* Premium rows appear even on zero-verification days (table-only output).
+* /verified_users <id> for a premium user with no logs now shows a proper
+  detail card (name, ID, status, time left, added/expiry dates in IST)
+  instead of a bare line — and never a raw unix timestamp again.
+* With-logs premium detail also shows real added/expiry dates.
+
 ## v4.9.7 (2026-10-15) — /bantimecontrol + /help overhaul
 
 * **New:** /bantimecontrol <time> — the anti-bypass minimum solve time

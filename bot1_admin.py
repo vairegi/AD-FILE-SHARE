@@ -1433,6 +1433,17 @@ async def cmd_banlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════════
 #  /verified_users (v4.3) — today's verifications as a rich table
 # ══════════════════════════════════════════════════════════════
+def _fmt_ist_ts(ts):
+    """v4.9.8: unix ts -> 'DD Mon YYYY, HH:MM AM/PM IST' (never a raw float)."""
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    try:
+        return _dt.datetime.fromtimestamp(
+            float(ts), ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+    except Exception:
+        return "—"
+
+
 def _verified_table_payload(users):
     """Bot API 10.1+ InputRichBlockTable payload — SAME proven shape as
     /banlist (compact cells of InputRichText), is_compact=True. v4.8: each
@@ -1454,12 +1465,15 @@ def _verified_table_payload(users):
                 or str(u.get("user_id")))
         name = str(name)[:20]
         el = u.get("elapsed")
-        elapsed = f"{el:.0f}s" if el is not None else "—"
+        if "_premium_left_s" in u:
+            elapsed = f"{u['_premium_left_s'] / 86400:.1f}d left"
+        else:
+            elapsed = f"{el:.0f}s" if el is not None else "—"
         cat = ", ".join(u.get("categories") or []) or "—"
         link = ", ".join(u.get("link_types") or []) or "—"
         rows.append([cell(str(i)), link_cell(name, u.get("user_id")),
                      cell(elapsed), cell(cat), cell(link),
-                     cell(str(u.get("count") or 1))])
+                     cell(str(u.get("count") or "—"))])
         if len(rows) == 40:
             pages.append(rows); rows = []
     if rows:
@@ -1489,18 +1503,10 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # v4.9.6: premium users skip the shortener, so they never appear in
     # verification logs — always surface them, even on a zero-verification day.
     prem_all = await db.premium_list(include_expired=False)
-    if not users:
-        msg = (f"📭 No verifications recorded for {day} "
-               f"({'yesterday' if offset else 'today so far'}).")
-        if prem_all:
-            lines = []
-            for p in prem_all:
-                left_s = max(0.0, float(p.get("expiry") or 0) - db.now())
-                lines.append(f"👑 {int(p['user_id'])} — left "
-                             f"{utils.human_duration_seconds(left_s)}")
-            msg += ("\n\n👑 Premium users (skip shortener — not in verified list):\n"
-                    + "\n".join(lines))
-        await update.message.reply_text(msg)
+    if not users and not prem_all:
+        await update.message.reply_text(
+            f"📭 No verifications recorded for {day} "
+            f"({'yesterday' if offset else 'today so far'}).")
         return
     total_verifs = sum(int(u.get("count") or 1) for u in users)
     # v4.9.6: premium users never touch the shortener, so they never appear in
@@ -1512,23 +1518,32 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
                   f"{len(users)} users · {total_verifs} verifications"
                   + (f" · 👑 {len(prem_ids)} premium (skip shortener)"
                      if prem_ids else ""))
+    # v4.9.8: premium users become rows in the SAME table — name linked like
+    # everyone else, 👑 premium in Link Type, days-left in Elapsed.
+    prem_rows = []
+    for p in prem:
+        uid_p = int(p["user_id"])
+        try:
+            udoc = await db.get_user(uid_p) or {}
+        except Exception:
+            udoc = {}
+        prem_rows.append({
+            "user_id": uid_p,
+            "name": udoc.get("name") or udoc.get("first_name"),
+            "username": udoc.get("username"),
+            "elapsed": None,
+            "categories": [],
+            "link_types": ["👑 premium"],
+            "count": None,
+            "_premium_left_s": max(0.0, float(p.get("expiry") or 0) - db.now()),
+        })
+    users = users + prem_rows
     payloads = _verified_table_payload(users)
     try:
         await update.message.reply_text(header_txt)
         for pl in payloads:
             pl["chat_id"] = update.effective_chat.id
             await context.bot._post("sendRichMessage", data=pl)
-        if prem:
-            lines = []
-            for p in prem:
-                left_s = float(p.get("expiry") or 0) - db.now()
-                lines.append(
-                    f"👑 {int(p['user_id'])} — left "
-                    f"{utils.human_duration_seconds(max(0, left_s))}, added "
-                    f"{db.ist_str(p.get('added_at')) if hasattr(db, 'ist_str') else p.get('added_at')}")
-            await update.message.reply_text(
-                "👑 Premium users (skip shortener — not in the verified list):\n"
-                + "\n".join(lines))
         return
     except Exception as exc:
         log.warning("rich verified table failed (%s); text fallback", exc)
@@ -1571,11 +1586,26 @@ async def _verified_user_detail(update, context, user_id, extra_args):
         prem_doc = await db.premium_get(user_id)
         if prem_doc:
             left_s = max(0.0, float(prem_doc.get("expiry") or 0) - db.now())
+            try:
+                udoc = await db.get_user(user_id) or {}
+            except Exception:
+                udoc = {}
+            nm = (udoc.get("name") or udoc.get("first_name")
+                  or (f"@{udoc['username']}" if udoc.get("username") else None)
+                  or str(user_id))
             state = "ACTIVE" if left_s > 0 else "EXPIRED"
-            await update.message.reply_text(
-                f"👑 Premium: {state}" +
-                (f" — {utils.human_duration_seconds(left_s)} left."
-                 if left_s > 0 else ""))
+            lines_p = [
+                f"👑 Premium user — {nm}",
+                f"ID: {user_id}",
+                f"Status: {state}"
+                + (f" — {utils.human_duration_seconds(left_s)} left"
+                   if left_s > 0 else ""),
+                f"Added: {_fmt_ist_ts(prem_doc.get('added_at'))}",
+                f"Expires: {_fmt_ist_ts(prem_doc.get('expiry'))}",
+                "",
+                "This user skips the shortener, so no verifications are logged.",
+            ]
+            await update.message.reply_text("\n".join(lines_p))
         return
     name = (doc.get("name") or
             (f"@{doc['username']}" if doc.get("username") else None)
@@ -1645,17 +1675,18 @@ async def _verified_user_detail(update, context, user_id, extra_args):
         lines2.append("")
         lines2.append("ℹ️ Per-file times start recording from v4.8; "
                       "older verifications only have the totals above.")
-    # v4.9.6: premium users never touch the shortener — show their status too.
+    # v4.9.8: premium status inside the regular detail, with real IST dates.
     prem_doc = await db.premium_get(user_id)
-    if prem_doc and float(prem_doc.get("expiry") or 0) > db.now():
-        left_s = float(prem_doc["expiry"]) - db.now()
+    if prem_doc:
+        left_s = max(0.0, float(prem_doc.get("expiry") or 0) - db.now())
         lines2.append("")
-        lines2.append(
-            f"👑 Premium: ACTIVE — {utils.human_duration_seconds(left_s)} left "
-            f"(expires in {left_s/86400:.2f} day(s)). This user skips the shortener.")
-    elif prem_doc:
-        lines2.append("")
-        lines2.append("👑 Premium: EXPIRED.")
+        if left_s > 0:
+            lines2.append(
+                f"👑 Premium: ACTIVE — {utils.human_duration_seconds(left_s)} left "
+                f"(expires {_fmt_ist_ts(prem_doc.get('expiry'))}; added "
+                f"{_fmt_ist_ts(prem_doc.get('added_at'))}). Skips the shortener.")
+        else:
+            lines2.append("👑 Premium: EXPIRED.")
 
     await update.message.reply_text("\n".join(lines2), parse_mode="HTML",
                                     disable_web_page_preview=True)
