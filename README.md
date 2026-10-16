@@ -504,6 +504,23 @@ fallback path is unchanged.
 
 ---
 
+## v4.9.10 (2026-10-16) — /verified_users: profile-linked titles everywhere
+
+  - Owner request: in the `/verified_users` table every user's **name must be
+    a clickable link to their profile** — the profile TITLE (display name),
+    never the @username, never the raw ID.
+  - Rich table (`sendRichMessage`): the Name cell is the profile title with a
+    `text_link` entity to `tg://user?id=<id>` (this part existed since v4.8);
+    what was missing: **legacy verification rows with no stored name rendered
+    as a bare numeric ID**. `cmd_verified_users` now backfills the display
+    title from the `users` collection (`name`/`first_name`) before building
+    the payload, so every row shows a real, clickable title.
+  - HTML fallback (paged monospace): names were PLAIN text — now each name is
+    `<a href="tg://user?id=...">TITLE</a>`, so the fallback path has the same
+    tap-to-open-profile behaviour as the rich table.
+  - Display-layer only: no schema change, no extra verification logging, no
+    double-counting (bot1 Gate 2 regular / bot2 delivery premium unchanged).
+
 ## v4.9.9 (2026-10-15) — premium users logged as real fetch rows
 
 * **Root cause of 'premium rows show no category/count':** premium

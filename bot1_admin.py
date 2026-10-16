@@ -1497,6 +1497,20 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     offset = 1 if args and args[0] in ("yesterday", "yday", "-1") else 0
     users = await db.list_verified_today(offset)
     day = db.ist_today(offset)
+    # v4.9.10: guarantee a human-readable profile TITLE for every row — if
+    # the verification-log row has no stored name (older rows), backfill it
+    # from the users collection so the clickable label is their profile
+    # title/name, never a bare numeric ID.
+    for _u in users:
+        if not (_u.get("name") or _u.get("username")):
+            try:
+                _udoc = await db.get_user(_u.get("user_id")) or {}
+            except Exception:
+                _udoc = {}
+            if not _u.get("name") and (_udoc.get("name") or _udoc.get("first_name")):
+                _u["name"] = _udoc.get("name") or _udoc.get("first_name")
+            if not _u.get("username") and _udoc.get("username"):
+                _u["username"] = str(_udoc.get("username")).lstrip("@")
     # v4.9.6: premium users skip the shortener, so they never appear in
     # verification logs — always surface them, even on a zero-verification day.
     prem_all = await db.premium_list(include_expired=False)
@@ -1528,7 +1542,9 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     except Exception as exc:
         log.warning("rich verified table failed (%s); text fallback", exc)
-    # fallback: paged monospace table
+    # fallback: paged monospace table — v4.9.10: every name is an HTML
+    # profile link (tg://user?id=...) here too, exactly like the rich table,
+    # so tapping the TITLE opens their profile in BOTH render paths.
     lines = [f"<b>{_h(header_txt)}</b>", "<pre>",
              f"{'#':<4}{'Name':<20}{'Time':<8}{'Category':<10}{'Link':<10}{'Cnt':<4}"]
     for i, u in enumerate(users, 1):
@@ -1536,7 +1552,9 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 (f"@{u['username']}" if u.get("username") else None)
                 or str(u.get("user_id")))
         el = u.get("elapsed")
-        lines.append(f"{i:<4}{str(name)[:19]:<20}"
+        name_link = (f'<a href="tg://user?id={u.get("user_id")}">'
+                     f'{_h(str(name)[:19]):<20}</a>')
+        lines.append(f"{i:<4}{name_link}"
                      f"{(f'{el:.0f}s' if el is not None else '—'):<8}"
                      f"{(','.join(u.get('categories') or []) or '—')[:9]:<10}"
                      f"{(','.join(u.get('link_types') or []) or '—')[:9]:<10}"
