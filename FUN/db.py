@@ -42,6 +42,7 @@ async def connect():
     await _db.referrals.create_index("friend_id", unique=True)
     await _db.referrals.create_index("inviter_id")
     await _db.deliveries.create_index("auto_delete_at")
+    await _db.cover_assets.create_index("public_token", unique=True, sparse=True)
     return _db
 
 

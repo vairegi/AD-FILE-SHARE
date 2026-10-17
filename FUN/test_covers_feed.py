@@ -142,33 +142,26 @@ async def test_failed_upload_keeps_pending_and_no_url(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_feed_shows_rich_slideshow_with_cached_cover(monkeypatch):
+async def test_feed_uses_text_link_preview_with_cached_cover():
     await db.upsert_collection(_seed_cover_collection("ok", "https://telegra.ph/file/x.jpg"))
-    q = Q("feed:all:0")
-    q.bot = RichBot()
-    q.message.chat = NS(id=7, type="private")
-    q.message.message_id = 42
+    q = Q("feed:all:0", bot=RichBot());q.message.message_id=42
     await handlers.on_button(NS(callback_query=q), context(q.bot))
-    assert q.bot.posts, "no rich call made"
-    ep, data = q.bot.posts[0]
-    payload = json.loads(data["rich_message"])
-    assert ep == "editMessageText"
-    assert set(payload)=={"html"}
-    assert '<tg-slideshow>' in payload["html"]
-    assert '<img src="https://telegra.ph/file/x.jpg"/>' in payload["html"]
+    assert not q.bot.posts and not q.bot.calls
+    uid,text,kw=q.bot.sent[-1]
+    assert uid==7 and '<a href="https://telegra.ph/file/x.jpg">\u2063</a>' in text
+    assert kw["link_preview_options"].to_dict()=={
+        "url":"https://telegra.ph/file/x.jpg","is_disabled":False,
+        "prefer_large_media":True,"show_above_text":True}
 
 
 @pytest.mark.asyncio
-async def test_feed_collage_mode(monkeypatch):
-    await db.update_settings({"cover_mode": "collage"})
+async def test_legacy_collage_setting_does_not_restore_native_image_sends():
+    await db.update_settings({"cover_mode":"collage"})
     await db.upsert_collection(_seed_cover_collection("ok", "https://graph.org/file/x.jpg"))
-    q = Q("feed:all:0")
-    q.bot = RichBot()
-    q.message.chat = NS(id=7, type="private")
-    q.message.message_id = 42
-    await handlers.on_button(NS(callback_query=q), context(q.bot))
-    payload = json.loads(q.bot.posts[0][1]["rich_message"])
-    assert "<tg-collage>" in payload["html"]
+    q=Q("feed:all:0",bot=RichBot());q.message.message_id=42
+    await handlers.on_button(NS(callback_query=q),context(q.bot))
+    assert not q.bot.posts and not q.bot.calls
+    assert q.bot.sent[-1][2]["link_preview_options"].url=="https://graph.org/file/x.jpg"
 
 
 @pytest.mark.asyncio
@@ -184,18 +177,12 @@ async def test_feed_text_fallback_when_no_cover():
 
 
 @pytest.mark.asyncio
-async def test_covermode_toggle_and_command():
-    await db.update_settings({"cover_mode": "slideshow"})
-    q = Q("covermode")
-    await handlers.on_button(NS(callback_query=q), context(q.bot))
-    assert (await db.get_settings())["cover_mode"] == "collage"
-    u = update()
-    await handlers.cmd_covermode(u, context(args=["slideshow"]))
-    assert (await db.get_settings())["cover_mode"] == "slideshow"
-    assert "slideshow" in u.message.replies[-1][0]
-    other = update(uid=9)
-    await handlers.cmd_covermode(other, context(args=["collage"]))
-    assert (await db.get_settings())["cover_mode"] == "slideshow"  # non-admin
+async def test_covermode_explains_one_image_link_preview_and_checks_owner():
+    u=update();await handlers.cmd_covermode(u,context(args=["slideshow"]))
+    assert "one image above" in u.message.replies[-1][0]
+    assert "disabled" in u.message.replies[-1][0]
+    other=update(uid=9);await handlers.cmd_covermode(other,context())
+    assert not other.message.replies
 
 
 @pytest.mark.asyncio

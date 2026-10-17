@@ -319,7 +319,7 @@ async def test_covers_fallback():
         async def head(self, url, timeout=None, follow_redirects=None): raise RuntimeError("down")
 
     r2 = await covers.host_cover(AllFailClient(), b"jpeg-bytes")
-    check("covers: both hosts down -> failed (renderer falls back to TG media)",
+    check("covers: both mirror hosts down -> external hosting failed (cached Render previews handled separately)",
           r2["status"] == "failed" and r2["url"] is None)
 
 

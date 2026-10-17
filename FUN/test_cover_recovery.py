@@ -113,28 +113,27 @@ class RecordingRequest(BaseRequest):
 
 
 @pytest.mark.asyncio
-async def test_real_ptb_callback_get_bot_and_exact_rich_html_request():
-    await db.upsert_collection({**collection(),"cover":{"message_id":10,"url_status":"ok",
-        "url":"https://telegra.ph/file/cover.jpg"}})
+async def test_real_ptb_callback_get_bot_uses_sendmessage_not_edit():
+    await db.upsert_collection({**collection(),"cover":{"url":"https://telegra.ph/file/cover.jpg"}})
     request=RecordingRequest()
     async with TelegramBot("123456:FAKE_TEST_TOKEN_NOT_REAL",request=request) as bot:
         incoming=Update.de_json({"update_id":1,"callback_query":{
             "id":"test_query","from":{"id":7,"is_bot":False,"first_name":"Alice"},
             "chat_instance":"test","data":"feed:all:0","message":{
-                "message_id":42,"date":0,"chat":{"id":7,"type":"private"},"text":"menu"}}},bot)
-        q=incoming.callback_query
-        assert not hasattr(q,"bot") and q.get_bot() is bot
+                "message_id":40,"date":0,"chat":{"id":7,"type":"private"},"text":"menu"}}},bot)
+        assert not hasattr(incoming.callback_query,"bot") and incoming.callback_query.get_bot() is bot
         await handlers.on_button(incoming,NS(bot=bot))
-    edits=[params for endpoint,params,files in request.calls if endpoint=="editMessageText"]
-    assert edits,"The real CallbackQuery must enter the media path"
-    payload=edits[0]["rich_message"]
-    if isinstance(payload,str):payload=json.loads(payload)
-    assert set(payload)=={"html"}
-    assert '<tg-slideshow><img src="https://telegra.ph/file/cover.jpg"/></tg-slideshow>' in payload["html"]
-    keyboard=edits[0].get("reply_markup")
-    assert keyboard is not None
+    sends=[params for endpoint,params,files in request.calls if endpoint=="sendMessage"]
+    assert len(sends)==1 and sends[0]["parse_mode"]=="HTML"
+    opts=sends[0]["link_preview_options"]
+    if isinstance(opts,str):opts=json.loads(opts)
+    assert opts["show_above_text"] and opts["prefer_large_media"]
+    assert opts["url"]=="https://telegra.ph/file/cover.jpg"
+    keyboard=sends[0]["reply_markup"]
     if isinstance(keyboard,str):keyboard=json.loads(keyboard)
     assert keyboard["inline_keyboard"][0][1]["style"]=="danger"
+    assert not any(e.startswith("edit") or e in ("sendPhoto","sendRichMessage") for e,_,_ in request.calls)
+    assert [e for e,_,_ in request.calls][-2:]==["sendMessage","deleteMessage"]
 
 
 @pytest.mark.asyncio
@@ -149,8 +148,8 @@ async def test_multiple_album_covers_downloaded_once_and_hosted_in_order(monkeyp
     assert len(client.downloads)==2 and len(http.posted)==2
     items = await covers.preview_items(saved)
     urls = [i["url"] for i in items if i.get("url")]
-    payload=rich_cards._rich_payload("<b>Title</b>",urls,"collage")
-    assert payload["html"].count("<img ")==2 and "<tg-collage>" in payload["html"]
+    import link_previews
+    assert len(urls)==2 and await link_previews.resolve_url(saved)==urls[0]
     await covers.prepare_collection(client,saved,http,force=True)
     assert len(client.downloads)==2 and len(http.posted)==2
 
@@ -209,29 +208,28 @@ class PhotoBot:
 
 
 @pytest.mark.asyncio
-async def test_local_fallback_then_reuses_telegram_file_id_without_binary_upload():
+async def test_cached_image_has_public_preview_url_not_telegram_upload(monkeypatch):
+    import link_previews
+    monkeypatch.setattr(config,"RENDER_EXTERNAL_URL","https://example.onrender.com")
     key="-100:10"
     await db.col("cover_assets").insert_one({"_id":key,"data":Binary(jpeg())})
-    coll={"cover":{"url":None,"urls":[],"asset_keys":[key]}}
-    bot=PhotoBot()
-    await rich_cards.show_cover_card(bot,7,"<b>Text</b>",None,coll,"slideshow",edit_message_id=42)
-    assert bot.calls[0][0]=="edit_photo" and "delete" not in bot.calls
+    coll={"cover":{"asset_keys":[key]}}
+    url=await link_previews.resolve_url(coll)
+    assert url.startswith("https://example.onrender.com/previews/")
+    assert await link_previews.resolve_url(coll)==url
     asset=await db.col("cover_assets").find_one({"_id":key})
-    assert asset["telegram_file_id"]=="CACHED_TELEGRAM_FILE"
-    asset=await db.col("cover_assets").find_one({"_id":key})
-    assert asset["telegram_file_id"]=="CACHED_TELEGRAM_FILE"
+    assert "public_token" in asset and "telegram_file_id" not in asset
 
 
 @pytest.mark.asyncio
-async def test_rich_reject_falls_back_in_place_and_timeout_never_blind_retries():
-    coll={"cover":{"url":"https://graph.org/file/cover.jpg","urls":[]}}
-    bot=PhotoBot()
-    await rich_cards.show_cover_card(bot,7,"text",None,coll,"collage",edit_message_id=42)
-    assert bot.calls[0]=="rich" and any(c[0]=="edit_photo" for c in bot.calls) and "delete" not in bot.calls
-    bot=PhotoBot(network_error=True)
+async def test_send_timeout_keeps_old_card_and_does_not_try_other_endpoints():
+    from unittest.mock import AsyncMock
+    bot=NS(send_message=AsyncMock(side_effect=TimedOut()),delete_message=AsyncMock())
     with pytest.raises(TimedOut):
-        await rich_cards.show_cover_card(bot,7,"text",None,coll,"collage",edit_message_id=42)
-    assert bot.calls==["rich"]
+        await rich_cards.show_cover_card(bot,7,"text",None,
+            {"cover":{"url":"https://graph.org/file/cover.jpg"}},edit_message_id=42)
+    bot.send_message.assert_awaited_once()
+    bot.delete_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -265,15 +263,15 @@ async def test_head_405_image_validation_uses_range_get():
 
 
 @pytest.mark.asyncio
-async def test_real_ptb_cached_image_fallback_serializes_multipart():
+async def test_real_ptb_cached_cover_sends_no_multipart(monkeypatch):
+    monkeypatch.setattr(config,"RENDER_EXTERNAL_URL","https://example.onrender.com")
     key="-100:10"
     await db.col("cover_assets").insert_one({"_id":key,"data":Binary(jpeg())})
     request=RecordingRequest()
     async with TelegramBot("123456:FAKE_TEST_TOKEN_NOT_REAL",request=request) as bot:
         await rich_cards.show_cover_card(bot,7,"<b>Preview</b>",None,
-            {"cover":{"url":None,"urls":[],"asset_keys":[key]}},"slideshow",edit_message_id=42)
-    edits=[(params,files) for endpoint,params,files in request.calls if endpoint=="editMessageMedia"]
-    assert len(edits)==1 and edits[0][1], "Cached image must become a real multipart file upload"
-    media=edits[0][0]["media"]
-    if isinstance(media,str):media=json.loads(media)
-    assert media["type"]=="photo" and media["media"].startswith("attach://")
+            {"cover":{"asset_keys":[key]}},edit_message_id=40)
+    sends=[(params,files) for endpoint,params,files in request.calls if endpoint=="sendMessage"]
+    assert len(sends)==1 and not sends[0][1]
+    assert not any(e in ("editMessageMedia","sendPhoto","sendRichMessage") for e,_,_ in request.calls)
+    assert "/previews/" in sends[0][0]["text"]

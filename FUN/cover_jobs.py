@@ -61,7 +61,7 @@ async def _run(userbot, message, reply):
                         f"{state['hosted']} hosted; {state['local_ready']} cached local; {state['failed']} unavailable.")
         state["state"]="complete"
         text=(f"✅ Cover preparation finished: {state['processed']}/{state['total']}.\n"
-              f"Hosted links: {state['hosted']}\nCached image fallback: {state['local_ready']}\n"
+              f"Hosted links: {state['hosted']}\nCached images available for preview URLs: {state['local_ready']}\n"
               f"Source/preparation failures: {state['failed']}\n"
               "Open /start → Start Watching. Use /cover_status for totals.")
         await _progress(message,text)
@@ -83,10 +83,12 @@ async def statistics():
     col = db.col("collections")
     result={"Collections":await col.count_documents({}),
         "Hosted URL ready":await col.count_documents({"cover.url_status":"ok","cover.url":{"$type":"string","$ne":""}}),
+        "Render preview links":await col.count_documents({"cover.link_preview_host":"render"}),
+        "Feed mode":"link preview; new card then delete old",
         "Pending":await col.count_documents({"cover.url_status":"pending"}),
         "No status yet":await col.count_documents({"cover.url_status":{"$exists":False}}),
         "Mirror upload failed":await col.count_documents({"cover.url_status":"failed"}),
-        "Prepared image fallback":await col.count_documents({"cover.asset_keys.0":{"$exists":True}}),
+        "Cached cover assets ready":await col.count_documents({"cover.asset_keys.0":{"$exists":True}}),
         "Cached images":await db.col("cover_assets").count_documents({"data":{"$exists":True}}),
         "Worker running":"yes" if busy() else "no"}
     state=await db.col("cover_jobs").find_one({"_id":"current"})

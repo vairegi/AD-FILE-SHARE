@@ -78,6 +78,8 @@ async def lifespan(app):
     except Exception:
         log.warning("Userbot not connected. Owner: use /setup_userbot or /userbot_status.")
     runtime.start_jobs(app_bot.bot)
+    import link_previews
+    runtime.spawn(link_previews.backfill_urls())
     try:
         yield
     finally:
@@ -92,7 +94,36 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"ok": True, "service": "fun-bot3", "version": "1.2.1"}
+    return {"ok": True, "service": "fun-bot3", "version": "1.3.0"}
+
+
+@app.api_route("/previews/{token}.jpg", methods=["GET", "HEAD"])
+async def cover_image(token: str, request: Request):
+    import link_previews
+    asset = await link_previews.preview_asset(token, include_data=True)
+    if not asset or not asset.get("data"):
+        return Response(status_code=404)
+    data = bytes(asset["data"])
+    headers = {"Cache-Control": "public, max-age=604800, immutable",
+        "X-Content-Type-Options": "nosniff", "X-Robots-Tag": "noindex, nofollow, noarchive",
+        "Content-Length": str(len(data))}
+    if asset.get("sha256"):
+        headers["ETag"] = '"' + asset["sha256"] + '"'
+    return Response(content=b"" if request.method == "HEAD" else data,
+        media_type="image/jpeg", headers=headers)
+
+
+@app.api_route("/previews/{token}", methods=["GET", "HEAD"])
+async def cover_preview_page(token: str, request: Request):
+    import link_previews
+    if not await link_previews.preview_asset(token):
+        return Response(status_code=404)
+    content = link_previews.preview_html(token)
+    if not content:
+        return Response(status_code=503)
+    return HTMLResponse(content="" if request.method == "HEAD" else content,
+        headers={"Cache-Control": "public, max-age=3600", "X-Robots-Tag": "noindex, nofollow, noarchive",
+                 "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/webhook")

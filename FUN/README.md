@@ -1,76 +1,90 @@
-# FUN Bot 3 — v1.2.1 cover recovery (2026-10-17)
+# FUN Bot 3 — v1.3.0 ordinary link previews (2026-10-17)
 
-This folder is an independent service. Bots 1–2 at the repository root are
-unchanged. All source, tests and setup tools are directly inside FUN/.
-Python creates __pycache__ automatically at runtime; it is not shipped.
+This release changes only FUN. Bots 1–2 at the repository root are unchanged.
+Every shipped file is directly inside FUN/ (no nested code/test folders).
 
-## IMPORTANT: upgrading from the previous nested package
-GitHub “Add files via upload” does NOT delete old files.
-1. Upload the contents of the new FUN folder to the repository's FUN folder.
-2. Delete these OLD paths in GitHub before deploying:
-   - FUN/handlers/__init__.py (then the empty handlers folder disappears)
-   - FUN/rich/cards.py
-   - FUN/tests/test_bot3.py
-3. Do NOT delete the new FUN/handlers.py or FUN/test_legacy.py.
-4. Deploy the latest commit. The app refuses to start if the old handlers
-   package still exists, because Python would otherwise import it instead
-   of the repaired flat handlers.py.
+## What changed — this is not the previous rich-image renderer
+The feed now uses sendMessage with HTML text, an invisible U+2063 link anchor,
+and LinkPreviewOptions: explicit url, prefer_large_media=True,
+show_above_text=True, is_disabled=False. Colored inline keyboards remain.
+It does NOT call sendPhoto, editMessageMedia, sendRichMessage or editMessageText
+for cover navigation. An image-looking preview is still expected visually:
+it is the text message's LINK PREVIEW, not a photo message with a caption.
 
-## v1.2.1: fix pending covers, real callback rendering and retry worker
-The previous v1.2.0 release had defects not caught by its fake-object tests:
-- /retry_covers selected only failed rows, ignoring never-processed pending
-  or missing statuses. Therefore “No failed covers” did NOT mean covers existed.
-- The feed looked for q.bot; real PTB callbacks bind the bot via q.get_bot().
-- The worker referenced scanner without importing it.
-- The rich blocks used invented field shapes instead of the documented schema.
+Next/Previous: send a NEW card -> receive its Telegram message ID -> delete the
+old bot card. No edit means no edited label on that cover card. Old bot photos
+from earlier versions are also replaced this way. If sending fails or times
+out, keep the old card; do not automatically resend an uncertain outcome. If
+old-card deletion is rejected, keep the usable replacement; an old card may
+remain. Repeated taps on an already-replaced card are ignored in this process.
+This reproduces the requested behaviour; it does not identify a rival's code.
 
-This update selects pending/missing/failed/unusable URL states. It prepares
-covers in a background job and reports actual hosted/local/failure counts.
-Use /cover_status to inspect totals and job progress. A restart keeps completed
-image caches; /retry_covers resumes remaining unfinished work.
+## Why 162 prepared covers still produced photo messages
+The supplied screenshot reports zero hosted URLs and 162 mirror failures.
+The prior renderer fell back to native Telegram photos, sometimes by a cached
+file_id. A visible photo does NOT prove that bytes were uploaded on every tap.
+The old release also incorrectly called rich images the ordinary preview trick.
 
-Hosted path: download photo/video THUMBNAIL once -> telegra.ph/upload ->
-graph.org/upload -> validate returned image URL -> cache URL in MongoDB.
-Never download a cover video in full merely to render its preview.
-Successful URLs are never uploaded again on a feed tap, retry or rescan.
+Preferred URL: previously successful telegra.ph/graph.org URL, reused as-is.
+When both mirrors fail: the Render app now serves an opaque public preview page
+and cached JPEG directly from cover_assets. No need to keep retrying unavailable
+mirrors. A metadata-only startup backfill creates stable links for existing
+cached covers; browsing can create a missing link without source downloads.
+No upload to Telegram, source download, mirror HTTP call or JPEG read from Mongo
+is performed in the feed navigation path. Telegram fetches a public preview
+separately; the Render fallback serves cached image bytes over HTTP.
 
-The userbot's downloaded small JPEG is ALSO cached in cover_assets. If both
-hosts are unavailable, the bot can upload this cached image to Telegram once,
-then cache its Telegram file_id. Later taps reuse that file_id. An explicit
-retry can retry mirrors from the cached bytes without another source download.
-Failed source access or missing thumbnails are reported in /cover_status;
-a source that cannot be read cannot produce an image and isn't called ready.
+## Public-link disclosure and hosting limits
+Like Telegraph links, these fallback links can be opened by ANYONE holding
+them. Only prepared cover JPEGs are served, through random 192-bit tokens;
+source message/channel IDs, API credentials, sessions, database credentials,
+and full delivery videos are not served. There is no asset directory listing.
+Do not use this for covers that must remain confidential after viewing.
+Removing an asset returns 404 at the origin, but cannot erase Telegram/client
+or intermediate cached copies. Render serves image bandwidth; this is not
+zero-byte viewing and is subject to your hosting limits and availability.
+No guarantee of sub-0.5-second response or live preview generation is made.
+A first preview, a cold start or an old client may be slow or fail to render.
 
-The feed uses documented InputRichMessage.html with tg-slideshow/tg-collage
-and img tags, plus the existing native colored inline keyboard. Source albums
-prepare up to ten separate cover images. A one-image cover is still just one
-image; changing its mode cannot create extra slides. When rich formatting is
-explicitly rejected by the API, native-photo fallback shows one cached image.
-Native-photo fallback is editable in place. It does not delete the current
-card BEFORE a replacement succeeds. Network timeouts do not trigger blind
-resends. Older client rendering cannot be detected from API acceptance alone.
+## Deploy this upgrade
+1. Upload ALL files from this ZIP's FUN/ into your repository's existing FUN/.
+2. Keep Render Root Directory FUN and deploy the latest commit.
+3. Keep existing variables; no new variable, DB reset, rescan, or userbot
+   re-import is required solely for this update. RENDER_EXTERNAL_URL must be
+   your correct public HTTPS service URL, without trailing slash.
+4. After startup, /cover_status shows 'Render preview links' and the feed mode.
+   For the screenshot's already-cached 162 images, you do NOT need /retry_covers.
+5. Send /start -> Start Watching -> Next -> Previous.
+   New cards should be text messages with an image preview ABOVE the body;
+   Next/Previous should have new message IDs, not an edited marker.
+6. If an image was never cached, /retry_covers can prepare it with the userbot.
+   It still tries telegra.ph first, graph.org second. Failed mirror counts remain
+   truthful even when Render fallback preview links are available.
 
-After updating files and redeploying:
+Very old installations: delete FUN/handlers/__init__.py, FUN/rich/cards.py,
+and FUN/tests/test_bot3.py. GitHub uploads do not remove obsolete folders.
+Do NOT delete the current flat FUN/handlers.py. Current flat installations
+need only overwrite/add the supplied files.
 
-    /userbot_status
-    /retry_covers
-    /cover_status
-    /start
+## Preview-mode tradeoff
+An ordinary link preview has ONE selected image; it is not a native rich
+slideshow or collage. In this release the first prepared cover is used.
+/covermode explains this limitation; old slideshow/collage preferences cannot
+switch the feed back to photo/rich-message uploads. Video covers use their
+prepared JPEG thumbnail. Original delivery videos still come from the database
+channel on Unlock; captions, access gates and scheduled deletion are unchanged.
 
-Wait for the background preparation to finish, then choose Start Watching.
-No new environment variable, collection rescan, balance reset or session
-re-import is required just for this upgrade. Commands retained:
+## Sandbox verification
+Run python -m pytest -q and python test_legacy.py after installing
+requirements-test.txt. test_link_previews.py checks real PTB request serialization,
+no multipart file upload, no rich/photo/edit methods, send-before-delete order,
+failed-send safety, rapid duplicate taps, stable cached URLs, 162 cached covers,
+and real ASGI HTML/image routes. Network services and MongoDB are simulated.
+Actual Telegram rendering and end-to-end deployment latency need live checking.
 
-    /covermode slideshow
-    /covermode collage
-    /help
-
-/help shows the same cute manual as Help Guide, with Start Watching / Profile /
-Main Menu navigation. Everything stays directly in FUN/; Bots 1–2 unchanged.
-
-API reference used to correct the schema:
-https://core.telegram.org/bots/api#inputrichmessage
-https://core.telegram.org/bots/api#rich-message-formatting-options
+Official API reference:
+https://core.telegram.org/bots/api#linkpreviewoptions
+https://core.telegram.org/bots/api#sendmessage
 
 ## v1.1.1: simple owner-chat userbot setup
 Send /setup_userbot in YOUR private bot chat. The bot asks for:
@@ -223,7 +237,7 @@ has permanent vault access and free re-streams. Save is a separate bookmark.
 Install: pip install -r requirements-test.txt
 Run:
 
-    pytest -q test_repairs.py test_chat_setup.py test_covers_feed.py test_cover_recovery.py
+    python -m pytest -q
     python3 rich_verify_test.py
     python test_legacy.py
 
@@ -238,7 +252,7 @@ or sponsor-provider completion. No production credentials were used.
 ## Existing scope limitations, not hidden by this repair
 This repair fixes menus, onboarding, source scanning and referral sharing.
 The old release incorrectly described every feature as fully wired:
-- The repaired pipeline has regression tests for 162 pending rows and real
+- The pipeline has regression tests for 162 cached/no-hosted-URL rows and real
   PTB callback binding/request serialization, not just permissive fake q.bot
   objects. These are offline tests, not a claim that external hosts or every
   Telegram client were live-tested. Source access and host acceptance must

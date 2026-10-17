@@ -45,7 +45,8 @@ class Bot:
         return NS(status=self.member, is_member=False)
     async def get_chat(self, cid):
         return NS(username="example_channel", invite_link=None)
-    async def send_message(self, uid, text, **kw):
+    async def send_message(self, uid=None, text=None, **kw):
+        uid = uid if uid is not None else kw.pop("chat_id")
         self.sent.append((uid, text, kw)); return NS(message_id=500)
     async def copy_message(self, **kw):
         self.calls.append(("single", kw))
@@ -276,11 +277,11 @@ async def test_feed_balance_and_real_vault_bookmarks():
     await db.upsert_collection(a);await db.upsert_collection(b)
     await db.insert_unlock(7,"a");await db.toggle_bookmark(7,"b")
     qa=Q();await handlers._show_library(qa,"unlocks",0)
-    assert "Already in your Vault" in qa.message.edits[-1][0]
-    assert "5 Tokens" in qa.message.edits[-1][0]
-    assert "restream:a" in qa.message.edits[-1][1]["reply_markup"].to_json()
+    assert "Already in your Vault" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[0]
+    assert "5 Tokens" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[0]
+    assert "restream:a" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[1]["reply_markup"].to_json()
     qb=Q();await handlers._show_library(qb,"bookmarks",0)
-    assert "unlock:b" in qb.message.edits[-1][1]["reply_markup"].to_json()
+    assert "unlock:b" in (qb.bot.sent[-1][1], qb.bot.sent[-1][2])[1]["reply_markup"].to_json()
 
 
 @pytest.mark.asyncio

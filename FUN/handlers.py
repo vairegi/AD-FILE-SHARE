@@ -135,10 +135,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "home":
             await _show_home(q)
         elif data == "covermode":
-            cur = await _cover_mode()
-            new = "collage" if cur == "slideshow" else "slideshow"
-            await db.update_settings({"cover_mode": new})
-            await q.answer(f"🎀 Preview mode: {new}", show_alert=True)
+            await q.answer("🎀 Link-preview mode: one cover above the caption; no native slideshows.", show_alert=True)
         elif data == "cats":
             await _show_categories(q)
         elif data == "earn":
@@ -289,7 +286,9 @@ async def _show_library(q, kind, index):
     rows = list(keyboard.inline_keyboard)
     rows.insert(0, [InlineKeyboardButton("⬅️ Previous", callback_data=f"library:{kind}:{index-1}" if index else "noop"),
                    InlineKeyboardButton("Next ➡️", callback_data=f"library:{kind}:{index+1}" if index+1<len(collections) else "noop")])
-    await _edit(q, await _feed_text(uid, c), InlineKeyboardMarkup(rows))
+    import rich_cards
+    await rich_cards.show_cover_card(q.get_bot(), uid, await _feed_text(uid, c),
+        InlineKeyboardMarkup(rows), c, "link", edit_message_id=getattr(q.message, "message_id", None))
 
 
 # ── feed (collage/slideshow browser) ─────────────────────────────
@@ -324,11 +323,8 @@ async def _send_feed_card(update, context, collection_id):
     kb = _feed_kb(c["collection_id"], cat, 0, total,
                   await db.is_unlocked(update.effective_user.id, c["collection_id"]))
     import rich_cards
-    try:
-        await rich_cards.show_cover_card(context.bot, update.effective_user.id, text, kb,
-                                         c, await _cover_mode(), collection_id=c["collection_id"])
-    except Exception:
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+    await rich_cards.show_cover_card(context.bot, update.effective_user.id, text, kb,
+                                     c, "link", collection_id=c["collection_id"])
 
 
 async def _render_feed_card(q, c, category, idx, total, context=None):
@@ -675,15 +671,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_covermode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    arg = (context.args or [""])[0].lower()
-    if arg not in ("slideshow", "collage"):
-        cur = await _cover_mode()
-        await update.message.reply_text(
-            f"🎀 Preview mode: {cur}\n\n/covermode slideshow — swipeable photos\n"
-            "/covermode collage — combined grid preview")
-        return
-    await db.update_settings({"cover_mode": arg})
-    await update.message.reply_text(f"✅ Preview mode set to {arg}.")
+    await update.message.reply_text(
+        "🎀 Feed mode: link preview — one image above the caption.\n"
+        "Next/Previous send a new card, then remove the old one.\n"
+        "Native slideshow/collage rendering is disabled in this mode.")
 
 
 async def cmd_retry_covers(update, context):
@@ -726,7 +717,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /addtask <task_id> <label> <url> [reward]\n"
         "• /setprice <collection_id> <tokens>\n"
         "• /scan <channel_id> — run scanner now\n"
-        "• /covermode slideshow|collage — cover preview style\n"
+        "• /covermode — explain link-preview feed mode\n"
         "• /retry_covers — prepare pending/missing/failed covers\n"
         "• /cover_status — hosted/local preview counts and progress\n"
         "• /pending — inspect orphan files\n"

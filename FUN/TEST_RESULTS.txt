@@ -1,10 +1,11 @@
-FUN v1.2.2 fast URL-based cover cards (2026-10-17)
+FUN v1.3.0 link-preview-only navigation — offline sandbox verification
 
-........................................................................ [ 40%]
-........................................................................ [ 80%]
-..................................                                       [100%]
-178 passed in 1.79s
+........................................................................ [ 34%]
+........................................................................ [ 69%]
+..............................................................           [100%]
+206 passed in 1.78s
 
+Separate legacy runner (overlapping features, not additional independent tests):
 PASS - classifier: 3 collections
 PASS - classifier: cover1 title is first caption line
 PASS - classifier: cover1 has 3 delivery files (short-caption photo is delivery)
@@ -56,23 +57,19 @@ PASS - task: bad signature rejected
 PASS - task: expired signature rejected
 PASS - task: unknown task rejected
 PASS - covers: telegraph failure -> graph.org fallback ok
-PASS - covers: both hosts down -> failed (renderer falls back to TG media)
+PASS - covers: both mirror hosts down -> external hosting failed (cached Render previews handled separately)
 PASS - save: bookmark added
 PASS - save: cute confirm
 PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-PASS documented InputRichMessage.html slideshow
-PASS multi-image collage HTML
-PASS explicit rejection -> in-place photo
-PASS unavailable image -> explicit text fallback
-PASS no prepared media -> navigable text
-PASS native colored keyboard retained
-6/6 rich probes passed
+Compileall: passed.
 
-Feed renders covers via rich message with external URL (tg-slideshow/tg-collage) or URL photo —
-no byte upload per Next/Previous tap. Bytes upload only once when a cover has no hosted URL,
-then the Telegram file_id is cached and reused. /retry_covers now processes pending/missing/failed
-covers and reports real hosted counts. /cover_status shows URL vs cached-image vs failed.
-Offline tests only; live mirror upload and client rendering confirmed after deploy.
+Test migration: obsolete assertions demanding sendRichMessage, photo uploads and in-place edits
+were replaced with explicit sendMessage/link_preview_options/no-media/send-before-delete assertions.
+Existing scanner, userbot, economy, membership and delivery regressions remain.
+
+Limitations: no production MongoDB access/changes, bot account connection, live Telegram
+preview rendering, external mirror acceptance or end-to-end latency tested in this release.
+No deployment was performed.
