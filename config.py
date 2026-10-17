@@ -1,59 +1,71 @@
-"""FUN Bot 3 — environment-variable loader.
-
-Bot 3 is fully independent of Bots 1–2: it has its own Render service, MongoDB,
-and provider keys. Same env-var style as AD-FILE-SHARE (no hardcoded secrets).
-"""
+"""Central configuration. Everything is read from environment variables —
+no secret is ever hardcoded in the source."""
 import os
 
-def _int(name: str, default: int) -> int:
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _clean_username(value: str) -> str:
+    return (value or "").strip().lstrip("@")
+
+
+def _int_list(raw: str):
+    """Parse '111,222, 333' -> [111, 222, 333], ignoring junk."""
+    out = []
+    for part in (raw or "").replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            pass
+    return out
+
+
+def _opt_int(raw: str):
     try:
-        return int(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
 
-# Telegram
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
-OWNER_ID = _int("OWNER_ID", 0)
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-ADMIN_IDS = sorted(set(ADMIN_IDS + ([OWNER_ID] if OWNER_ID else [])))
 
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "fun_secret")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
-PORT = _int("PORT", 8000)
+# ── Bots ──────────────────────────────────────────────────────
+BOT1_TOKEN = os.getenv("BOT1_TOKEN", "").strip()
+BOT2_TOKEN = os.getenv("BOT2_TOKEN", "").strip()
+BOT1_USERNAME = _clean_username(os.getenv("BOT1_USERNAME", ""))
+BOT2_USERNAME = _clean_username(os.getenv("BOT2_USERNAME", ""))
 
-# MongoDB (independent of AD-FILE-SHARE — separate Atlas cluster)
-MONGO_URI = os.environ.get("MONGO_URI", "")
-MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "fun_bot3")
+BOT1_WEBHOOK_SECRET = os.getenv("BOT1_WEBHOOK_SECRET", "").strip()
+BOT2_WEBHOOK_SECRET = os.getenv("BOT2_WEBHOOK_SECRET", "").strip()
 
-# Personality
-BOT_NAME = os.environ.get("BOT_NAME", "Cute Hub")
-PERSONA = os.environ.get("PERSONA", "senpai")  # senpai|kawaii|custom
+# ── Database ──────────────────────────────────────────────────
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "video_bots").strip()
 
-# Economy
-WELCOME_TOKENS = _int("WELCOME_TOKENS", 5)
-COLLECTION_PRICE = _int("COLLECTION_PRICE", 2)
-DAILY_CHECKIN_REWARD = _int("DAILY_CHECKIN_REWARD", 3)
-STREAK_PERIOD_DAYS = _int("STREAK_PERIOD_DAYS", 5)
-STREAK_BONUS = _int("STREAK_BONUS", 1)
-REFERRAL_INVITER_BONUS = _int("REFERRAL_INVITER_BONUS", 5)
-REFERRAL_FRIEND_BONUS = _int("REFERRAL_FRIEND_BONUS", 3)
-DEFAULT_TASK_REWARD = _int("DEFAULT_TASK_REWARD", 5)
-TASK_COOLDOWN_SECONDS = _int("TASK_COOLDOWN_SECONDS", 24 * 3600)
+# ── Admins ────────────────────────────────────────────────────
+ADMIN_IDS = _int_list(os.getenv("ADMIN_IDS", ""))
 
-# Delivery
-AUTO_DELETE_AFTER_SECONDS = _int("AUTO_DELETE_AFTER_SECONDS", 10 * 60)
-ALBUM_BATCH_SIZE = _int("ALBUM_BATCH_SIZE", 10)  # Telegram hard limit
+# ── Channels (optional seed values) ───────────────────────────
+DB_CHANNEL_ID = _opt_int(os.getenv("DB_CHANNEL_ID", ""))
+POST_CHANNEL_ID = _opt_int(os.getenv("POST_CHANNEL_ID", ""))
+FORCE_SUB_CHANNEL_ID = _opt_int(os.getenv("FORCE_SUB_CHANNEL_ID", ""))
 
-# Cover hosts
-COVER_PRIMARY_HOST = os.environ.get("COVER_PRIMARY_HOST", "https://telegra.ph/upload")
-COVER_FALLBACK_HOST = os.environ.get("COVER_FALLBACK_HOST", "https://graph.org/upload")
+# ── Render / webhook ──────────────────────────────────────────
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+PORT = int(os.getenv("PORT", "8000"))
 
-# Membership
-REQUIRED_CHANNEL_IDS = [int(x) for x in os.environ.get("REQUIRED_CHANNEL_IDS", "").split(",") if x.lstrip("-").isdigit()]
+# ── Shortener ─────────────────────────────────────────────────
+SHORTENER_API_KEY = os.getenv("SHORTENER_API_KEY", "").strip()
 
-# Userbot session encryption (Render secret env var, NOT in MongoDB)
-SESSION_ENCRYPTION_KEY = os.environ.get("SESSION_ENCRYPTION_KEY", "")
+# ── Telethon userbot (only for /scandb) ───────────────────────
+API_ID = _opt_int(os.getenv("API_ID", ""))
+API_HASH = os.getenv("API_HASH", "").strip()
+SESSION_USER = os.getenv("SESSION_USER", "").strip()
 
-# Health
-HEALTH_PATH = "/health"
+# ── Multi-category upgrade ────────────────────────────────────
+# Category key assigned to your EXISTING pipeline on first startup after the
+# upgrade (all current data is migrated into it). Change later with
+# /editcategory — or create 'jav', 'hanime', etc. via /addcategory.
+MIGRATION_CATEGORY_KEY = os.getenv("MIGRATION_CATEGORY_KEY", "manga").strip()
