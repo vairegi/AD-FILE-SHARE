@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 import config
 import db
 import persona
+import covers
 
 # ── small helpers ───────────────────────────────────────────────
 def esc(t) -> str:
@@ -304,7 +305,7 @@ async def _show_feed(q, category, idx):
         await _edit(q, persona.feed_empty(), _nav_row("cats"))
         return
     c = cols[0]
-    await _render_feed_card(q, c, category, idx, total, context=q and getattr(q, "bot", None))
+    await _render_feed_card(q, c, category, idx, total, context=q.get_bot() if hasattr(q, "get_bot") else getattr(q, "bot", None))
 
 
 async def _send_feed_card(update, context, collection_id):
@@ -322,16 +323,12 @@ async def _send_feed_card(update, context, collection_id):
     text = await _feed_text(update.effective_user.id, c)
     kb = _feed_kb(c["collection_id"], cat, 0, total,
                   await db.is_unlocked(update.effective_user.id, c["collection_id"]))
-    url = _cover_url(c)
-    if url:
+    items = await covers.preview_items(c)
+    if items:
         import rich_cards
-        mode = await _cover_mode()
-        try:
-            await rich_cards.show_cover_card(context.bot, update.effective_user.id,
-                                             text, kb, url, mode)
-            return
-        except Exception:
-            pass
+        await rich_cards.show_cover_card(context.bot, update.effective_user.id, text, kb,
+                                         items, await _cover_mode(), collection_id=c["collection_id"])
+        return
     await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -341,19 +338,16 @@ async def _render_feed_card(q, c, category, idx, total, context=None):
     await db.bump_collection(c["collection_id"], "views")
     text = await _feed_text(uid, c)
     kb = _feed_kb(c["collection_id"], category, idx, total, unlocked)
-    url = _cover_url(c)
-    bot = context if context else getattr(q, "bot", None)
-    if url and bot:
+    bot = context or (q.get_bot() if hasattr(q, "get_bot") else getattr(q, "bot", None))
+    items = await covers.preview_items(c)
+    if items and bot:
         import rich_cards
         mode = await _cover_mode()
         chat_id = q.message.chat.id if getattr(q.message, "chat", None) else uid
-        mid = q.message.message_id if getattr(q.message, "message_id", None) else None
-        try:
-            await rich_cards.show_cover_card(bot, chat_id, text, kb, url, mode,
-                                             edit_message_id=mid)
-            return
-        except Exception:
-            pass
+        mid = getattr(q.message, "message_id", None)
+        await rich_cards.show_cover_card(bot, chat_id, text, kb, items, mode,
+            edit_message_id=mid, collection_id=c["collection_id"])
+        return
     await _edit(q, text, kb)
 
 
@@ -694,31 +688,32 @@ async def cmd_covermode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Preview mode set to {arg}.")
 
 
-async def cmd_retry_covers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_retry_covers(update, context):
     if not _is_admin(update.effective_user.id):
         return
-    import runtime
+    import runtime, cover_jobs
     if not runtime.userbot:
         await update.message.reply_text("🎀 Connect the userbot first: /setup_userbot")
         return
-    cur = db.col("collections").find({"cover.url_status": "failed"})
-    docs = [d async for d in cur]
-    if not docs:
-        await update.message.reply_text("🎀 No failed covers — all set, Senpai~!")
+    if cover_jobs.busy():
+        await update.message.reply_text("⏳ Cover preparation is already running. Use /cover_status for progress.")
         return
-    import httpx
-    done = 0
-    async with httpx.AsyncClient() as http:
-        for d in docs:
-            await db.col("collections").update_one(
-                {"collection_id": d["collection_id"]},
-                {"$set": {"cover.url_status": "pending"}})
-            await scanner._prepare_cover(runtime.userbot, d["channel_id"], d)
-            if (await db.get_collection(d["collection_id"]) or {}).get("cover", {}).get("url_status") == "ok":
-                done += 1
+    count = await covers.needs_preparation_count()
+    if not count:
+        await update.message.reply_text("✅ All collections already have cached hosted cover URLs. Use /cover_status for details.")
+        return
+    status_message = await update.message.reply_text(
+        f"🎀 Found {count} covers needing preparation (pending, missing or failed). Starting in the background…")
+    cover_jobs.start(runtime.userbot, status_message, update.message.reply_text)
+
+
+async def cmd_cover_status(update, context):
+    if not _is_admin(update.effective_user.id):
+        return
+    import cover_jobs
+    stats = await cover_jobs.statistics()
     await update.message.reply_text(
-        f"✅ Cover retry done: {done}/{len(docs)} hosted. "
-        "Failures stay cached as failed; run /retry_covers again later.")
+        "🎀 Cover status\n" + "\n".join(f"{key}: {value}" for key,value in stats.items()))
 
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -734,7 +729,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /setprice <collection_id> <tokens>\n"
         "• /scan <channel_id> — run scanner now\n"
         "• /covermode slideshow|collage — cover preview style\n"
-        "• /retry_covers — re-host failed covers\n"
+        "• /retry_covers — prepare pending/missing/failed covers\n"
+        "• /cover_status — hosted/local preview counts and progress\n"
         "• /pending — inspect orphan files\n"
         "• /collections — latest indexed IDs and counts\n"
         "• /setup_userbot — API ID → API hash → session in chat\n"

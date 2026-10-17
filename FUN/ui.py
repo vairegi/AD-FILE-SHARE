@@ -53,19 +53,32 @@ async def referral_links(bot, user_id):
 
 
 async def edit_card(q, text, kb):
-    """In-place edits; a redundant tap is not a reason to spam a new card."""
+    """Keep native photo fallback navigable as well as text/rich cards."""
     from telegram.error import BadRequest
+    import html as html_module
+    message=getattr(q,"message",None)
+    plain=html_module.unescape(re.sub(r"<[^>]*>","",text))
+    photo=bool(getattr(message,"photo",None))
+    if photo and len(plain.encode("utf-16-le"))//2 <= 1000:
+        try:
+            return await q.edit_message_caption(caption=text,reply_markup=kb,parse_mode="HTML")
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():return None
+            raise
+    if photo:
+        # Caption is too long for a native photo. Create the replacement first;
+        # never delete the only visible card before another request succeeds.
+        replacement=await message.reply_text(text,reply_markup=kb,parse_mode="HTML")
+        try:await message.delete()
+        except Exception:pass
+        return replacement
     try:
-        return await q.edit_message_text(text, reply_markup=kb,
-                                         parse_mode="HTML",
-                                         disable_web_page_preview=True)
+        return await q.edit_message_text(text,reply_markup=kb,parse_mode="HTML",disable_web_page_preview=True)
     except BadRequest as exc:
-        message = str(exc).lower()
-        if "message is not modified" in message:
-            return None
-        if "message to edit not found" in message or "message can't be edited" in message:
-            return await q.message.reply_text(text, reply_markup=kb,
-                                               parse_mode="HTML")
+        error=str(exc).lower()
+        if "message is not modified" in error:return None
+        if "message to edit not found" in error or "message can't be edited" in error:
+            return await message.reply_text(text,reply_markup=kb,parse_mode="HTML")
         raise
 
 

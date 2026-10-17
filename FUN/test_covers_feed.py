@@ -51,7 +51,10 @@ class ScanClient(Source):
         return self.posts[-1:] if limit == 1 else self.posts
     async def download_media(self, media, file=None, thumb=None):
         self.downloads.append(media)
-        file.write(b"jpeg-bytes")
+        import io
+        from PIL import Image
+        image=io.BytesIO(); Image.new("RGB",(8,8),(120,140,160)).save(image,"JPEG")
+        file.write(image.getvalue())
         return file
 
 
@@ -113,8 +116,11 @@ async def test_rescan_does_not_reupload_cached_cover(monkeypatch):
     await scanner.scan_channel(client, -100, "movies")
     posts.append(source_message(12))
     before = len(fake.posted)
+    downloads=len(client.downloads)
+    assert before==1 and downloads==1
     await scanner.scan_channel(client, -100, "movies")
     assert len(fake.posted) == before  # cached — no re-upload for same cover
+    assert len(client.downloads)==downloads
 
 
 @pytest.mark.asyncio
@@ -143,8 +149,9 @@ async def test_feed_shows_rich_slideshow_with_cached_cover(monkeypatch):
     ep, data = q.bot.posts[0]
     payload = json.loads(data["rich_message"])
     assert ep == "editMessageText"
-    assert payload["blocks"][0]["type"] == "slideshow"
-    assert payload["blocks"][0]["items"][0]["photo"] == "https://telegra.ph/file/x.jpg"
+    assert set(payload)=={"html"}
+    assert '<tg-slideshow>' in payload["html"]
+    assert '<img src="https://telegra.ph/file/x.jpg"/>' in payload["html"]
 
 
 @pytest.mark.asyncio
@@ -157,7 +164,7 @@ async def test_feed_collage_mode(monkeypatch):
     q.message.message_id = 42
     await handlers.on_button(NS(callback_query=q), context(q.bot))
     payload = json.loads(q.bot.posts[0][1]["rich_message"])
-    assert payload["blocks"][0]["type"] == "collage"
+    assert "<tg-collage>" in payload["html"]
 
 
 @pytest.mark.asyncio

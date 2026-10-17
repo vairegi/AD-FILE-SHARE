@@ -1,4 +1,4 @@
-# FUN Bot 3 — v1.2.0 cover previews + /help (2026-10-17)
+# FUN Bot 3 — v1.2.1 cover recovery (2026-10-17)
 
 This folder is an independent service. Bots 1–2 at the repository root are
 unchanged. All source, tests and setup tools are directly inside FUN/.
@@ -16,34 +16,61 @@ GitHub “Add files via upload” does NOT delete old files.
    package still exists, because Python would otherwise import it instead
    of the repaired flat handlers.py.
 
-## v1.2.0: cover previews on Start Watching + /help
+## v1.2.1: fix pending covers, real callback rendering and retry worker
+The previous v1.2.0 release had defects not caught by its fake-object tests:
+- /retry_covers selected only failed rows, ignoring never-processed pending
+  or missing statuses. Therefore “No failed covers” did NOT mean covers existed.
+- The feed looked for q.bot; real PTB callbacks bind the bot via q.get_bot().
+- The worker referenced scanner without importing it.
+- The rich blocks used invented field shapes instead of the documented schema.
 
-**The cover pipeline is now wired in.** When a channel is scanned, each
-collection's cover photo (or a short video cover's thumbnail) is downloaded
-via the userbot ONCE, uploaded to telegra.ph, falling back to graph.org if
-telegra.ph fails. The resulting direct image URL is validated and **cached in
-MongoDB**, so browsing never re-downloads or re-uploads a cover.
+This update selects pending/missing/failed/unusable URL states. It prepares
+covers in a background job and reports actual hosted/local/failure counts.
+Use /cover_status to inspect totals and job progress. A restart keeps completed
+image caches; /retry_covers resumes remaining unfinished work.
 
-**Start Watching now shows the cover.** The feed card renders as a rich
-message with a swipeable **slideshow** (default) or a combined **collage** of
-the cover, using Bot API 10.1+ rich messages. Fallback chain, so the feed is
-never blank:
-1. Hosted URL + rich card accepted  → slideshow / collage card
-2. Rich rejected by the client      → normal photo message (same cached URL)
-3. No hosted URL (both hosts down)  → plain text card (old behaviour)
+Hosted path: download photo/video THUMBNAIL once -> telegra.ph/upload ->
+graph.org/upload -> validate returned image URL -> cache URL in MongoDB.
+Never download a cover video in full merely to render its preview.
+Successful URLs are never uploaded again on a feed tap, retry or rescan.
 
-- `/covermode slideshow` (default) — swipeable cover preview.
-- `/covermode collage` — combined grid preview.
-- `/retry_covers` — re-host covers whose upload failed earlier (e.g. when
-  telegra.ph was down). Failures are cached as `failed` so rescanning does
-  NOT hammer the hosts; this command resets them to retry.
-- `/help` — the Cute Assistant guide card (same as the Help Guide button),
-  with Start Watching / Profile / Main Menu buttons.
+The userbot's downloaded small JPEG is ALSO cached in cover_assets. If both
+hosts are unavailable, the bot can upload this cached image to Telegram once,
+then cache its Telegram file_id. Later taps reuse that file_id. An explicit
+retry can retry mirrors from the cached bytes without another source download.
+Failed source access or missing thumbnails are reported in /cover_status;
+a source that cannot be read cannot produce an image and isn't called ready.
 
-After scanning, use `/collections` to see indexed drops, then `/start` →
-**Start Watching** to browse with covers. Existing collections scanned before
-this release have no hosted cover yet — run `/retry_covers` (with the userbot
-connected) to host them without re-scanning files.
+The feed uses documented InputRichMessage.html with tg-slideshow/tg-collage
+and img tags, plus the existing native colored inline keyboard. Source albums
+prepare up to ten separate cover images. A one-image cover is still just one
+image; changing its mode cannot create extra slides. When rich formatting is
+explicitly rejected by the API, native-photo fallback shows one cached image.
+Native-photo fallback is editable in place. It does not delete the current
+card BEFORE a replacement succeeds. Network timeouts do not trigger blind
+resends. Older client rendering cannot be detected from API acceptance alone.
+
+After updating files and redeploying:
+
+    /userbot_status
+    /retry_covers
+    /cover_status
+    /start
+
+Wait for the background preparation to finish, then choose Start Watching.
+No new environment variable, collection rescan, balance reset or session
+re-import is required just for this upgrade. Commands retained:
+
+    /covermode slideshow
+    /covermode collage
+    /help
+
+/help shows the same cute manual as Help Guide, with Start Watching / Profile /
+Main Menu navigation. Everything stays directly in FUN/; Bots 1–2 unchanged.
+
+API reference used to correct the schema:
+https://core.telegram.org/bots/api#inputrichmessage
+https://core.telegram.org/bots/api#rich-message-formatting-options
 
 ## v1.1.1: simple owner-chat userbot setup
 Send /setup_userbot in YOUR private bot chat. The bot asks for:
@@ -196,7 +223,7 @@ has permanent vault access and free re-streams. Save is a separate bookmark.
 Install: pip install -r requirements-test.txt
 Run:
 
-    pytest -q test_repairs.py test_chat_setup.py test_covers_feed.py
+    pytest -q test_repairs.py test_chat_setup.py test_covers_feed.py test_cover_recovery.py
     python3 rich_verify_test.py
     python test_legacy.py
 
@@ -211,11 +238,11 @@ or sponsor-provider completion. No production credentials were used.
 ## Existing scope limitations, not hidden by this repair
 This repair fixes menus, onboarding, source scanning and referral sharing.
 The old release incorrectly described every feature as fully wired:
-- The collage/slideshow cover pipeline IS now wired (scan-time hosting +
-  cached URL + rich card render). Offline tests cover payload shape, fallback
-  chain, scan-time caching and the /covermode toggle. Live rendering of rich
-  slideshow/collage blocks depends on the user's Telegram client version and
-  can only be confirmed on a real device after deploy.
+- The repaired pipeline has regression tests for 162 pending rows and real
+  PTB callback binding/request serialization, not just permissive fake q.bot
+  objects. These are offline tests, not a claim that external hosts or every
+  Telegram client were live-tested. Source access and host acceptance must
+  still be confirmed after deployment with /cover_status.
 - The existing sponsor adapter accepts custom HMAC callbacks. It is NOT a
   working integration with every commercial shortener just by adding a URL.
   Tasks without a configured verification secret stay hidden. Provider-specific
@@ -230,3 +257,11 @@ The old release incorrectly described every feature as fully wired:
 
 Use the repair as an upgrade for the requested issues, not as proof that
 unrelated unfinished features in the previous zip are production-ready.
+
+## Credential safety after sharing a MongoDB URI
+Never commit a live URI/password. Rotate any password shared in a support
+conversation, update MONGO_URI in Render, and then repeat /setup_userbot:
+the simplified userbot credential encryption derives its key from MONGO_URI.
+Changing the URI therefore requires a fresh import of your existing session.
+Do not send the replacement password to support. This ZIP has no live URI,
+Render log, userbot session, account API hash or production media.

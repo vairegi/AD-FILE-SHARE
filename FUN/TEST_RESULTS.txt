@@ -1,9 +1,9 @@
-FUN v1.2.0 cover previews + /help verification (2026-10-17)
+FUN v1.2.1 cover recovery verification — 2026-10-17
 
-........................................................................ [ 44%]
-........................................................................ [ 88%]
-...................                                                      [100%]
-163 passed in 1.44s
+........................................................................ [ 40%]
+........................................................................ [ 80%]
+..................................                                       [100%]
+178 passed in 1.66s
 
 PASS - classifier: 3 collections
 PASS - classifier: cover1 title is first caption line
@@ -63,18 +63,15 @@ PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-PASS rich slideshow payload
-PASS collage payload
-PASS rich->photo fallback
-PASS photo->text fallback
-PASS no-cover text
-PASS in-card buttons preserved
-ALL rich fallback probes passed
+PASS documented InputRichMessage.html slideshow
+PASS multi-image collage HTML
+PASS explicit rejection -> in-place photo
+PASS unavailable image -> explicit text fallback
+PASS no prepared media -> navigable text
+PASS native colored keyboard retained
+6/6 rich probes passed
 
-All modules compile. Root Bots 1-2 byte-identical to baseline.
-New tests: scan-time cover download/host/cache, telegra.ph->graph.org fallback,
-failed-cover caching + /retry_covers, no re-upload on rescan, rich slideshow/collage
-payload shape, photo/text fallbacks, /covermode toggle, /help registration.
-Offline only: fake userbot/http/bot; no real Telegraph/Telegram/Mongo contacted.
-Live rich slideshow/collage rendering depends on the user Telegram client version
-and must be confirmed on a device after deploy.
+All modules compile; tracked files outside FUN match the fetched repo baseline.
+Confirmed read-only incident finding: 162 collection covers pending, zero failed, zero hosted URLs. No production data was changed, no account session was decrypted, and no production media was read.
+Regression includes 162-pending backfill, pending/missing/failed retry selection, actual PTB CallbackQuery.get_bot binding, documented rich HTML request serialization, native-photo multipart attach references, no delete-before-success, URL/byte/file-id caching, and multi-image/video-thumbnail preparation.
+External services in tests are mocked: these tests do not prove live source-media access, current mirror upload acceptance or client rendering. Confirm after deployment via /retry_covers and /cover_status.
