@@ -52,7 +52,7 @@ COVER_FALLBACK_HOST = os.environ.get("COVER_FALLBACK_HOST", "https://graph.org/u
 # Membership
 REQUIRED_CHANNEL_IDS = [int(x) for x in os.environ.get("REQUIRED_CHANNEL_IDS", "").split(",") if x.lstrip("-").isdigit()]
 
-# Userbot session encryption (Render secret env var, NOT in MongoDB)
+# Legacy secure-page encryption only. New chat setup needs no extra env key.
 SESSION_ENCRYPTION_KEY = os.environ.get("SESSION_ENCRYPTION_KEY", "").strip()
 
 # Health

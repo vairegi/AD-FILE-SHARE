@@ -1,4 +1,4 @@
-# FUN Bot 3 — v1.1.0 repair release (2026-10-17)
+# FUN Bot 3 — v1.1.1 chat setup update (2026-10-17)
 
 This folder is an independent service. Bots 1–2 at the repository root are
 unchanged. All source, tests and setup tools are directly inside FUN/.
@@ -16,31 +16,37 @@ GitHub “Add files via upload” does NOT delete old files.
    package still exists, because Python would otherwise import it instead
    of the repaired flat handlers.py.
 
-## Fixes in this release
-- Real Bot API button styles: Start Watching/Unlock red (danger), Categories/
-  Re-Stream/join/share green (success), other navigation blue (primary).
-  Colors are fields in the serialized keyboard, not text or emoji tricks.
-- Selective HTML: bold heading and labels; monospace numbers/values; italic
-  cute narration, with escaped dynamic titles/user names. Button text itself
-  is plain Telegram button text; HTML formatting applies to message cards.
-- Referral identity resolves automatically from getMe; never emits t.me/?start.
-  Share on Telegram uses the official URL-encoded t.me/share/url flow with
-  “Stream exclusive media now!” as accompanying text.
-- Validate Fernet keys BEFORE asking for a session. API ID/hash and session
-  are imported via an owner-only, expiring, single-use HTTPS form. They are
-  encrypted together in MongoDB. The separate Fernet key stays in Render.
-- Setup checks account authorization before replacing saved credentials.
-  No bot-chat login codes/passwords/session capture. Setup bearer is in the
-  URL fragment, not HTTP query logs. Failed connections do not replace data.
-- Background /scan, persisted incremental scanner state, album-aware cover
-  boundaries, stable collection IDs, no duplicate appended files on rescan.
-- Registered automatic cleanup and incremental polling jobs. Expired deletion
-  jobs survive restarts; transient deletion failures retry instead of vanishing.
-- Fixed stale balances/streaks, separate Vault/Bookmarks screens, re-stream
-  membership checks, duplicate welcome/check-in/referral credits, and unsafe
-  blind retries after uncertain Telegram delivery timeouts.
-- Suppress HTTP client URL logs that can expose the bot token. GET/HEAD / and
-  /health return 200 (the previous log showed HEAD / returning 404).
+## v1.1.1: simple owner-chat userbot setup
+Send /setup_userbot in YOUR private bot chat. The bot asks for:
+1. API ID (numbers).
+2. API hash (32 hexadecimal characters).
+3. Your existing authorized Telethon user-account StringSession.
+It validates and connects BEFORE reporting success. Then /userbot_status
+checks both transport connectivity and session authorization. /remove_userbot
+disconnects and removes saved credentials; /cancel discards partial setup.
+
+No API_ID, API_HASH or SESSION_ENCRYPTION_KEY Render variables are required.
+Those three can be removed after deploying this update. No encryption-key
+generation, browser form, phone number, login code or password is needed.
+Keep BOT_TOKEN, OWNER_ID, MONGO_URI, WEBHOOK_SECRET and RENDER_EXTERNAL_URL.
+This is still a separate FUN service; root Bots 1–2 are not modified.
+
+Setup is owner-only and private-chat-only; expires after ten minutes. Invalid
+input stays on the current step. API ID/hash/session messages are deleted on
+a best-effort basis; failure produces a warning to delete the message manually.
+Bot chats are NOT end-to-end encrypted; deleting messages is not a guarantee
+of erasing notifications, screenshots, platform data or previously saved copies.
+Use only your own dedicated account, and never send login codes/passwords.
+
+Finished credentials are encrypted in MongoDB. The encryption key is derived
+automatically from the existing secret MONGO_URI plus a random salt; no new
+key environment variable or plaintext account session is stored in MongoDB.
+Changing the exact MONGO_URI string requires re-importing the userbot via
+/setup_userbot. Treat Render secrets and MongoDB access as highly sensitive.
+A full compromise of the Render service can recover the saved credentials.
+
+The colored keyboards, selective HTML formatting, automatic referral username,
+Share on Telegram button, scanners and cleanup improvements from v1.1.0 remain.
 
 ## SECURITY: token seen in old Render logs
 If your logs include /bot<TOKEN>/getMe or similar URLs, revoke that BOT_TOKEN
@@ -63,52 +69,44 @@ Required environment variables:
 - MONGO_DB_NAME: Bot 3's database name (default fun_bot3).
 - WEBHOOK_SECRET: a unique random secret, NOT the default fun_secret.
 - RENDER_EXTERNAL_URL: your full HTTPS Render address, no trailing slash.
-- SESSION_ENCRYPTION_KEY: a valid Fernet key generated as below.
+- SESSION_ENCRYPTION_KEY: NOT required for v1.1.1 owner-chat onboarding.
 
 Optional:
 - BOT_NAME: display branding; set it to “Relax Time” if that is your chosen name.
 - BOT_USERNAME: optional fallback, without @. getMe normally supplies it.
-- API_ID/API_HASH: only needed to load a legacy v1 session. New secure setup
-  stores them encrypted in MongoDB, so these two env vars are not required.
+- API_ID/API_HASH: NOT required; enter them one at a time in the owner chat.
 - REQUIRED_CHANNEL_IDS: optional initial membership-gate IDs; /reqchannel
   stores your subsequent changes in MongoDB.
 
 Keep the process at ONE worker. Do not deploy a second service with the same
 bot token or connect two live processes using the same Telethon session.
 
-## 1. Fix the Fernet error
-A Fernet key is NOT an API hash, bot token or arbitrary password. It encodes
-32 random bytes in URL-safe base64 (normally 44 characters, often ending =).
-On YOUR trusted computer, with cryptography installed, generate a fresh key:
+## 1. Deploy this update
+Upload all files from FUN/ into the repo FUN/ directory. Render Root Directory
+remains FUN; Build Command and Start Command stay as shown above. This package
+is flat (no nested folders). If upgrading from a very old release, remove the
+obsolete handlers/, rich/ and tests/ directories as described above.
+Save/deploy, then remove API_ID, API_HASH and SESSION_ENCRYPTION_KEY if present.
+Do not remove MONGO_URI or the other required service settings.
 
-    python setup_tools.py key
+## 2. Connect and remove your userbot
+In your private bot chat, from the account matching OWNER_ID:
 
-Or:
+    /setup_userbot
 
-    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Send API ID when asked, then API hash, then the StringSession you already
+generated on your laptop. Wait for the connection result. No need to generate
+a new session if the existing one remains valid. Commands:
 
-Copy the complete output into Render's SESSION_ENCRYPTION_KEY, no surrounding
-quotes. Save/redeploy. Do not share that output. Keep a private backup.
-Do not change a valid key after credentials have been stored: the old key is
-needed to decrypt them. If the old key is lost, re-import a new session.
-For WEBHOOK_SECRET, python setup_tools.py webhook-secret produces a secret.
+    /userbot_status
+    /cancel
+    /remove_userbot
 
-## 2. Connect the userbot
-1. Open /setup_userbot in your private chat with Bot 3 as OWNER_ID.
-2. If the encryption key is invalid, the bot explains how to fix it first.
-3. Open “Open Secure Setup”. The owner-only link expires after ten minutes;
-   a newly requested setup link invalidates the previous link.
-4. Enter API ID and API hash from https://my.telegram.org and an EXISTING
-   authorized Telethon StringSession for your dedicated user account.
-5. The page validates, connects and encrypts the credentials in MongoDB.
-6. Run /userbot_status. Connected should say yes.
-
-If you need to create a StringSession, install Telethon on your trusted
-computer and run python setup_tools.py session. Its prompts run locally,
-not in the bot. Import its secret output only on YOUR setup page. This tool
-has no need for your BotFather token. Telegram Devices can revoke the session.
-/remove_userbot disconnects and removes the stored credentials; it does not
-revoke the account session at Telegram. Revoke in Devices when appropriate.
+After success, credentials persist across redeploys and reconnect on startup.
+Starting /setup_userbot again resets its prompts but keeps an existing saved
+userbot until a new connection is validated. A changed MONGO_URI needs re-import.
+Removing stored credentials does NOT revoke your Telegram account session
+server-side. Use Telegram Settings > Devices to revoke it when desired.
 
 ## 3. Add a database channel and scan it
 Bot 3 does NOT publish posts into source channels. These are read/copy sources.
@@ -169,13 +167,13 @@ has permanent vault access and free re-streams. Save is a separate bookmark.
 Install: pip install -r requirements-test.txt
 Run:
 
-    pytest -q test_repairs.py
+    pytest -q test_repairs.py test_chat_setup.py
     python test_legacy.py
 
 These run offline against an in-memory MongoDB mock and mocked external
 services. They exercise real PTB serialization of style fields, HTML card
-structure, referral/share URL encoding, setup validation/encryption and
-single-use authorization, FastAPI routes, job registration, scans and
+structure, referral/share URL encoding, setup validation/encryption, the full three-step chat flow,
+owner/private checks, cancellation, removal, reconnect and legacy secure-page authorization, FastAPI routes, job registration, scans and
 economy/delivery failure paths. They do NOT establish live Telegram client
 rendering, real Atlas latency, real userbot login success, endpoint uptime,
 or sponsor-provider completion. No production credentials were used.

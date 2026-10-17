@@ -45,6 +45,9 @@ async def save_session(session_string):
 
 async def load_credentials():
     settings = await db.get_settings()
+    if settings.get("userbot_chat_credentials"):
+        import chat_setup
+        return await chat_setup.load_credentials()
     if settings.get("userbot_credentials"):
         try:
             return json.loads(decrypt_session(settings["userbot_credentials"]))
@@ -104,8 +107,10 @@ async def connect_credentials(credentials, client_factory=None):
 
 
 async def build_client():
-    if configuration_error():
-        return None
+    # New chat-import credentials need no API_ID/API_HASH/SESSION_ENCRYPTION_KEY.
+    settings = await db.get_settings()
+    if not settings.get("userbot_chat_credentials") and configuration_error():
+        return None  # old format can be replaced through /setup_userbot
     credentials = await load_credentials()
     if not credentials:
         return None
@@ -113,7 +118,7 @@ async def build_client():
 
 
 async def remove_session():
-    await db.update_settings({"userbot_session": None, "userbot_credentials": None,
+    await db.update_settings({"userbot_chat_credentials": None, "userbot_session": None, "userbot_credentials": None,
                                "userbot_setup_waiting": None})
     await db.col("setup_tokens").delete_many({})
 

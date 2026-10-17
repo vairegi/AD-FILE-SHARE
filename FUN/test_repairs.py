@@ -413,25 +413,27 @@ async def test_unauthorized_session_does_not_overwrite_or_consume(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_setup_command_error_help_and_owner_only(monkeypatch):
+async def test_setup_command_ignores_old_key_and_is_owner_only(monkeypatch):
     monkeypatch.setattr(config,"SESSION_ENCRYPTION_KEY","bad")
     u=update();await handlers.cmd_setup_userbot(u,context())
-    assert "Fernet.generate_key" in u.message.replies[-1][0]
-    assert "StringSession now" not in u.message.replies[-1][0]
+    assert "Step 1/3" in u.message.replies[-1][0]
+    assert "Fernet.generate_key" not in u.message.replies[-1][0]
     other=update(9);await handlers.cmd_setup_userbot(other,context())
     assert not other.message.replies
 
 
 @pytest.mark.asyncio
-async def test_setup_command_fragment_and_no_session_capture():
+async def test_setup_command_no_webpage_or_arbitrary_session_capture():
+    import chat_setup
     u=update();await handlers.cmd_setup_userbot(u,context())
-    url=u.message.replies[-1][1]["reply_markup"].to_dict()["inline_keyboard"][0][0]["url"]
-    assert url.startswith("https://example.onrender.com/setup/userbot#")
-    assert not urlparse(url).query
+    assert "reply_markup" not in u.message.replies[-1][1]
+    assert "API ID" in u.message.replies[-1][0]
+    await handlers.cmd_cancel(u,context())
     await db.update_settings({"userbot_setup_waiting":7})
     u=update(text="a random message or session")
     await handlers.on_private_text(u,context())
     assert not (await db.get_settings()).get("userbot_session")
+    assert not u.message.deleted
 
 
 @pytest.mark.asyncio

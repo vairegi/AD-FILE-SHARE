@@ -1,9 +1,9 @@
-FUN v1.1.0 sandbox verification
-Repository baseline: 2f575fa
+FUN v1.1.1 owner-chat setup verification (2026-10-17)
 
-........................................................................ [ 61%]
-.............................................                            [100%]
-117 passed in 1.17s
+........................................................................ [ 46%]
+........................................................................ [ 93%]
+..........                                                               [100%]
+154 passed in 1.25s
 
 PASS - classifier: 3 collections
 PASS - classifier: cover1 title is first caption line
@@ -63,6 +63,7 @@ PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-All source modules compile. Root Bots 1–2: byte-identical to baseline.
-Offline only: Mongo mock, fake authorized Telethon client, real PTB serialization via mocked HTTP transport, ASGI endpoint tests. No production credentials used.
-Not live-verified: Telegram client rendering, real Atlas/Telegram authorization, external hosting/provider acceptance or Render uptime. See README for remaining inherited feature limitations.
+All Python modules compile. Root Bots 1–2 are byte-identical to the fetched baseline.
+Tests use synthetic API credentials and a structurally valid synthetic StringSession, mocked Telegram authorization, in-memory MongoDB, and mocked HTTP transports. No real user account/session/provider was contacted.
+New tests cover the API ID -> hash -> session prompt order; absent/invalid legacy key variables; automatic encrypted save/reload; owner-only and private-only restrictions; invalid values; expiration; cancellation; removal; failed deletion warnings; session rejection; error redaction; and authorization-aware status.
+A real account connection must still be verified after deployment with the owner’s own session. Existing rich-preview/provider integration limitations in README remain unchanged.

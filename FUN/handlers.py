@@ -646,9 +646,10 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /scan <channel_id> — run scanner now\n"
         "• /pending — inspect orphan files\n"
         "• /collections — latest indexed IDs and counts\n"
-        "• /setup_userbot — one-use secure setup page\n"
+        "• /setup_userbot — API ID → API hash → session in chat\n"
         "• /userbot_status — configuration and connection\n"
         "• /remove_userbot — disconnect and remove saved session\n"
+        "• /cancel — cancel userbot setup\n"
         "• /botstatus — detected username\n"
         "• /stats — counts")
 
@@ -783,46 +784,24 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎀 Scan started in the background, Senpai~! I'll report the result here.")
 
 
-async def cmd_setup_userbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.OWNER_ID:
-        return
-    import userbot_setup
-    issue = userbot_setup.configuration_error()
-    if issue:
-        await update.message.reply_text(issue)
-        return
-    if not config.RENDER_EXTERNAL_URL.startswith("https://"):
-        await update.message.reply_text("Set RENDER_EXTERNAL_URL to your HTTPS Render address first.")
-        return
-    token = await userbot_setup.issue_setup_token()
-    url = config.RENDER_EXTERNAL_URL + "/setup/userbot#" + token
-    await update.message.reply_text(
-        "🎀 Secure Userbot Setup, Senpai~!\n\nOpen the one-use page below (expires in 10 minutes). "
-        "Enter your API ID, API hash, and an existing Telethon StringSession there. "
-        "Do not send sessions, login codes, or passwords into this chat.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔐 Open Secure Setup", url=url, style="success")]]))
+async def cmd_setup_userbot(update, context):
+    import chat_setup
+    await chat_setup.begin(update, context)
 
 
-async def cmd_userbot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.OWNER_ID:
-        return
-    import runtime, userbot_setup
-    issue = userbot_setup.configuration_error()
-    saved = await db.get_settings()
-    await update.message.reply_text(
-        f"🎀 Userbot status\nConnected: {'yes' if runtime.userbot else 'no'}\n"
-        f"Encrypted session stored: {'yes' if saved.get('userbot_session') or saved.get('userbot_credentials') else 'no'}\n"
-        f"Configuration: {issue or 'encryption key valid'}\n"
-        "API ID/hash can be entered on /setup_userbot. Both the bot and userbot must have channel access.")
+async def cmd_userbot_status(update, context):
+    import chat_setup
+    await chat_setup.status(update, context)
 
 
-async def cmd_remove_userbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.OWNER_ID:
-        return
-    import runtime, userbot_setup
-    await runtime.disconnect_userbot()
-    await userbot_setup.remove_session()
-    await update.message.reply_text("✅ Stored session removed; userbot disconnected. Revoke the session in Telegram Devices if needed.")
+async def cmd_remove_userbot(update, context):
+    import chat_setup
+    await chat_setup.remove(update, context)
+
+
+async def cmd_cancel(update, context):
+    import chat_setup
+    await chat_setup.cancel(update, context)
 
 
 async def cmd_botstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -834,7 +813,10 @@ async def cmd_botstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Never capture arbitrary messages as account sessions.
+    import chat_setup
+    if await chat_setup.consume(update, context):
+        return
+    # Outside an explicit owner-private setup, never capture arbitrary input.
     if (update.message.text or "").strip().lower() in ("/check-in", "/check in"):
         await cmd_checkin(update, context)
 

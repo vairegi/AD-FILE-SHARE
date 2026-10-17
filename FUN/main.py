@@ -36,7 +36,7 @@ def build_bot():
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,
-        "setup_userbot": handlers.cmd_setup_userbot, "userbot_status": handlers.cmd_userbot_status,
+        "setup_userbot": handlers.cmd_setup_userbot, "cancel": handlers.cmd_cancel, "userbot_status": handlers.cmd_userbot_status,
         "remove_userbot": handlers.cmd_remove_userbot, "botstatus": handlers.cmd_botstatus,
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,
         "setprice": handlers.cmd_setprice, "stats": handlers.cmd_stats,
@@ -90,7 +90,7 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"ok": True, "service": "fun-bot3", "version": "1.1.0"}
+    return {"ok": True, "service": "fun-bot3", "version": "1.1.1"}
 
 
 @app.post("/webhook")
