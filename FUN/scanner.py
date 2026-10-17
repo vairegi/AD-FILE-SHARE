@@ -124,6 +124,7 @@ async def scan_channel(client, channel_id: int, category: str,
             doc = await db.get_collection(cid)
             if doc:
                 try:
+                    doc.setdefault("channel_id", int(channel_id))
                     result = await _prepare_cover(client, channel_id, doc)
                     covers_ok += int(result["hosted"])
                     previews_ready += int(result["ready"])

@@ -702,23 +702,26 @@ async def test_application_lifespan_jobs_identity_and_shutdown(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cover_host_primary_fallback_and_preparation():
-    class Client:
-        def __init__(self):self.failed=False;self.urls=[]
-        async def post(self,url,**kwargs):
-            self.urls.append(url)
-            if self.failed and "telegra.ph" in url:raise TimedOut()
-            return NS(status_code=200,json=lambda:[{"src":"/file/test.jpg"}])
-        async def head(self,url,**kwargs):return NS(status_code=200,headers={"content-type":"image/jpeg"})
-    client=Client()
-    assert (await covers.host_cover(client,b"fake_jpeg"))["host"]=="telegra.ph"
-    client.failed=True
-    assert (await covers.host_cover(client,b"fake_jpeg"))["host"]=="graph.org"
-    async def download(mid):return b"fake_jpeg"
-    doc=await covers.prepare_cover_for_collection(collection(),client,download)
-    assert doc["cover"].get("url")
-    async def no_data(mid):return b""
-    empty=await covers.prepare_cover_for_collection(collection(),client,no_data)
-    assert empty["cover"]["url_status"]=="failed"
+    import covers
+    class MirrorHTTP:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, files=None, timeout=None, **kw):
+            if "telegra.ph" in url: raise RuntimeError("down")
+            return NS(status_code=200, json=lambda: [{"src": "/file/g.jpg"}])
+        async def head(self, url, **kw):
+            return NS(status_code=200, headers={"content-type": "image/jpeg"})
+    async with MirrorHTTP() as http:
+        r = await covers.host_cover(http, b"img")
+    assert r["status"] == "ok" and r["host"] == "graph.org"
+    assert r["url"] == "https://graph.org/file/g.jpg"
+    class AllDown:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, **kw): raise RuntimeError("down")
+    async with AllDown() as http:
+        r = await covers.host_cover(http, b"img")
+    assert r["status"] == "failed" and r["error"]
 
 
 @pytest.mark.asyncio

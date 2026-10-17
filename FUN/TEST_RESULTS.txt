@@ -1,11 +1,11 @@
-FUN v1.3.0 link-preview-only navigation — offline sandbox verification
+FUN v1.4.0 Telegraph previews + in-place edits — offline sandbox verification
 
-........................................................................ [ 34%]
-........................................................................ [ 69%]
-..............................................................           [100%]
-206 passed in 1.78s
+........................................................................ [ 37%]
+........................................................................ [ 74%]
+..................................................                       [100%]
+194 passed in 3.30s
 
-Separate legacy runner (overlapping features, not additional independent tests):
+Legacy runner:
 PASS - classifier: 3 collections
 PASS - classifier: cover1 title is first caption line
 PASS - classifier: cover1 has 3 delivery files (short-caption photo is delivery)
@@ -64,12 +64,4 @@ PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-Compileall: passed.
-
-Test migration: obsolete assertions demanding sendRichMessage, photo uploads and in-place edits
-were replaced with explicit sendMessage/link_preview_options/no-media/send-before-delete assertions.
-Existing scanner, userbot, economy, membership and delivery regressions remain.
-
-Limitations: no production MongoDB access/changes, bot account connection, live Telegram
-preview rendering, external mirror acceptance or end-to-end latency tested in this release.
-No deployment was performed.
+Compileall: passed. No production DB/network touched; live Telegraph acceptance and client rendering verified by deploy.

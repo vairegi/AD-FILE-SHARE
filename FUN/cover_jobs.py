@@ -83,8 +83,8 @@ async def statistics():
     col = db.col("collections")
     result={"Collections":await col.count_documents({}),
         "Hosted URL ready":await col.count_documents({"cover.url_status":"ok","cover.url":{"$type":"string","$ne":""}}),
-        "Render preview links":await col.count_documents({"cover.link_preview_host":"render"}),
-        "Feed mode":"link preview; new card then delete old",
+        "Telegraph links ready":await col.count_documents({"cover.url_status":"ok","cover.url":{"$regex":"^https?://(telegra.ph|graph.org)/"}}),
+        "Feed mode":"in-place edit; Telegraph link preview, cached-image fallback",
         "Pending":await col.count_documents({"cover.url_status":"pending"}),
         "No status yet":await col.count_documents({"cover.url_status":{"$exists":False}}),
         "Mirror upload failed":await col.count_documents({"cover.url_status":"failed"}),

@@ -1,18 +1,20 @@
-"""Durable cover pipeline. Download once, Telegraph -> graph.org, cache.
-A local preview asset is also stored in MongoDB so mirror downtime doesn't
-mean a text-only feed. Each small image is a separate document, not a giant
-collection document. Only explicit preparation/retry downloads source media.
+"""Cover preparation: download the small cover image once (userbot), upload it
+to Telegraph (telegra.ph first, graph.org mirror), cache the direct file URL in
+MongoDB. Navigation never re-uploads. If every host fails, the cached JPEG is
+sent to Telegram once via editMessageMedia and its file_id is reused.
 """
 import asyncio
 import hashlib
 import io
 import logging
-import time
+from urllib.parse import urljoin
 from weakref import WeakValueDictionary
-from urllib.parse import urljoin, urlparse
-from bson import Binary
+
+import httpx
+
 import config
 import db
+
 log = logging.getLogger("fun.covers")
 MAX_BYTES = 5 * 1024 * 1024
 MAX_PREVIEWS = 10
@@ -20,171 +22,254 @@ _locks = WeakValueDictionary()
 
 
 def asset_key(channel_id, message_id):
-    return f"{int(channel_id)}:{int(message_id)}"
+    return f"{channel_id}:{message_id}"
 
 
 def _lock(key):
-    result = _locks.get(key)
-    if result is None:
-        result = asyncio.Lock(); _locks[key] = result
-    return result
+    lock = _locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[key] = lock
+    return lock
 
 
 def _http_url(value):
-    if not isinstance(value, str): return False
-    parsed = urlparse(value)
-    return parsed.scheme in ("https", "http") and bool(parsed.hostname) and not parsed.username
-
-
-async def _try_upload(client, url, file_bytes):
+    if not isinstance(value, str):
+        return False
     try:
-        response = await client.post(url, files={"file": ("cover.jpg", file_bytes, "image/jpeg")}, timeout=12)
-        if response.status_code != 200:
-            return None
-        payload = response.json()
-        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-            src = payload[0].get("src")
-            result = urljoin(url, src) if isinstance(src, str) else None
-            if result and _http_url(result):
-                return result
-    except Exception:
-        pass
+        from urllib.parse import urlsplit
+        parts = urlsplit(value)
+        return parts.scheme in ("https", "http") and bool(parts.hostname) \
+            and not parts.username and not parts.password
+    except ValueError:
+        return False
+
+
+class UploadError(RuntimeError):
+    pass
+
+
+async def ensure_token(client):
+    """Telegraph API token via api.telegra.ph/createAccount; cached in settings.
+    Anonymous uploads were restricted by Telegraph; the token is the fix.
+    """
+    settings = await db.get_settings()
+    token = settings.get("telegraph_token")
+    if token:
+        return token
+    try:
+        get = getattr(client, "get", None)
+        if get is None:
+            raise RuntimeError("no_get_method")
+        r = await get(
+            "https://api.telegra.ph/createAccount",
+            params={"short_name": config.TELEGRAPH_SHORT_NAME,
+                    "author_name": config.TELEGRAPH_AUTHOR},
+            timeout=15)
+        payload = r.json()
+        token = (payload.get("result") or {}).get("access_token")
+        if r.status_code == 200 and payload.get("ok") and token:
+            await db.update_settings({"telegraph_token": token})
+            log.info("Telegraph account created; token cached in settings")
+            return token
+        log.info("Telegraph createAccount rejected: HTTP %s %.120s",
+                 r.status_code, payload)
+    except Exception as exc:
+        log.info("Telegraph createAccount unavailable: %s", type(exc).__name__)
     return None
 
 
-async def _validate(client, url):
+async def _try_upload(client, url, file_bytes, token=None):
+    kwargs = {"files": {"file": ("cover.jpg", file_bytes, "image/jpeg")}, "timeout": 20}
+    if token:
+        kwargs["data"] = {"access_token": token}
     try:
-        response = await client.head(url, timeout=10, follow_redirects=True)
-        if response.status_code == 405:
-            response = await client.get(url, headers={"Range": "bytes=0-0"}, timeout=10, follow_redirects=True)
-        return response.status_code in (200, 206) and response.headers.get("content-type", "").lower().startswith("image/")
+        r = await client.post(url, **kwargs)
+    except Exception as exc:
+        raise UploadError(f"{url}: {type(exc).__name__}") from exc
+    try:
+        payload = r.json()
+    except Exception:
+        payload = None
+    if r.status_code != 200:
+        raise UploadError(f"{url}: HTTP {r.status_code} {str(payload)[:80]}")
+    if isinstance(payload, dict) and payload.get("error"):
+        raise UploadError(f"{url}: {payload.get('error')}")
+    if isinstance(payload, list) and payload and payload[0].get("src"):
+        direct = urljoin(url, payload[0]["src"])
+        if _http_url(direct):
+            return direct
+    raise UploadError(f"{url}: unexpected response {str(payload)[:80]}")
+
+
+async def _validate(client, url):
+    """Advisory only: upload response is authoritative; Telegram fetches the URL
+    itself, so a blocked HEAD from Render must not discard a working link."""
+    try:
+        r = await client.head(url, timeout=10, follow_redirects=True)
+        ok = r.status_code in (200, 206) and \
+            "image" in (r.headers.get("content-type") or "")
+        if not ok and r.status_code == 405:
+            r = await client.get(url, timeout=10,
+                                 headers={"Range": "bytes=0-0"})
+            ok = r.status_code in (200, 206) and \
+                "image" in (r.headers.get("content-type") or "")
+        if not ok:
+            log.info("cover URL HEAD check inconclusive (kept anyway): %s", url)
+        return ok
     except Exception:
         return False
 
 
-async def host_cover(client, file_bytes):
-    for name, endpoint in (("telegra.ph", config.COVER_PRIMARY_HOST), ("graph.org", config.COVER_FALLBACK_HOST)):
-        url = await _try_upload(client, endpoint, file_bytes)
-        if url and await _validate(client, url):
-            return {"url": url, "host": name, "status": "ok"}
-    return {"url": None, "host": None, "status": "failed"}
-
-
-async def prepare_cover_for_collection(collection, client, download_bytes):
-    """Compatibility helper. Runtime uses prepare_collection below."""
-    cover = collection.get("cover") or {}
-    if cover.get("url_status") == "ok" and cover.get("url"):
-        return collection
-    try:
-        data = await download_bytes(cover.get("message_id"))
-        if data:
-            result = await host_cover(client, data)
-            cover.update(url=result["url"], url_host=result["host"], url_status=result["status"])
-        else:
-            cover["url_status"] = "failed"
-    except Exception:
-        cover["url_status"] = "failed"
-    collection["cover"] = cover
-    return collection
+async def host_cover(client, file_bytes, token=None):
+    """telegra.ph first (with token form/query, then anonymous), graph.org mirror.
+    Returns {"url", "host", "status", "error"}; never raises.
+    """
+    errors = []
+    for host, base in (("telegra.ph", config.COVER_PRIMARY_HOST),
+                       ("graph.org", config.COVER_FALLBACK_HOST)):
+        attempts = []
+        if token:
+            attempts.append((base, {"access_token": token}))
+            attempts.append((f"{base}?access_token={token}", None))
+        attempts.append((base, None))
+        for url, data in attempts:
+            try:
+                direct = await _try_upload(client, url, file_bytes,
+                                           token=None if data is None else data["access_token"] if "?access_token" not in url else None)
+                if data is None and "?access_token" in url:
+                    pass
+                return {"url": direct, "host": host, "status": "ok", "error": None}
+            except UploadError as exc:
+                errors.append(str(exc))
+            except Exception as exc:
+                errors.append(f"{url}: {type(exc).__name__}")
+    return {"url": None, "host": None, "status": "failed",
+            "error": "; ".join(errors)[:300] or "mirrors_unavailable"}
 
 
 def normalize_image(data):
-    from PIL import Image, ImageOps
     if not data or len(data) > MAX_BYTES:
         raise ValueError("cover_image_missing_or_too_large")
-    with Image.open(io.BytesIO(data)) as image:
-        if image.width * image.height > 25_000_000:
-            raise ValueError("cover_dimensions_too_large")
-        image = ImageOps.exif_transpose(image).convert("RGB")
-        image.thumbnail((1920,1920))
-        output = io.BytesIO(); image.save(output, format="JPEG", quality=85, optimize=True)
-        return output.getvalue()
+    from PIL import Image, ImageOps
+    img = Image.open(io.BytesIO(data))
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=85)
+    return out.getvalue()
 
 
 async def download_image(userbot, channel_id, mid):
-    """Photos: media. Video covers: still thumbnail, NOT the full video."""
-    message = await asyncio.wait_for(userbot.get_messages(int(channel_id), ids=int(mid)), timeout=25)
-    if not message:
-        raise ValueError("source_message_missing")
-    output = io.BytesIO()
-    if getattr(message, "photo", None):
-        await asyncio.wait_for(userbot.download_media(message.photo, file=output), timeout=40)
-    elif getattr(message, "video", None):
-        await asyncio.wait_for(userbot.download_media(message, thumb=-1, file=output), timeout=40)
+    """Small cover bytes only: photo or video THUMBNAIL, never the full video."""
+    msg = await userbot.get_messages(channel_id, ids=mid)
+    if not msg:
+        return None
+    photo = getattr(msg, "photo", None)
+    media = getattr(msg, "media", None) or photo or getattr(msg, "video", None) \
+        or getattr(msg, "document", None)
+    if media is None:
+        return None
+    buf = io.BytesIO()
+    if photo:
+        await userbot.download_media(media, file=buf)
+    elif getattr(msg, "video", None) or getattr(msg, "document", None):
+        await userbot.download_media(media, file=buf, thumb=-1)
     else:
-        raise ValueError("source_has_no_preview_media")
-    return normalize_image(output.getvalue())
+        return None
+    return normalize_image(buf.getvalue())
+
+
+async def _prepare(collection, http, fetch_bytes, force=False):
+    cover = collection.get("cover") or {}
+    if not force and cover.get("url_status") == "ok" and cover.get("url"):
+        return {"hosted": True, "ready": True, "cached": True}
+    token = await ensure_token(http)
+    keys = list(cover.get("asset_keys") or [])
+    data = None
+    if keys:
+        asset = await db.col("cover_assets").find_one(
+            {"_id": keys[0], "data": {"$exists": True}}, {"data": 1})
+        if asset:
+            data = bytes(asset["data"])
+    if data is None and fetch_bytes is not None:
+        mid = cover.get("message_id")
+        cid = collection.get("channel_id")
+        # Scanner may call before upserting channel_id; the deterministic
+        # collection_id "c<channel_id>_<message_id>" carries both.
+        if (not mid or not cid) and str(collection.get("collection_id", "")).count("_") == 1:
+            try:
+                left, right = str(collection["collection_id"]).split("_")
+                cid = cid or int(left[1:])
+                mid = mid or int(right)
+            except (ValueError, IndexError):
+                pass
+        if mid and cid:
+            key = asset_key(cid, mid)
+            async with _lock("dl:" + key):
+                try:
+                    data = await fetch_bytes(cid, mid)
+                except Exception as exc:
+                    log.info("cover download failed for %s: %s", key, type(exc).__name__)
+                    data = None
+                if data:
+                    from bson import Binary
+                    await db.col("cover_assets").update_one(
+                        {"_id": key},
+                        {"$set": {"data": Binary(data), "mime": "image/jpeg",
+                                  "sha256": hashlib.sha256(data).hexdigest(),
+                                  "channel_id": cid, "source_message_id": mid}},
+                        upsert=True)
+                    keys = [key]
+    if not data:
+        await db.col("collections").update_one(
+            {"collection_id": collection["collection_id"]},
+            {"$set": {"cover.url_status": "failed",
+                      "cover.last_error": "cover_image_missing_or_source_unreadable",
+                      "cover.last_attempt_at": db.now_ts()}})
+        return {"hosted": False, "ready": False}
+    hosted = await host_cover(http, data, token=token)
+    update = {"cover.asset_keys": keys, "cover.last_attempt_at": db.now_ts()}
+    if hosted["status"] == "ok":
+        update.update({"cover.url": hosted["url"],
+                       "cover.url_host": hosted["host"],
+                       "cover.url_status": "ok",
+                       "cover.last_error": None})
+    else:
+        update.update({"cover.url_status": "failed",
+                       "cover.last_error": hosted["error"]})
+    await db.col("collections").update_one(
+        {"collection_id": collection["collection_id"]}, {"$set": update})
+    # ready=True: cached JPEG remains usable through the editMessageMedia fallback
+    return {"hosted": hosted["status"] == "ok", "ready": True}
 
 
 async def prepare_collection(userbot, collection, http, force=False):
-    """Host each cover image and cache URLs. If bytes are already cached and
-    the URL is missing, re-upload from the cache (no source re-download)."""
-    """Prepare all cover-album images with persistent per-source caching.
-Successful links are never re-downloaded or uploaded just because of a tap
-or rescan. A failed mirror can still leave a usable Telegram-upload preview.
-"""
-    cid = collection["collection_id"]
-    original = collection.get("cover") or {}
-    if not force and original.get("url_status") == "ok" and original.get("url"):
-        return {"hosted": True, "ready": True, "cached": True}
-    ids = original.get("album_message_ids") or [original.get("message_id")]
-    ids = list(dict.fromkeys(x for x in ids if x))[:MAX_PREVIEWS]
-    keys, urls, errors = [], [], []
-    for mid in ids:
-        key = asset_key(collection["channel_id"], mid)
-        async with _lock(key):
-            asset = await db.col("cover_assets").find_one({"_id": key}) or {}
-            data = bytes(asset["data"]) if asset.get("data") else None
-            if not data:
-                try:
-                    data = await download_image(userbot, collection["channel_id"], mid)
-                    await db.col("cover_assets").update_one({"_id": key}, {"$set": {
-                        "data": Binary(data), "mime": "image/jpeg", "sha256": hashlib.sha256(data).hexdigest(),
-                        "channel_id": collection["channel_id"], "source_message_id": mid,
-                        "cached_at": db.now_ts()}}, upsert=True)
-                except Exception as exc:
-                    # Persist an actionable category, never raw RPC errors/credentials.
-                    errors.append("source_preview_unavailable:" + type(exc).__name__)
-                    continue
-            keys.append(key)
-            if asset.get("url_status") == "ok" and asset.get("url"):
-                urls.append(asset["url"])
-                continue
-            # Scan skips known failed attempts; an explicit retry may re-attempt
-            # the mirrors using cached bytes (without another source download).
-            result = await host_cover(http, data)
-            await db.col("cover_assets").update_one({"_id": key}, {"$set": {
-                "url": result["url"], "url_host": result["host"], "url_status": result["status"],
-                "last_attempt_at": db.now_ts()}}, upsert=True)
-            if result["url"]:
-                urls.append(result["url"])
-    fields = {"cover.asset_keys": keys, "cover.urls": urls,
-        "cover.url": urls[0] if urls else None,
-        "cover.url_host": urlparse(urls[0]).hostname if urls else None,
-        "cover.url_status": "ok" if urls else "failed",
-        "cover.preview_status": "ready" if keys or urls else "failed",
-        "cover.last_error": ";".join(errors) if errors else (None if urls else "mirrors_unavailable_using_cached_image"),
-        "cover.last_attempt_at": db.now_ts()}
-    await db.col("collections").update_one({"collection_id": cid}, {"$set": fields})
-    return {"hosted": bool(urls), "ready": bool(keys or urls), "cached": False}
+    async def fetch(cid, mid):
+        return await download_image(userbot, cid, mid)
+    return await _prepare(collection, http,
+                          fetch if userbot is not None else None, force=force)
+
+
+async def prepare_cover_for_collection(collection, client, download_bytes):
+    """Scanner entry point: caller supplies the per-message downloader."""
+    async def fetch(cid, mid):
+        return await download_bytes(mid)
+    return await _prepare(collection, client, fetch)
 
 
 async def preview_items(collection):
-    """Read metadata only. Do NOT load binary images per navigation tap."""
     cover = collection.get("cover") or {}
-    keys = cover.get("asset_keys") or []
     items = []
-    for key in keys[:MAX_PREVIEWS]:
-        asset = await db.col("cover_assets").find_one({"_id":key}, {"data":0})
-        if asset:
-            items.append({"key":key,"url":asset.get("url"), "file_id":asset.get("telegram_file_id")})
-    if not items:
-        for url in cover.get("urls") or ([cover["url"]] if cover.get("url") else []):
-            if _http_url(url): items.append({"key":None,"url":url,"file_id":None})
-    return items
+    if cover.get("url"):
+        items.append({"url": cover["url"]})
+    for u in cover.get("urls") or []:
+        items.append({"url": u})
+    for k in cover.get("asset_keys") or []:
+        items.append({"key": k})
+    return items[:MAX_PREVIEWS]
 
 
 async def needs_preparation_count():
-    # Includes pending, absent, failed, and malformed "ok but no URL" rows.
-    return await db.col("collections").count_documents({"$or": [
-        {"cover.url_status":{"$ne":"ok"}}, {"cover.url":None}, {"cover.url":""}]})
+    return await db.col("collections").count_documents(
+        {"$or": [{"cover.url_status": {"$ne": "ok"}},
+                 {"cover.url": None}, {"cover.url": ""}]})

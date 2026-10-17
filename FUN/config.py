@@ -46,6 +46,8 @@ AUTO_DELETE_AFTER_SECONDS = _int("AUTO_DELETE_AFTER_SECONDS", 10 * 60)
 ALBUM_BATCH_SIZE = _int("ALBUM_BATCH_SIZE", 10)  # Telegram hard limit
 
 # Cover hosts
+TELEGRAPH_SHORT_NAME = os.environ.get("TELEGRAPH_SHORT_NAME", "FUN Covers")
+TELEGRAPH_AUTHOR = os.environ.get("TELEGRAPH_AUTHOR", "FUN Bot")
 COVER_PRIMARY_HOST = os.environ.get("COVER_PRIMARY_HOST", "https://telegra.ph/upload")
 COVER_FALLBACK_HOST = os.environ.get("COVER_FALLBACK_HOST", "https://graph.org/upload")
 

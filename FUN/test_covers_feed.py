@@ -31,7 +31,7 @@ class FakeHTTP:
         self.posted = []
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    async def post(self, url, files=None, timeout=None):
+    async def post(self, url, files=None, timeout=None, **kw):
         self.posted.append(url)
         if self.primary_fails and "telegra.ph" in url:
             raise RuntimeError("down")
@@ -67,6 +67,10 @@ class RichBot(Bot):
         return {}
     async def send_photo(self, chat_id, photo, **kw):
         self.calls.append(("url_photo", photo)); return NS(message_id=43, photo=[])
+    async def edit_message_text(self, chat_id, message_id, text, **kw):
+        self.posts.append(("editMessageText", {"chat_id": chat_id, "message_id": message_id,
+                                               "text": text, **kw}))
+        return NS(message_id=message_id)
     async def edit_message_media(self, **kw):
         self.calls.append(("edit_url_photo", kw)); return NS(message_id=42, photo=[])
     async def delete_message(self, **kw): pass
@@ -131,7 +135,7 @@ async def test_rescan_does_not_reupload_cached_cover(monkeypatch):
 async def test_failed_upload_keeps_pending_and_no_url(monkeypatch):
     import httpx
     class AllFail(FakeHTTP):
-        async def post(self, url, files=None, timeout=None):
+        async def post(self, url, files=None, timeout=None, **kw):
             raise RuntimeError("down")
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: AllFail())
     posts = [source_message(10, "Cover\nQ\nA", kind="photo"), source_message(11)]
@@ -142,46 +146,48 @@ async def test_failed_upload_keeps_pending_and_no_url(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_feed_uses_text_link_preview_with_cached_cover():
+async def test_feed_edits_card_in_place_with_telegraph_link_preview():
     await db.upsert_collection(_seed_cover_collection("ok", "https://telegra.ph/file/x.jpg"))
-    q = Q("feed:all:0", bot=RichBot());q.message.message_id=42
+    q = Q("feed:all:0", bot=RichBot()); q.message.message_id = 42
     await handlers.on_button(NS(callback_query=q), context(q.bot))
-    assert not q.bot.posts and not q.bot.calls
-    uid,text,kw=q.bot.sent[-1]
-    assert uid==7 and '<a href="https://telegra.ph/file/x.jpg">\u2063</a>' in text
-    assert kw["link_preview_options"].to_dict()=={
-        "url":"https://telegra.ph/file/x.jpg","is_disabled":False,
-        "prefer_large_media":True,"show_above_text":True}
+    assert not q.bot.sent and not q.bot.calls
+    endpoint, kw = q.bot.posts[-1]
+    assert endpoint == "editMessageText" and kw["message_id"] == 42
+    assert '<a href="https://telegra.ph/file/x.jpg">\u2063</a>' in kw["text"]
+    assert kw["link_preview_options"].to_dict() == {
+        "url": "https://telegra.ph/file/x.jpg", "is_disabled": False,
+        "prefer_large_media": True, "show_above_text": True}
 
 
 @pytest.mark.asyncio
-async def test_legacy_collage_setting_does_not_restore_native_image_sends():
-    await db.update_settings({"cover_mode":"collage"})
+async def test_legacy_collage_setting_still_edits_in_place():
+    await db.update_settings({"cover_mode": "collage"})
     await db.upsert_collection(_seed_cover_collection("ok", "https://graph.org/file/x.jpg"))
-    q=Q("feed:all:0",bot=RichBot());q.message.message_id=42
-    await handlers.on_button(NS(callback_query=q),context(q.bot))
-    assert not q.bot.posts and not q.bot.calls
-    assert q.bot.sent[-1][2]["link_preview_options"].url=="https://graph.org/file/x.jpg"
+    q = Q("feed:all:0", bot=RichBot()); q.message.message_id = 42
+    await handlers.on_button(NS(callback_query=q), context(q.bot))
+    endpoint, kw = q.bot.posts[-1]
+    assert endpoint == "editMessageText"
+    assert kw["link_preview_options"].url == "https://graph.org/file/x.jpg"
 
 
 @pytest.mark.asyncio
 async def test_feed_text_fallback_when_no_cover():
-    await db.upsert_collection(_seed_cover_collection("failed"))
-    q = Q("feed:all:0")
-    q.bot = RichBot()
-    q.message.chat = NS(id=7, type="private")
-    q.message.message_id = 42
+    c = _seed_cover_collection("pending", None); c["cover"].pop("asset_keys", None)
+    await db.upsert_collection(c)
+    q = Q("feed:all:0", bot=RichBot()); q.message.message_id = 42
     await handlers.on_button(NS(callback_query=q), context(q.bot))
-    # No hosted URL and no cached image bytes -> text card (never blank).
-    assert q.bot.calls or q.bot.sent or q.message.edits, "no-cover card must still render"
+    endpoint, kw = q.bot.posts[-1]
+    assert endpoint == "editMessageText"
+    assert kw["link_preview_options"].is_disabled
+    assert "Cover preview unavailable" in kw["text"]
 
 
 @pytest.mark.asyncio
-async def test_covermode_explains_one_image_link_preview_and_checks_owner():
-    u=update();await handlers.cmd_covermode(u,context(args=["slideshow"]))
-    assert "one image above" in u.message.replies[-1][0]
+async def test_covermode_explains_inplace_telegraph_mode_and_checks_owner():
+    u = update(); await handlers.cmd_covermode(u, context(args=["slideshow"]))
+    assert "edited in place" in u.message.replies[-1][0]
     assert "disabled" in u.message.replies[-1][0]
-    other=update(uid=9);await handlers.cmd_covermode(other,context())
+    other = update(uid=9); await handlers.cmd_covermode(other, context())
     assert not other.message.replies
 
 

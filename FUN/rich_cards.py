@@ -1,48 +1,135 @@
-"""Link-preview feed: sendMessage only, never sendPhoto or media edits.
-The filename is kept for existing imports. This is NOT sendRichMessage.
-Send a replacement successfully before deleting the previous bot card.
+"""Feed cover cards: Telegraph link previews, edited IN PLACE.
+Primary: editMessageText + LinkPreviewOptions(url=telegra.ph/graph.org cover,
+prefer_large_media, show_above_text). No delete+resend flicker.
+Fallback (hosts unavailable): editMessageMedia with the cached JPEG - uploaded
+once, Telegram file_id reused afterwards. No Render-served cover URLs.
+Message-kind changes (text<->media, which Telegram forbids in one edit) are the
+only case that replaces a card, and the replacement is sent BEFORE the old
+message is deleted.
 """
 import html
 import logging
-from collections import OrderedDict
-from telegram import LinkPreviewOptions
-from telegram.error import TelegramError
-import covers
-import link_previews
 
-log = logging.getLogger("fun.link_cards")
-_retired = OrderedDict()
-MAX_RETIRED = 4096
+from telegram import InputMediaPhoto, LinkPreviewOptions
+from telegram.error import BadRequest, TelegramError
+
+import covers
+import db
+
+log = logging.getLogger("fun.cards")
+
+
+def _hosted_url(cover):
+    for u in [cover.get("url"), *(cover.get("urls") or [])]:
+        if isinstance(u, str) and u.startswith((
+                "https://telegra.ph/", "https://graph.org/",
+                "http://telegra.ph/", "http://graph.org/")):
+            return u
+    return None
+
+
+async def _cached_photo(cover):
+    """Returns (source, key): file_id string if already on Telegram, else bytes."""
+    for key in cover.get("asset_keys") or []:
+        asset = await db.col("cover_assets").find_one(
+            {"_id": key, "data": {"$exists": True}},
+            {"data": 1, "telegram_file_id": 1})
+        if not asset:
+            continue
+        if asset.get("telegram_file_id"):
+            return asset["telegram_file_id"], key
+        return bytes(asset["data"]), key  # raw bytes -> PTB multipart-attaches once
+    return None, None
+
+
+async def _save_file_id(result, key):
+    if not key or result is None:
+        return
+    photos = result.get("photo") if isinstance(result, dict) else getattr(result, "photo", None)
+    if photos:
+        fid = photos[-1].get("file_id") if isinstance(photos[-1], dict) else getattr(photos[-1], "file_id", None)
+        if isinstance(fid, str):
+            await db.col("cover_assets").update_one(
+                {"_id": key}, {"$set": {"telegram_file_id": fid}})
+
+
+def _is_not_modified(exc):
+    return "message is not modified" in str(exc).lower()
+
 
 async def show_cover_card(bot, chat_id, text, markup, collection, mode=None,
                           edit_message_id=None, collection_id=None):
-    old_id = edit_message_id  # compatibility argument; no edit API is called
+    cover = collection.get("cover") or {}
+    url = _hosted_url(cover)
+    mid = edit_message_id
     async with covers._lock("feed:" + str(chat_id)):
-        old_key = (chat_id, old_id)
-        if old_id and old_key in _retired:
-            return None  # rapid repeated taps on an already-replaced card
-        url = await link_previews.resolve_url(collection)
         if url:
-            # Explicit URL selects the cover even when the caption has other links.
-            text = '<a href="' + html.escape(url, quote=True) + '">\u2063</a>\n' + text
+            body = '<a href="' + html.escape(url, quote=True) + '">\u2063</a>\n' + text
             options = LinkPreviewOptions(is_disabled=False, url=url,
-                prefer_large_media=True, show_above_text=True)
-        else:
-            text += ("\n\n<i>⚠️ Cover preview unavailable. Owner: check /cover_status "
-                     "and RENDER_EXTERNAL_URL; run /retry_covers if no image is cached.</i>")
-            options = LinkPreviewOptions(is_disabled=True)
-        # On error/timeout do not delete the existing card, retry with media,
-        # or silently repeat a send that Telegram may already have accepted.
-        result = await bot.send_message(chat_id=chat_id, text=text,
-            parse_mode="HTML", reply_markup=markup, link_preview_options=options)
-        new_id = result.get("message_id") if isinstance(result, dict) else getattr(result, "message_id", None)
-        if old_id and new_id and old_id != new_id:
-            _retired[old_key] = True
-            while len(_retired) > MAX_RETIRED:
-                _retired.popitem(last=False)
+                                         prefer_large_media=True,
+                                         show_above_text=True)
+            if mid:
+                try:
+                    return await bot.edit_message_text(
+                        chat_id=chat_id, message_id=mid, text=body,
+                        parse_mode="HTML", reply_markup=markup,
+                        link_preview_options=options)
+                except BadRequest as exc:
+                    if _is_not_modified(exc):
+                        return None
+                    if "no text in the message" in str(exc).lower():
+                        pass  # current card is a media message: convert below
+                    else:
+                        raise
+            else:
+                return await bot.send_message(
+                    chat_id=chat_id, text=body, parse_mode="HTML",
+                    reply_markup=markup, link_preview_options=options)
+        # media path: cached file_id, one-time byte upload, or hosted URL as media
+        source, key = (url, None) if url else await _cached_photo(cover)
+        if source:
+            media = InputMediaPhoto(media=source, caption=text, parse_mode="HTML")
+            if mid:
+                try:
+                    result = await bot.edit_message_media(
+                        chat_id=chat_id, message_id=mid, media=media,
+                        reply_markup=markup)
+                except BadRequest as exc:
+                    if _is_not_modified(exc):
+                        return None
+                    if "no media" in str(exc).lower() or "wrong type" in str(exc).lower():
+                        # text card -> media card: send replacement FIRST
+                        result = await bot.send_photo(
+                            chat_id=chat_id, photo=source, caption=text,
+                            parse_mode="HTML", reply_markup=markup)
+                        try:
+                            await bot.delete_message(chat_id=chat_id, message_id=mid)
+                        except TelegramError:
+                            log.info("old feed card could not be deleted; replacement retained")
+                    else:
+                        raise
+            else:
+                result = await bot.send_photo(
+                    chat_id=chat_id, photo=source, caption=text,
+                    parse_mode="HTML", reply_markup=markup)
+            # Cache the assigned file_id even for URL-sourced media: speeds up
+            # any later editMessageMedia fallback to the cached image.
+            await _save_file_id(result, key or (cover.get("asset_keys") or [None])[0])
+            return result
+        # nothing visual available: explicit text card, preview disabled
+        body = (text + "\n\n<i>⚠️ Cover preview unavailable. Owner: run "
+                "/retry_covers (needs the userbot) or check /cover_status.</i>")
+        options = LinkPreviewOptions(is_disabled=True)
+        if mid:
             try:
-                await bot.delete_message(chat_id=chat_id, message_id=old_id)
-            except TelegramError:
-                # New card stays usable. Old card might remain if deletion is denied.
-                log.info("Old feed card could not be deleted; replacement retained")
-        return result
+                return await bot.edit_message_text(
+                    chat_id=chat_id, message_id=mid, text=body,
+                    parse_mode="HTML", reply_markup=markup,
+                    link_preview_options=options)
+            except BadRequest as exc:
+                if _is_not_modified(exc):
+                    return None
+                raise
+        return await bot.send_message(
+            chat_id=chat_id, text=body, parse_mode="HTML",
+            reply_markup=markup, link_preview_options=options)

@@ -672,9 +672,26 @@ async def cmd_covermode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     await update.message.reply_text(
-        "🎀 Feed mode: link preview — one image above the caption.\n"
-        "Next/Previous send a new card, then remove the old one.\n"
-        "Native slideshow/collage rendering is disabled in this mode.")
+        "\U0001f380 Feed mode: Telegraph link preview, edited in place.\n"
+        "Next/Previous edit the same card — no delete-and-resend flicker.\n"
+        "If telegra.ph/graph.org are unreachable, the bot edits in the cached "
+        "image once (editMessageMedia) and reuses its Telegram file_id.\n"
+        "Native slideshow/collage rendering stays disabled in this mode.")
+
+
+async def cmd_telegraph_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    if context.args:
+        await db.update_settings({"telegraph_token": context.args[0].strip()})
+        await update.message.reply_text("\u2705 Telegraph token saved. /retry_covers will use it.")
+        return
+    settings = await db.get_settings()
+    token = settings.get("telegraph_token")
+    await update.message.reply_text(
+        "\U0001f380 Telegraph token: " + (f"set ({token[:6]}\u2026)" if token else
+        "not stored yet — created automatically via api.telegra.ph/createAccount "
+        "on the first cover upload."))
 
 
 async def cmd_retry_covers(update, context):
@@ -717,7 +734,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /addtask <task_id> <label> <url> [reward]\n"
         "• /setprice <collection_id> <tokens>\n"
         "• /scan <channel_id> — run scanner now\n"
-        "• /covermode — explain link-preview feed mode\n"
+        "• /covermode — in-place Telegraph preview mode\n"
+        "• /telegraph_token — view/set the Telegraph API token\n"
         "• /retry_covers — prepare pending/missing/failed covers\n"
         "• /cover_status — hosted/local preview counts and progress\n"
         "• /pending — inspect orphan files\n"
