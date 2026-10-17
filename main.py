@@ -1,173 +1,113 @@
-"""Entry point: ONE FastAPI process hosting BOTH Telegram bots.
+"""Bot 3 entry point: ONE FastAPI process, webhook mode.
 
-Two python-telegram-bot Applications run in webhook mode inside this single
-process. Telegram delivers updates to:
+    POST /webhook  -> Bot 3 updates
+    GET  /health   -> UptimeRobot monitor (lightweight, no DB/media work)
+    POST /task/complete -> signed provider callback -> credit tokens
 
-    POST /bot1/webhook   -> Bot 1 (gate bot)
-    POST /bot2/webhook   -> Bot 2 (delivery bot)
-    GET  /health         -> Render health check
-
-Run locally:   uvicorn main:app --host 0.0.0.0 --port 8000
-On Render:     uvicorn main:app --host 0.0.0.0 --port $PORT
+Deploy on Render with Root Directory = FUN, Start Command:
+    uvicorn main:app --host 0.0.0.0 --port $PORT
 """
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from telegram import Update
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          MessageHandler, filters)
 
 import config
 import db
-from bot1 import build_bot1, schedule_daily, schedule_broadcast_sweeper
-from bot2 import build_bot2, schedule_sweeper
+import handlers
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-log = logging.getLogger("main")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+log = logging.getLogger("fun.main")
 
-bot1 = build_bot1()
-bot2 = build_bot2()
+if not config.BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN not configured")
 
+app_bot = (Application.builder().token(config.BOT_TOKEN).build())
+app_bot.add_handler(CommandHandler("start", handlers.cmd_start))
+app_bot.add_handler(CommandHandler(["checkin", "check_in"], handlers.cmd_checkin))
+app_bot.add_handler(CommandHandler("admin", handlers.cmd_admin))
+app_bot.add_handler(CommandHandler("addchannel", handlers.cmd_addchannel))
+app_bot.add_handler(CommandHandler("removechannel", handlers.cmd_removechannel))
+app_bot.add_handler(CommandHandler("channels", handlers.cmd_channels))
+app_bot.add_handler(CommandHandler("scan", handlers.cmd_scan))
+app_bot.add_handler(CommandHandler("setup_userbot", handlers.cmd_setup_userbot))
+app_bot.add_handler(CommandHandler("reqchannel", handlers.cmd_reqchannel))
+app_bot.add_handler(CommandHandler("addtask", handlers.cmd_addtask))
+app_bot.add_handler(CommandHandler("setprice", handlers.cmd_setprice))
+app_bot.add_handler(CommandHandler("stats", handlers.cmd_stats))
+app_bot.add_handler(CommandHandler("pending", handlers.cmd_pending))
+app_bot.add_handler(CallbackQueryHandler(handlers.on_button))
+app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                   handlers.on_private_text))
 
-async def _set_commands():
-    """Register the menu-button command lists for both bots."""
-    from telegram import BotCommand, BotCommandScopeChat
-    try:
-        # Bot 1 — everyone sees the basics
-        await bot1.bot.set_my_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("browse", "Browse by category & genre"),
-            BotCommand("help", "Show all commands"),
-        ])
-        # Bot 1 — admins additionally get the full admin panel in the menu
-        from bot1_admin import COMMANDS
-        admin_cmds = [BotCommand("start", "Start the bot"),
-                      BotCommand("help", "Show all commands")]
-        admin_cmds += [BotCommand(name, "admin") for name in sorted(COMMANDS)]
-        for admin_id in config.ADMIN_IDS:
-            try:
-                await bot1.bot.set_my_commands(
-                    admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
-            except Exception as exc:
-                log.warning("admin menu for %s failed: %s", admin_id, exc)
-        # Bot 2 — everyone sees the basics
-        await bot2.bot.set_my_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("help", "Show all commands"),
-        ])
-        # Bot 2 — admins additionally get broadcast / delivery controls (v4.7)
-        b2_admin = [BotCommand("start", "Start the bot"),
-                    BotCommand("help", "Show all commands"),
-                    BotCommand("broadcast", "Message every Bot 2 user"),
-                    BotCommand("setautodelete", "Auto-delete timer"),
-                    BotCommand("withfilemessages", "Deletion notice text"),
-                    BotCommand("checkram", "RAM usage")]
-        for admin_id in config.ADMIN_IDS:
-            try:
-                await bot2.bot.set_my_commands(
-                    b2_admin, scope=BotCommandScopeChat(chat_id=admin_id))
-            except Exception as exc:
-                log.warning("bot2 admin menu for %s failed: %s", admin_id, exc)
-    except Exception as exc:
-        log.warning("set_my_commands failed: %s", exc)
+_userbot_client = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Database + both bots
+    global _userbot_client
     await db.connect()
-    await bot1.initialize()
-    await bot1.start()
-    await bot2.initialize()
-    await bot2.start()
-
-    # 2. Register webhooks (only when a public URL is configured)
-    base = config.RENDER_EXTERNAL_URL.rstrip("/")
-    if base:
+    await app_bot.initialize()
+    await app_bot.start()
+    if config.RENDER_EXTERNAL_URL:
         try:
-            await bot1.bot.set_webhook(
-                f"{base}/bot1/webhook",
-                secret_token=config.BOT1_WEBHOOK_SECRET or None,
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=False,
-            )
-            await bot2.bot.set_webhook(
-                f"{base}/bot2/webhook",
-                secret_token=config.BOT2_WEBHOOK_SECRET or None,
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=False,
-            )
-            log.info("Webhooks registered at %s", base)
+            await app_bot.bot.set_webhook(
+                f"{config.RENDER_EXTERNAL_URL}/webhook",
+                secret_token=config.WEBHOOK_SECRET,
+                allowed_updates=["message", "callback_query"])
         except Exception as exc:
-            log.error("Failed to set webhooks: %s", exc)
-
-    # 3. Background jobs
-    await schedule_daily(bot1.job_queue)
-    schedule_broadcast_sweeper(bot1)   # v4.0: deletes timed /broadcast copies
-    schedule_sweeper(bot2)
-    await _set_commands()
-    log.info("Both bots are up.")
-
-    yield
-
-    # Shutdown
+            log.warning("set_webhook failed: %s", exc)
     try:
-        await bot1.stop()
-        await bot1.shutdown()
-        await bot2.stop()
-        await bot2.shutdown()
+        import userbot_setup
+        _userbot_client = await userbot_setup.build_client()
+        log.info("userbot: %s", "connected" if _userbot_client else "no session")
+    except Exception as exc:
+        log.warning("userbot init: %s", exc)
+    yield
+    try:
+        if _userbot_client:
+            await _userbot_client.disconnect()
     finally:
-        await db.close()
+        await app_bot.stop()
+        await app_bot.shutdown()
 
 
-app = FastAPI(title="Telegram Video Bots", lifespan=lifespan)
-
-
-def _secret_ok(request: Request, expected: str) -> bool:
-    if not expected:
-        return True
-    return request.headers.get("x-telegram-bot-api-secret-token") == expected
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
 async def health():
-    healthy = True
+    """UptimeRobot ping target — intentionally cheap (no DB, no media)."""
+    return {"ok": True, "service": "fun-bot3"}
+
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != config.WEBHOOK_SECRET:
+        return Response(status_code=403)
+    data = await request.json()
+    await app_bot.process_update(Update.de_json(data, app_bot.bot))
+    return Response(status_code=200)
+
+
+@app.post("/task/complete")
+async def task_complete(request: Request):
+    import providers
+    q = request.query_params
     try:
-        await db.ping()
-    except Exception:
-        healthy = False
-    return {"status": "ok" if healthy else "degraded", "database": healthy}
-
-
-@app.post("/bot1/webhook")
-async def bot1_webhook(request: Request):
-    if not _secret_ok(request, config.BOT1_WEBHOOK_SECRET):
-        return Response(status_code=403)
-    data = await request.json()
-    update = Update.de_json(data, bot1.bot)
-    # Answer Telegram INSTANTLY (200) and process in the background.
-    # Without this, a slow handler (e.g. a long /broadcast) makes Telegram
-    # retry the same update over and over - which is exactly what caused
-    # the repeated broadcasts AND blocked the event loop so no other
-    # command could get through.
-    asyncio.create_task(bot1.process_update(update))
-    return Response(status_code=200)
-
-
-@app.post("/bot2/webhook")
-async def bot2_webhook(request: Request):
-    if not _secret_ok(request, config.BOT2_WEBHOOK_SECRET):
-        return Response(status_code=403)
-    data = await request.json()
-    update = Update.de_json(data, bot2.bot)
-    asyncio.create_task(bot2.process_update(update))
-    return Response(status_code=200)
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, reload=False)
+        user_id, ts = int(q["user_id"]), int(q["ts"])
+    except (KeyError, ValueError):
+        return Response(status_code=400)
+    result = await providers.verify_callback(
+        user_id, q.get("task_id", ""), ts, q.get("sig", ""))
+    if result == "ok":
+        try:
+            await app_bot.bot.send_message(user_id, "🎉 Task verified! Tokens added, Senpai~!")
+        except Exception:
+            pass
+        return {"status": "ok"}
+    return {"status": result}
