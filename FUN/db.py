@@ -31,6 +31,7 @@ async def connect():
     await _db.users.create_index("user_id", unique=True)
     await _db.collections.create_index([("category", 1), ("posted_at", -1)])
     await _db.collections.create_index("status")
+    await _db.collections.create_index("collection_id", unique=True)
     await _db.unlocks.create_index(
         [("user_id", 1), ("collection_id", 1)], unique=True)
     await _db.bookmarks.create_index(

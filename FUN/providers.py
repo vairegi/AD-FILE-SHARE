@@ -28,7 +28,7 @@ async def verify_callback(user_id: int, task_id: str, ts: int,
     s = await db.get_settings()
     task = next((t for t in (s.get("tasks") or [])
                  if t.get("task_id") == task_id), None)
-    if not task or not task.get("secret"):
+    if not task or not task.get("enabled", True) or not task.get("secret"):
         return "unknown_task"
     expected = make_signature(task["secret"], user_id, task_id, ts)
     if not hmac.compare_digest(expected, signature):

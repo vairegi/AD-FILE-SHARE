@@ -13,7 +13,7 @@ def _int(name: str, default: int) -> int:
 
 # Telegram
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
 OWNER_ID = _int("OWNER_ID", 0)
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 ADMIN_IDS = sorted(set(ADMIN_IDS + ([OWNER_ID] if OWNER_ID else [])))
@@ -53,7 +53,7 @@ COVER_FALLBACK_HOST = os.environ.get("COVER_FALLBACK_HOST", "https://graph.org/u
 REQUIRED_CHANNEL_IDS = [int(x) for x in os.environ.get("REQUIRED_CHANNEL_IDS", "").split(",") if x.lstrip("-").isdigit()]
 
 # Userbot session encryption (Render secret env var, NOT in MongoDB)
-SESSION_ENCRYPTION_KEY = os.environ.get("SESSION_ENCRYPTION_KEY", "")
+SESSION_ENCRYPTION_KEY = os.environ.get("SESSION_ENCRYPTION_KEY", "").strip()
 
 # Health
 HEALTH_PATH = "/health"

@@ -1,8 +1,6 @@
-"""Cover image hosting: telegra.ph primary, graph.org fallback, then
-Telegram-hosted rich media as the final fallback.
-
-Upload happens at SCAN time, not per navigation tap. The returned URL is
-validated (must return 200 + image content-type) before being stored.
+"""Cover-host utility: telegra.ph then graph.org. Retained for integration.
+This helper alone does not implement a live Telegram preview pipeline.
+URLs must return 200 with an image Content-Type before being accepted.
 """
 import logging
 from typing import Optional, Dict, Any
@@ -31,7 +29,7 @@ async def _validate(client, url: str) -> bool:
     try:
         r = await client.head(url, timeout=15, follow_redirects=True)
         ctype = r.headers.get("content-type", "")
-        return r.status_code == 200 and ("image" in ctype or ctype == "")
+        return r.status_code == 200 and ctype.lower().startswith("image/")
     except Exception:
         return False
 
@@ -51,7 +49,7 @@ async def prepare_cover_for_collection(collection: dict, client,
                                        download_bytes) -> dict:
     """Fill collection['cover'] URL fields. download_bytes(message_id) ->
     bytes for the cover's image/thumbnail. On total failure we keep
-    url_status='failed' so the renderer falls back to Telegram-hosted media."""
+    url_status='failed' so a future renderer can choose a fallback."""
     cover = collection.get("cover") or {}
     if cover.get("url_status") == "ok" and cover.get("url"):
         return collection  # already prepared — never re-upload per tap
@@ -59,7 +57,8 @@ async def prepare_cover_for_collection(collection: dict, client,
         data = await download_bytes(cover.get("message_id"))
         if data:
             result = await host_cover(client, data)
-            cover.update(result)
+            cover.update({"url": result["url"], "url_host": result["host"],
+                          "url_status": result["status"]})
         else:
             cover["url_status"] = "failed"
     except Exception as exc:

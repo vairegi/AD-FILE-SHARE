@@ -1,0 +1,68 @@
+FUN v1.1.0 sandbox verification
+Repository baseline: 2f575fa
+
+........................................................................ [ 61%]
+.............................................                            [100%]
+117 passed in 1.17s
+
+PASS - classifier: 3 collections
+PASS - classifier: cover1 title is first caption line
+PASS - classifier: cover1 has 3 delivery files (short-caption photo is delivery)
+PASS - classifier: cover1 excludes cover msg 10
+PASS - classifier: 20s video with long caption IS a cover
+PASS - classifier: captionless 9s video is NOT a cover
+PASS - classifier: album grouped as one cover unit
+PASS - classifier: orphan files held as pending
+PASS - classifier: captionless long video NOT cover (duration never decides)
+PASS - classifier: 2-line caption NOT cover
+PASS - classifier: 3-line caption IS cover
+PASS - start: welcome tokens = 5
+PASS - start: cute welcome text
+PASS - start: post-credit balance shown in card
+PASS - start: no double welcome on repeat /start
+PASS - referral: friend gets 8 (5+3)
+PASS - referral: pending record created
+PASS - referral: inviter not paid before qualification
+PASS - referral: inviter +5 after qualification
+PASS - referral: inviter notified
+PASS - referral: never double-credits
+PASS - referral: self-referral ignored
+PASS - checkin: complete text
+PASS - checkin: base +3
+PASS - checkin: balance 3
+PASS - checkin: streak 1 + next bonus in 4
+PASS - checkin: same-day repeat shows cooldown
+PASS - checkin: no double credit
+PASS - unlock: non-member blocked with join card
+PASS - unlock: blocked user not charged
+PASS - unlock: charged exactly 2
+PASS - unlock: 3 files copied server-side
+PASS - unlock: completion card sent
+PASS - unlock: delivered count is actual (3)
+PASS - unlock: vaulted
+PASS - unlock: double-tap no double charge
+PASS - restream: free (balance unchanged)
+PASS - unlock: insufficient balance card
+PASS - unlock: no vault entry when unpaid
+PASS - unlock: zero-delivery full refund
+PASS - unlock: refund card shown
+PASS - deletion: expired files deleted
+PASS - deletion: status marked done
+PASS - task: first credit ok
+PASS - task: 24h cooldown blocks repeat
+PASS - task: cooldown no double credit
+PASS - task: valid signature -> cooldown (already ran)
+PASS - task: bad signature rejected
+PASS - task: expired signature rejected
+PASS - task: unknown task rejected
+PASS - covers: telegraph failure -> graph.org fallback ok
+PASS - covers: both hosts down -> failed (renderer falls back to TG media)
+PASS - save: bookmark added
+PASS - save: cute confirm
+PASS - save: second tap removes bookmark
+
+55/55 checks passed
+
+All source modules compile. Root Bots 1–2: byte-identical to baseline.
+Offline only: Mongo mock, fake authorized Telethon client, real PTB serialization via mocked HTTP transport, ASGI endpoint tests. No production credentials used.
+Not live-verified: Telegram client rendering, real Atlas/Telegram authorization, external hosting/provider acceptance or Render uptime. See README for remaining inherited feature limitations.
