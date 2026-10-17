@@ -46,6 +46,16 @@ async def _run(userbot, message, reply):
             async for doc in docs:
                 try:
                     result = await covers.prepare_collection(userbot,doc,http,force=True)
+                    if result.get("rate_limited"):
+                        state.setdefault("rate_limited_waits",0)
+                        state["rate_limited_waits"]+=1
+                        if state["rate_limited_waits"] > 8:
+                            state["state"]="rate_limited_paused"
+                            await _progress(message,"⏳ Telegraph is rate-limiting uploads. Paused cleanly — run /retry_covers again in ~30 minutes; all prepared covers are kept.")
+                            return
+                        await _progress(message,"⏳ Telegraph rate limit hit — waiting 3 minutes, then continuing automatically…")
+                        await asyncio.sleep(180)
+                        continue  # retry the SAME cover after cooldown
                     if result["hosted"]: state["hosted"]+=1
                     elif result["ready"]: state["local_ready"]+=1
                     else: state["failed"]+=1

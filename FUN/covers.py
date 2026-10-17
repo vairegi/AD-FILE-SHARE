@@ -6,6 +6,7 @@ sent to Telegram once via editMessageMedia and its file_id is reused.
 import asyncio
 import hashlib
 import io
+import re
 import logging
 from urllib.parse import urljoin
 from weakref import WeakValueDictionary
@@ -49,6 +50,30 @@ class UploadError(RuntimeError):
     pass
 
 
+class RateLimited(UploadError):
+    """Telegraph answered 429 / 'Try again later' — stop hammering, wait."""
+
+
+_last_upload_at = 0.0
+MIN_UPLOAD_INTERVAL = 2.0  # seconds between upload attempts (anti flood-limit)
+
+
+async def _pace():
+    global _last_upload_at
+    now = asyncio.get_event_loop().time()
+    wait = MIN_UPLOAD_INTERVAL - (now - _last_upload_at)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _last_upload_at = asyncio.get_event_loop().time()
+
+
+def _sanitize(msg):
+    """Never leak tokens/URLs-with-credentials into stored errors or chats."""
+    msg = re.sub(r'access_token=[A-Za-z0-9_-]+', 'access_token=[hidden]', str(msg))
+    msg = re.sub(r'"access_token"\s*:\s*"[^"]+"', '"access_token": "[hidden]"', msg)
+    return msg[:300]
+
+
 async def ensure_token(client):
     """Telegraph API token via api.telegra.ph/createAccount; cached in settings.
     Anonymous uploads were restricted by Telegraph; the token is the fix.
@@ -83,6 +108,7 @@ async def _try_upload(client, url, file_bytes, token=None):
     kwargs = {"files": {"file": ("cover.jpg", file_bytes, "image/jpeg")}, "timeout": 20}
     if token:
         kwargs["data"] = {"access_token": token}
+    await _pace()
     try:
         r = await client.post(url, **kwargs)
     except Exception as exc:
@@ -91,10 +117,13 @@ async def _try_upload(client, url, file_bytes, token=None):
         payload = r.json()
     except Exception:
         payload = None
+    err_text = str((payload or {}).get("error", "") if isinstance(payload, dict) else "")
+    if r.status_code == 429 or "try again later" in err_text.lower():
+        raise RateLimited(f"{url.split('?')[0]}: rate limited (try again later)")
     if r.status_code != 200:
-        raise UploadError(f"{url}: HTTP {r.status_code} {str(payload)[:80]}")
+        raise UploadError(f"{url}: HTTP {r.status_code} {_sanitize(str(payload))[:80]}")
     if isinstance(payload, dict) and payload.get("error"):
-        raise UploadError(f"{url}: {payload.get('error')}")
+        raise UploadError(f"{url}: {_sanitize(payload.get('error'))}")
     if isinstance(payload, list) and payload and payload[0].get("src"):
         direct = urljoin(url, payload[0]["src"])
         if _http_url(direct):
@@ -122,30 +151,29 @@ async def _validate(client, url):
 
 
 async def host_cover(client, file_bytes, token=None):
-    """telegra.ph first (with token form/query, then anonymous), graph.org mirror.
-    Returns {"url", "host", "status", "error"}; never raises.
+    """telegra.ph (token form, then anonymous) -> graph.org mirror. Paced.
+    Returns {"url", "host", "status", "error"}; status may be "rate_limited".
+    Never raises. Errors are sanitized (no tokens).
     """
     errors = []
     for host, base in (("telegra.ph", config.COVER_PRIMARY_HOST),
                        ("graph.org", config.COVER_FALLBACK_HOST)):
-        attempts = []
-        if token:
-            attempts.append((base, {"access_token": token}))
-            attempts.append((f"{base}?access_token={token}", None))
+        attempts = [(base, token)] if token else []
         attempts.append((base, None))
-        for url, data in attempts:
+        for url, tok in attempts:
             try:
-                direct = await _try_upload(client, url, file_bytes,
-                                           token=None if data is None else data["access_token"] if "?access_token" not in url else None)
-                if data is None and "?access_token" in url:
-                    pass
+                direct = await _try_upload(client, url, file_bytes, token=tok)
                 return {"url": direct, "host": host, "status": "ok", "error": None}
+            except RateLimited as exc:
+                errors.append(str(exc))
+                return {"url": None, "host": None, "status": "rate_limited",
+                        "error": "; ".join(_sanitize(e) for e in errors)}
             except UploadError as exc:
                 errors.append(str(exc))
             except Exception as exc:
                 errors.append(f"{url}: {type(exc).__name__}")
     return {"url": None, "host": None, "status": "failed",
-            "error": "; ".join(errors)[:300] or "mirrors_unavailable"}
+            "error": "; ".join(_sanitize(e) for e in errors) or "mirrors_unavailable"}
 
 
 def normalize_image(data):
@@ -229,6 +257,13 @@ async def _prepare(collection, http, fetch_bytes, force=False):
         return {"hosted": False, "ready": False}
     hosted = await host_cover(http, data, token=token)
     update = {"cover.asset_keys": keys, "cover.last_attempt_at": db.now_ts()}
+    if hosted["status"] == "rate_limited":
+        # Stay pending so a later /retry_covers (after cooldown) picks it up.
+        update.update({"cover.url_status": "pending",
+                       "cover.last_error": hosted["error"]})
+        await db.col("collections").update_one(
+            {"collection_id": collection["collection_id"]}, {"$set": update})
+        return {"hosted": False, "ready": True, "rate_limited": True}
     if hosted["status"] == "ok":
         update.update({"cover.url": hosted["url"],
                        "cover.url_host": hosted["host"],

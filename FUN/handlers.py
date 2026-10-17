@@ -683,6 +683,11 @@ async def cmd_telegraph_token(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not _is_admin(update.effective_user.id):
         return
     if context.args:
+        if context.args[0].strip().lower() == "reset":
+            await db.col("settings").update_one({"_id": "main"},
+                {"$unset": {"telegraph_token": ""}})
+            await update.message.reply_text("\u2705 Telegraph token removed — a fresh account/token is created automatically on the next upload. Run /retry_covers.")
+            return
         await db.update_settings({"telegraph_token": context.args[0].strip()})
         await update.message.reply_text("\u2705 Telegraph token saved. /retry_covers will use it.")
         return

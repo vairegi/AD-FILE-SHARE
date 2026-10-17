@@ -1,9 +1,9 @@
-FUN v1.4.0 Telegraph previews + in-place edits — offline sandbox verification
+FUN v1.4.1 — Telegraph rate-limit handling + token safety, offline sandbox verification
 
-........................................................................ [ 37%]
-........................................................................ [ 74%]
-..................................................                       [100%]
-194 passed in 3.30s
+........................................................................ [ 35%]
+........................................................................ [ 71%]
+.........................................................                [100%]
+201 passed in 43.11s
 
 Legacy runner:
 PASS - classifier: 3 collections
@@ -64,4 +64,4 @@ PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-Compileall: passed. No production DB/network touched; live Telegraph acceptance and client rendering verified by deploy.
+Compileall: passed. Not covered: live Telegraph acceptance, real client rendering, production latency.
