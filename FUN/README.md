@@ -1,4 +1,4 @@
-# FUN Bot 3 — v1.1.1 chat setup update (2026-10-17)
+# FUN Bot 3 — v1.2.0 cover previews + /help (2026-10-17)
 
 This folder is an independent service. Bots 1–2 at the repository root are
 unchanged. All source, tests and setup tools are directly inside FUN/.
@@ -15,6 +15,35 @@ GitHub “Add files via upload” does NOT delete old files.
 4. Deploy the latest commit. The app refuses to start if the old handlers
    package still exists, because Python would otherwise import it instead
    of the repaired flat handlers.py.
+
+## v1.2.0: cover previews on Start Watching + /help
+
+**The cover pipeline is now wired in.** When a channel is scanned, each
+collection's cover photo (or a short video cover's thumbnail) is downloaded
+via the userbot ONCE, uploaded to telegra.ph, falling back to graph.org if
+telegra.ph fails. The resulting direct image URL is validated and **cached in
+MongoDB**, so browsing never re-downloads or re-uploads a cover.
+
+**Start Watching now shows the cover.** The feed card renders as a rich
+message with a swipeable **slideshow** (default) or a combined **collage** of
+the cover, using Bot API 10.1+ rich messages. Fallback chain, so the feed is
+never blank:
+1. Hosted URL + rich card accepted  → slideshow / collage card
+2. Rich rejected by the client      → normal photo message (same cached URL)
+3. No hosted URL (both hosts down)  → plain text card (old behaviour)
+
+- `/covermode slideshow` (default) — swipeable cover preview.
+- `/covermode collage` — combined grid preview.
+- `/retry_covers` — re-host covers whose upload failed earlier (e.g. when
+  telegra.ph was down). Failures are cached as `failed` so rescanning does
+  NOT hammer the hosts; this command resets them to retry.
+- `/help` — the Cute Assistant guide card (same as the Help Guide button),
+  with Start Watching / Profile / Main Menu buttons.
+
+After scanning, use `/collections` to see indexed drops, then `/start` →
+**Start Watching** to browse with covers. Existing collections scanned before
+this release have no hosted cover yet — run `/retry_covers` (with the userbot
+connected) to host them without re-scanning files.
 
 ## v1.1.1: simple owner-chat userbot setup
 Send /setup_userbot in YOUR private bot chat. The bot asks for:
@@ -167,7 +196,8 @@ has permanent vault access and free re-streams. Save is a separate bookmark.
 Install: pip install -r requirements-test.txt
 Run:
 
-    pytest -q test_repairs.py test_chat_setup.py
+    pytest -q test_repairs.py test_chat_setup.py test_covers_feed.py
+    python3 rich_verify_test.py
     python test_legacy.py
 
 These run offline against an in-memory MongoDB mock and mocked external
@@ -181,9 +211,11 @@ or sponsor-provider completion. No production credentials were used.
 ## Existing scope limitations, not hidden by this repair
 This repair fixes menus, onboarding, source scanning and referral sharing.
 The old release incorrectly described every feature as fully wired:
-- The previous rich preview builder and cover-upload helpers were not called
-  by the feed. This release does not claim the live collage/slideshow preview
-  pipeline is complete; cover-host helper tests alone cannot prove that.
+- The collage/slideshow cover pipeline IS now wired (scan-time hosting +
+  cached URL + rich card render). Offline tests cover payload shape, fallback
+  chain, scan-time caching and the /covermode toggle. Live rendering of rich
+  slideshow/collage blocks depends on the user's Telegram client version and
+  can only be confirmed on a real device after deploy.
 - The existing sponsor adapter accepts custom HMAC callbacks. It is NOT a
   working integration with every commercial shortener just by adding a URL.
   Tasks without a configured verification secret stay hidden. Provider-specific

@@ -33,6 +33,8 @@ def build_bot():
     application = Application.builder().token(config.BOT_TOKEN).defaults(
         Defaults(parse_mode=None)).build()
     commands = {"start": handlers.cmd_start, "checkin": handlers.cmd_checkin,
+        "help": handlers.cmd_help, "covermode": handlers.cmd_covermode,
+        "retry_covers": handlers.cmd_retry_covers,
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,
@@ -67,7 +69,7 @@ async def lifespan(app):
         await app_bot.bot.set_webhook(config.RENDER_EXTERNAL_URL + "/webhook",
             secret_token=config.WEBHOOK_SECRET, allowed_updates=["message", "callback_query"])
     await app_bot.bot.set_my_commands([
-        BotCommand("start", "Open the cute hub"), BotCommand("checkin", "Daily tokens"),
+        BotCommand("start", "Open the cute hub"), BotCommand("checkin", "Daily tokens"), BotCommand("help", "How it works"),
         BotCommand("admin", "Owner setup and controls")])
     try:
         client = await userbot_setup.build_client()

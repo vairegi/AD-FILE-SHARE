@@ -55,5 +55,10 @@ REQUIRED_CHANNEL_IDS = [int(x) for x in os.environ.get("REQUIRED_CHANNEL_IDS", "
 # Legacy secure-page encryption only. New chat setup needs no extra env key.
 SESSION_ENCRYPTION_KEY = os.environ.get("SESSION_ENCRYPTION_KEY", "").strip()
 
+# Cover preview mode: "slideshow" (default, swipeable) or "collage"
+COVER_MODE = os.environ.get("COVER_MODE", "slideshow").lower()
+if COVER_MODE not in ("slideshow", "collage"):
+    COVER_MODE = "slideshow"
+
 # Health
 HEALTH_PATH = "/health"

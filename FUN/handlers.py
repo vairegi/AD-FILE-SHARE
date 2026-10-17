@@ -32,6 +32,18 @@ async def _user(update) -> dict:
     return doc
 
 
+async def _cover_mode() -> str:
+    s = await db.get_settings()
+    return s.get("cover_mode") or config.COVER_MODE
+
+
+def _cover_url(c) -> str:
+    cover = c.get("cover") or {}
+    if cover.get("url_status") == "ok" and cover.get("url"):
+        return cover["url"]
+    return ""
+
+
 def _nav_row(back_cb="home", home_cb="home"):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🔙 Back", callback_data=back_cb),
@@ -121,6 +133,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_library(q, kind, int(index))
         elif data == "home":
             await _show_home(q)
+        elif data == "covermode":
+            cur = await _cover_mode()
+            new = "collage" if cur == "slideshow" else "slideshow"
+            await db.update_settings({"cover_mode": new})
+            await q.answer(f"🎀 Preview mode: {new}", show_alert=True)
         elif data == "cats":
             await _show_categories(q)
         elif data == "earn":
@@ -287,7 +304,7 @@ async def _show_feed(q, category, idx):
         await _edit(q, persona.feed_empty(), _nav_row("cats"))
         return
     c = cols[0]
-    await _render_feed_card(q, c, category, idx, total)
+    await _render_feed_card(q, c, category, idx, total, context=q and getattr(q, "bot", None))
 
 
 async def _send_feed_card(update, context, collection_id):
@@ -302,19 +319,42 @@ async def _send_feed_card(update, context, collection_id):
                        "message": update.message,
                        "edit_message_text": lambda *a, **k: None,
                        "answer": lambda *a, **k: None})()
-    await update.message.reply_text(
-        await _feed_text(update.effective_user.id, c),
-        reply_markup=_feed_kb(c["collection_id"], cat, 0, total,
-                              await db.is_unlocked(update.effective_user.id,
-                                                   c["collection_id"])), parse_mode="HTML")
+    text = await _feed_text(update.effective_user.id, c)
+    kb = _feed_kb(c["collection_id"], cat, 0, total,
+                  await db.is_unlocked(update.effective_user.id, c["collection_id"]))
+    url = _cover_url(c)
+    if url:
+        import rich_cards
+        mode = await _cover_mode()
+        try:
+            await rich_cards.show_cover_card(context.bot, update.effective_user.id,
+                                             text, kb, url, mode)
+            return
+        except Exception:
+            pass
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 
-async def _render_feed_card(q, c, category, idx, total):
+async def _render_feed_card(q, c, category, idx, total, context=None):
     uid = q.from_user.id
     unlocked = await db.is_unlocked(uid, c["collection_id"])
     await db.bump_collection(c["collection_id"], "views")
-    await _edit(q, await _feed_text(uid, c),
-                _feed_kb(c["collection_id"], category, idx, total, unlocked))
+    text = await _feed_text(uid, c)
+    kb = _feed_kb(c["collection_id"], category, idx, total, unlocked)
+    url = _cover_url(c)
+    bot = context if context else getattr(q, "bot", None)
+    if url and bot:
+        import rich_cards
+        mode = await _cover_mode()
+        chat_id = q.message.chat.id if getattr(q.message, "chat", None) else uid
+        mid = q.message.message_id if getattr(q.message, "message_id", None) else None
+        try:
+            await rich_cards.show_cover_card(bot, chat_id, text, kb, url, mode,
+                                             edit_message_id=mid)
+            return
+        except Exception:
+            pass
+    await _edit(q, text, kb)
 
 
 async def _feed_text(uid, c):
@@ -632,6 +672,55 @@ def _is_admin(uid: int) -> bool:
     return uid in config.ADMIN_IDS
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(persona.help_card(), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Start Watching", callback_data="feed:all:0")],
+            [InlineKeyboardButton("🌸 Profile", callback_data="profile"),
+             InlineKeyboardButton("🏠 Main Menu", callback_data="home")]]))
+
+
+async def cmd_covermode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    arg = (context.args or [""])[0].lower()
+    if arg not in ("slideshow", "collage"):
+        cur = await _cover_mode()
+        await update.message.reply_text(
+            f"🎀 Preview mode: {cur}\n\n/covermode slideshow — swipeable photos\n"
+            "/covermode collage — combined grid preview")
+        return
+    await db.update_settings({"cover_mode": arg})
+    await update.message.reply_text(f"✅ Preview mode set to {arg}.")
+
+
+async def cmd_retry_covers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    import runtime
+    if not runtime.userbot:
+        await update.message.reply_text("🎀 Connect the userbot first: /setup_userbot")
+        return
+    cur = db.col("collections").find({"cover.url_status": "failed"})
+    docs = [d async for d in cur]
+    if not docs:
+        await update.message.reply_text("🎀 No failed covers — all set, Senpai~!")
+        return
+    import httpx
+    done = 0
+    async with httpx.AsyncClient() as http:
+        for d in docs:
+            await db.col("collections").update_one(
+                {"collection_id": d["collection_id"]},
+                {"$set": {"cover.url_status": "pending"}})
+            await scanner._prepare_cover(runtime.userbot, d["channel_id"], d)
+            if (await db.get_collection(d["collection_id"]) or {}).get("cover", {}).get("url_status") == "ok":
+                done += 1
+    await update.message.reply_text(
+        f"✅ Cover retry done: {done}/{len(docs)} hosted. "
+        "Failures stay cached as failed; run /retry_covers again later.")
+
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -644,6 +733,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /addtask <task_id> <label> <url> [reward]\n"
         "• /setprice <collection_id> <tokens>\n"
         "• /scan <channel_id> — run scanner now\n"
+        "• /covermode slideshow|collage — cover preview style\n"
+        "• /retry_covers — re-host failed covers\n"
         "• /pending — inspect orphan files\n"
         "• /collections — latest indexed IDs and counts\n"
         "• /setup_userbot — API ID → API hash → session in chat\n"

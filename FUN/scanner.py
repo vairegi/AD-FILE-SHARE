@@ -7,7 +7,49 @@ from typing import Optional
 import db
 from classifier import classify
 from locks import channel_lock
+import covers
 log = logging.getLogger("fun.scanner")
+
+
+async def _download_bytes(client, channel_id, message_id):
+    """Download a cover photo / video thumbnail via the userbot. Returns bytes."""
+    try:
+        import io
+        m = await client.get_messages(int(channel_id), ids=message_id)
+        if not m:
+            return None
+        buf = io.BytesIO()
+        if getattr(m, "photo", None):
+            await client.download_media(m.photo, file=buf)
+        elif getattr(m, "video", None):
+            await client.download_media(m, thumb=-1, file=buf)
+        data = buf.getvalue()
+        return data or None
+    except Exception:
+        return None
+
+
+async def _prepare_cover(client, channel_id, doc):
+    """Download the cover once, upload to telegra.ph (graph.org fallback),
+    cache the URL on the collection. Never runs per navigation tap."""
+    import httpx
+    cover = doc.get("cover") or {}
+    if cover.get("url_status") == "ok" and cover.get("url"):
+        return
+    mid = cover.get("message_id")
+    if not mid:
+        return
+    data = await _download_bytes(client, channel_id, mid)
+    async with httpx.AsyncClient() as http:
+        doc = await covers.prepare_cover_for_collection(doc, http,
+                    (lambda _mid: _download_bytes(client, channel_id, _mid)))
+    # Persist BOTH success and failure — 'failed' must be cached so the same
+    # cover is not re-downloaded/re-uploaded on every rescan. /retry_covers
+    # resets failures to 'pending' so they can be attempted again later.
+    if doc.get("cover", {}).get("url_status") in ("ok", "failed"):
+        await db.col("collections").update_one(
+            {"collection_id": doc["collection_id"]},
+            {"$set": {"cover": doc["cover"]}})
 
 
 def _post_from_message(m):
@@ -102,5 +144,14 @@ async def scan_channel(client, channel_id: int, category: str,
         await db.col("scan_state").update_one({"_id": int(channel_id)}, {"$set": {
             "cursor": last_seen, "last_cover_id": last_cover, "last_scan_at": db.now_ts(),
             "category": category, "posts_scanned": scanned}}, upsert=True)
+        # Host covers for every touched collection (downloads + telegra.ph/graph.org
+        # upload happen at scan time; results are cached in MongoDB).
+        covers_ok = 0
+        for cid in touched:
+            doc = await db.get_collection(cid)
+            if doc:
+                await _prepare_cover(client, channel_id, doc)
+                if (await db.get_collection(cid) or {}).get("cover", {}).get("url_status") == "ok":
+                    covers_ok += 1
         return {"collections": len(touched), "pending_files": pending_count,
-                "posts_scanned": scanned}
+                "posts_scanned": scanned, "covers_ready": covers_ok}
