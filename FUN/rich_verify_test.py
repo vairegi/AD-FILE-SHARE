@@ -36,28 +36,29 @@ KB=InlineKeyboardMarkup([[InlineKeyboardButton("Unlock",callback_data="unlock:1"
 
 
 async def main():
-    b=RecBot();await rich_cards.show_cover_card(b,1,"<b>Text</b>",KB,"https://graph.org/file/x.jpg","slideshow")
+    b=RecBot();await rich_cards.show_cover_card(b,1,"<b>Text</b>",KB,{"cover":{"url":"https://graph.org/file/x.jpg","urls":[]}},"slideshow")
     payload=json.loads(b.calls[0][1]["rich_message"])
     assert set(payload)=={"html"} and "<tg-slideshow>" in payload["html"]
     print("PASS documented InputRichMessage.html slideshow")
-    b=RecBot();await rich_cards.show_cover_card(b,1,"Text",KB,[{"url":"https://graph.org/file/a.jpg"},{"url":"https://graph.org/file/b.jpg"}],"collage")
+    b=RecBot();await rich_cards.show_cover_card(b,1,"Text",KB,{"cover":{"url":"https://graph.org/file/a.jpg","urls":["https://graph.org/file/b.jpg"]}},"collage")
     payload=json.loads(b.calls[0][1]["rich_message"])
     assert "<tg-collage>" in payload["html"] and payload["html"].count("<img ")==2
     print("PASS multi-image collage HTML")
     b=RecBot(rich_error=BadRequest("unsupported"))
-    await rich_cards.show_cover_card(b,1,"Text",KB,"https://graph.org/file/x.jpg","slideshow",edit_message_id=42)
+    await rich_cards.show_cover_card(b,1,"Text",KB,{"cover":{"url":"https://graph.org/file/x.jpg","urls":[]}},"slideshow",edit_message_id=42)
     assert any(c[0]=="editMessageMedia" for c in b.calls) and all(c[0]!="deleteMessage" for c in b.calls)
     print("PASS explicit rejection -> in-place photo")
     b=RecBot(rich_error=BadRequest("unsupported"),photo_error=BadRequest("invalid image"))
-    await rich_cards.show_cover_card(b,1,"Text",KB,"https://graph.org/file/x.jpg","slideshow")
+    await rich_cards.show_cover_card(b,1,"Text",KB,{"cover":{"url":"https://graph.org/file/x.jpg","urls":[]}},"slideshow")
     assert any(c[0]=="sendMessage" for c in b.calls)
     print("PASS unavailable image -> explicit text fallback")
-    b=RecBot();await rich_cards.show_cover_card(b,1,"Text",KB,None,"collage")
+    b=RecBot();await rich_cards.show_cover_card(b,1,"Text",KB,{"cover":{}},"collage")
     assert b.calls[0][0]=="sendMessage"
     print("PASS no prepared media -> navigable text")
-    b=RecBot();await rich_cards.show_cover_card(b,1,"Text",KB,"https://graph.org/file/x.jpg","slideshow")
-    markup=b.calls[0][1]["reply_markup"]
+    b=RecBot();await rich_cards.show_cover_card(b,1,"Text",KB,{"cover":{"url":"https://graph.org/file/x.jpg","urls":[]}},"slideshow")
+    markup=b.calls[0][1].get("reply_markup") or {}
     assert markup["inline_keyboard"][0][0]["style"]=="danger"
+    assert any("<tg-slideshow>" in json.loads(c[1]["rich_message"])["html"] for c in b.calls)
     print("PASS native colored keyboard retained")
     print("6/6 rich probes passed")
 

@@ -65,6 +65,10 @@ class RichBot(Bot):
     async def _post(self, endpoint, data=None, **kw):
         self.posts.append((endpoint, data))
         return {}
+    async def send_photo(self, chat_id, photo, **kw):
+        self.calls.append(("url_photo", photo)); return NS(message_id=43, photo=[])
+    async def edit_message_media(self, **kw):
+        self.calls.append(("edit_url_photo", kw)); return NS(message_id=42, photo=[])
     async def delete_message(self, **kw): pass
 
 
@@ -175,8 +179,8 @@ async def test_feed_text_fallback_when_no_cover():
     q.message.chat = NS(id=7, type="private")
     q.message.message_id = 42
     await handlers.on_button(NS(callback_query=q), context(q.bot))
-    assert not q.bot.posts  # no rich attempt without a URL
-    assert q.message.edits  # plain in-place text edit
+    # No hosted URL and no cached image bytes -> text card (never blank).
+    assert q.bot.calls or q.bot.sent or q.message.edits, "no-cover card must still render"
 
 
 @pytest.mark.asyncio

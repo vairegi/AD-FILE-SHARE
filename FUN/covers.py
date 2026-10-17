@@ -117,6 +117,8 @@ async def download_image(userbot, channel_id, mid):
 
 
 async def prepare_collection(userbot, collection, http, force=False):
+    """Host each cover image and cache URLs. If bytes are already cached and
+    the URL is missing, re-upload from the cache (no source re-download)."""
     """Prepare all cover-album images with persistent per-source caching.
 Successful links are never re-downloaded or uploaded just because of a tap
 or rescan. A failed mirror can still leave a usable Telegram-upload preview.
@@ -150,8 +152,6 @@ or rescan. A failed mirror can still leave a usable Telegram-upload preview.
                 continue
             # Scan skips known failed attempts; an explicit retry may re-attempt
             # the mirrors using cached bytes (without another source download).
-            if asset.get("url_status") == "failed" and not force:
-                continue
             result = await host_cover(http, data)
             await db.col("cover_assets").update_one({"_id": key}, {"$set": {
                 "url": result["url"], "url_host": result["host"], "url_status": result["status"],

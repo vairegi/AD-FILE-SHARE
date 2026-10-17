@@ -323,13 +323,12 @@ async def _send_feed_card(update, context, collection_id):
     text = await _feed_text(update.effective_user.id, c)
     kb = _feed_kb(c["collection_id"], cat, 0, total,
                   await db.is_unlocked(update.effective_user.id, c["collection_id"]))
-    items = await covers.preview_items(c)
-    if items:
-        import rich_cards
+    import rich_cards
+    try:
         await rich_cards.show_cover_card(context.bot, update.effective_user.id, text, kb,
-                                         items, await _cover_mode(), collection_id=c["collection_id"])
-        return
-    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+                                         c, await _cover_mode(), collection_id=c["collection_id"])
+    except Exception:
+        await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 
 async def _render_feed_card(q, c, category, idx, total, context=None):
@@ -339,13 +338,12 @@ async def _render_feed_card(q, c, category, idx, total, context=None):
     text = await _feed_text(uid, c)
     kb = _feed_kb(c["collection_id"], category, idx, total, unlocked)
     bot = context or (q.get_bot() if hasattr(q, "get_bot") else getattr(q, "bot", None))
-    items = await covers.preview_items(c)
-    if items and bot:
+    if bot:
         import rich_cards
         mode = await _cover_mode()
         chat_id = q.message.chat.id if getattr(q.message, "chat", None) else uid
         mid = getattr(q.message, "message_id", None)
-        await rich_cards.show_cover_card(bot, chat_id, text, kb, items, mode,
+        await rich_cards.show_cover_card(bot, chat_id, text, kb, c, mode,
             edit_message_id=mid, collection_id=c["collection_id"])
         return
     await _edit(q, text, kb)

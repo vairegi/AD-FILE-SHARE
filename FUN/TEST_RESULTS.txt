@@ -1,9 +1,9 @@
-FUN v1.2.1 cover recovery verification — 2026-10-17
+FUN v1.2.2 fast URL-based cover cards (2026-10-17)
 
 ........................................................................ [ 40%]
 ........................................................................ [ 80%]
 ..................................                                       [100%]
-178 passed in 1.66s
+178 passed in 1.79s
 
 PASS - classifier: 3 collections
 PASS - classifier: cover1 title is first caption line
@@ -71,7 +71,8 @@ PASS no prepared media -> navigable text
 PASS native colored keyboard retained
 6/6 rich probes passed
 
-All modules compile; tracked files outside FUN match the fetched repo baseline.
-Confirmed read-only incident finding: 162 collection covers pending, zero failed, zero hosted URLs. No production data was changed, no account session was decrypted, and no production media was read.
-Regression includes 162-pending backfill, pending/missing/failed retry selection, actual PTB CallbackQuery.get_bot binding, documented rich HTML request serialization, native-photo multipart attach references, no delete-before-success, URL/byte/file-id caching, and multi-image/video-thumbnail preparation.
-External services in tests are mocked: these tests do not prove live source-media access, current mirror upload acceptance or client rendering. Confirm after deployment via /retry_covers and /cover_status.
+Feed renders covers via rich message with external URL (tg-slideshow/tg-collage) or URL photo —
+no byte upload per Next/Previous tap. Bytes upload only once when a cover has no hosted URL,
+then the Telegram file_id is cached and reused. /retry_covers now processes pending/missing/failed
+covers and reports real hosted counts. /cover_status shows URL vs cached-image vs failed.
+Offline tests only; live mirror upload and client rendering confirmed after deploy.

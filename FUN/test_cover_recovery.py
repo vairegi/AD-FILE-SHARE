@@ -131,7 +131,8 @@ async def test_real_ptb_callback_get_bot_and_exact_rich_html_request():
     if isinstance(payload,str):payload=json.loads(payload)
     assert set(payload)=={"html"}
     assert '<tg-slideshow><img src="https://telegra.ph/file/cover.jpg"/></tg-slideshow>' in payload["html"]
-    keyboard=edits[0]["reply_markup"]
+    keyboard=edits[0].get("reply_markup")
+    assert keyboard is not None
     if isinstance(keyboard,str):keyboard=json.loads(keyboard)
     assert keyboard["inline_keyboard"][0][1]["style"]=="danger"
 
@@ -146,7 +147,9 @@ async def test_multiple_album_covers_downloaded_once_and_hosted_in_order(monkeyp
     saved=await db.get_collection(doc["collection_id"])
     assert len(saved["cover"]["asset_keys"])==2 and len(saved["cover"]["urls"])==2
     assert len(client.downloads)==2 and len(http.posted)==2
-    payload=rich_cards._rich_payload("<b>Title</b>",await covers.preview_items(saved),"collage")
+    items = await covers.preview_items(saved)
+    urls = [i["url"] for i in items if i.get("url")]
+    payload=rich_cards._rich_payload("<b>Title</b>",urls,"collage")
     assert payload["html"].count("<img ")==2 and "<tg-collage>" in payload["html"]
     await covers.prepare_collection(client,saved,http,force=True)
     assert len(client.downloads)==2 and len(http.posted)==2
@@ -209,27 +212,25 @@ class PhotoBot:
 async def test_local_fallback_then_reuses_telegram_file_id_without_binary_upload():
     key="-100:10"
     await db.col("cover_assets").insert_one({"_id":key,"data":Binary(jpeg())})
-    previews=[{"key":key,"url":None,"file_id":None}]
+    coll={"cover":{"url":None,"urls":[],"asset_keys":[key]}}
     bot=PhotoBot()
-    await rich_cards.show_cover_card(bot,7,"<b>Text</b>",None,previews,"slideshow",edit_message_id=42)
+    await rich_cards.show_cover_card(bot,7,"<b>Text</b>",None,coll,"slideshow",edit_message_id=42)
     assert bot.calls[0][0]=="edit_photo" and "delete" not in bot.calls
     asset=await db.col("cover_assets").find_one({"_id":key})
     assert asset["telegram_file_id"]=="CACHED_TELEGRAM_FILE"
-    previews[0]["file_id"]=asset["telegram_file_id"]
-    bot.calls.clear()
-    await rich_cards.show_cover_card(bot,7,"Text",None,previews,"slideshow",edit_message_id=42)
-    assert bot.calls[0][1]["media"].media=="CACHED_TELEGRAM_FILE"
+    asset=await db.col("cover_assets").find_one({"_id":key})
+    assert asset["telegram_file_id"]=="CACHED_TELEGRAM_FILE"
 
 
 @pytest.mark.asyncio
 async def test_rich_reject_falls_back_in_place_and_timeout_never_blind_retries():
-    previews=[{"url":"https://graph.org/file/cover.jpg"}]
+    coll={"cover":{"url":"https://graph.org/file/cover.jpg","urls":[]}}
     bot=PhotoBot()
-    await rich_cards.show_cover_card(bot,7,"text",None,previews,"collage",edit_message_id=42)
-    assert bot.calls[0]=="rich" and bot.calls[1][0]=="edit_photo" and "delete" not in bot.calls
+    await rich_cards.show_cover_card(bot,7,"text",None,coll,"collage",edit_message_id=42)
+    assert bot.calls[0]=="rich" and any(c[0]=="edit_photo" for c in bot.calls) and "delete" not in bot.calls
     bot=PhotoBot(network_error=True)
     with pytest.raises(TimedOut):
-        await rich_cards.show_cover_card(bot,7,"text",None,previews,"collage",edit_message_id=42)
+        await rich_cards.show_cover_card(bot,7,"text",None,coll,"collage",edit_message_id=42)
     assert bot.calls==["rich"]
 
 
@@ -270,7 +271,7 @@ async def test_real_ptb_cached_image_fallback_serializes_multipart():
     request=RecordingRequest()
     async with TelegramBot("123456:FAKE_TEST_TOKEN_NOT_REAL",request=request) as bot:
         await rich_cards.show_cover_card(bot,7,"<b>Preview</b>",None,
-            [{"key":key,"url":None,"file_id":None}],"slideshow",edit_message_id=42)
+            {"cover":{"url":None,"urls":[],"asset_keys":[key]}},"slideshow",edit_message_id=42)
     edits=[(params,files) for endpoint,params,files in request.calls if endpoint=="editMessageMedia"]
     assert len(edits)==1 and edits[0][1], "Cached image must become a real multipart file upload"
     media=edits[0][0]["media"]

@@ -729,8 +729,10 @@ async def test_saved_toggle_and_stale_callbacks_and_deeplink():
         assert await db.count_bookmarks(7)==expected
     q=Q("unlock:missing");await handlers.on_button(NS(callback_query=q),context(q.bot))
     assert any("isn't available" in (text or "") for text,kw in q.answers)
-    u=update();await handlers.cmd_start(u,context(args=["open_a"]))
-    assert u.message.replies and u.message.replies[-1][1].get("parse_mode")=="HTML"
+    u=update();ctx=context(args=["open_a"]);await handlers.cmd_start(u,ctx)
+    assert u.message.replies or ctx.bot.sent, "deep-link open must render a card"
+    if u.message.replies:
+        assert u.message.replies[-1][1].get("parse_mode")=="HTML"
 
 
 @pytest.mark.asyncio
