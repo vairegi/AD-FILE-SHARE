@@ -1,28 +1,17 @@
-FUN Bot 3 v1.7.0 — Pruned Multi-Host Uploader
-=============================================
-2026-10-18 — sandbox verification (no live network in tests)
+FUN Bot 3 v1.9.0 — Referral, Protection, Personality
+2026-10-18
 
-- pytest -q:                221 passed
-- test_legacy.py:           55/55 checks passed
-- compileall:               OK
+........................................................................ [ 30%]
+........................................................................ [ 61%]
+........................................................................ [ 92%]
+.................                                                        [100%]
+233 passed in 1.83s
 
-v1.7 changes (from live /test_hosts probe 2026-10-18):
-- REMOVED 0x0.st        (HTTP 503 — site disabled uploads, "AI botnet spam")
-- REMOVED imgbb         (ImgBB ToS bans obscene/adult content)
-- REMOVED cloudflare-r2, backblaze-b2 (unused, owner-carried ToS risk)
-- KEPT catbox.moe       PRIMARY — permanent links; needs CATBOX_USERHASH on
-                        Render's network (anonymous returns HTTP 412)
-- KEPT telegra.ph/graph.org fallbacks (permanent links if restriction lifts)
-- KEPT litterbox        EMERGENCY only — links EXPIRE (LITTERBOX_TTL, 72h
-                        default); never auto-selected as preferred host
-- KEPT bunny.net        needs BUNNY_* env vars; adult content explicitly
-                        allowed per https://bunny.net/acceptable-use/
-- FIXED userhash masking bug: blind string replace corrupted success URLs
-  when the hash was a substring of "https" (now word-boundary regex)
-- FIXED /test_hosts report: parse_mode=HTML (no more raw <code> tags)
-- FIXED auto-select: only permanent-link hosts can win automatically
-- cover_jobs/covers: 'rate_limited' status restored so pending covers are
-  retried by /retry_covers instead of being marked failed
+Legacy runner: 55/55 checks passed
+Compile: OK
 
-Deploy: overwrite FUN/ files, set CATBOX_USERHASH in Render env, redeploy,
-then /test_hosts → /retry_covers → /cover_status → /start.
+Offline tests use mock MongoDB and Telegram clients, not a live bot.
+New cases: protection default/on/off for singles and albums; protected fallback;
+admin-only persistent toggle; inviter-specific share link, no duplicate reward;
+four variants with intact referral IDs, balances, rewards and HTML escaping.
+No production MongoDB, accounts or external host uploads used.

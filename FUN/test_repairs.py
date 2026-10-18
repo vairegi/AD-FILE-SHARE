@@ -129,7 +129,8 @@ def test_html_home_exact_emphasis_and_escaping(monkeypatch):
     assert "<b>🎀 Uwahh~! Welcome to Cute &lt;Hub&gt; &amp; Friends" in text
     assert "<b>Token Balance:</b> <code>5 Tokens</code>" in text
     assert "<b>Daily Streak:</b> <code>1 Days</code>" in text
-    assert "<i>🌸 E-Ehehe" in text and text.endswith("</i>")
+    assert any(persona.cute(line) in text for line in persona.ALIVE_LINES['home'])
+    assert text.endswith("</i>")
     assert "<b><code>" not in text
 
 
@@ -207,7 +208,7 @@ async def test_referral_username_auto_and_share_url(monkeypatch):
     assert share["text"]=="📤 Share on Telegram" and share["style"]=="success"
     params=parse_qs(urlparse(share["url"]).query)
     assert params["url"]==["https://t.me/Relax_Time_Test_Bot?start=ref_7"]
-    assert params["text"]==["Stream exclusive media now!"]
+    assert params["text"][0] in persona.SHARE_LINES
 
 
 @pytest.mark.asyncio

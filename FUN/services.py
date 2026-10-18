@@ -11,6 +11,7 @@ from locks import channel_lock
 
 async def deliver_collection(bot, user_id, collection, files, delivery_id=None):
     sent, failed = [], []
+    protect = bool((await db.get_settings()).get("protect_content", True))
     channel = collection.get("channel_id")
     valid = [f for f in files if f.get("message_id")]
     for i in range(0, len(valid), max(1, min(10, config.ALBUM_BATCH_SIZE))):
@@ -18,9 +19,9 @@ async def deliver_collection(bot, user_id, collection, files, delivery_id=None):
         ids = [f["message_id"] for f in batch]
         try:
             if len(ids) == 1:
-                result = [await bot.copy_message(chat_id=user_id, from_chat_id=channel, message_id=ids[0])]
+                result = [await bot.copy_message(chat_id=user_id, from_chat_id=channel, message_id=ids[0], protect_content=protect)]
             else:
-                result = await bot.copy_messages(chat_id=user_id, from_chat_id=channel, message_ids=ids)
+                result = await bot.copy_messages(chat_id=user_id, from_chat_id=channel, message_ids=ids, protect_content=protect)
             sent.extend(m.message_id for m in result)
             if len(result) != len(batch):
                 # copyMessages may silently skip unavailable source messages.
@@ -33,7 +34,7 @@ async def deliver_collection(bot, user_id, collection, files, delivery_id=None):
             # Explicit rejection: safe to attempt individual source messages.
             for f in batch:
                 try:
-                    message = await bot.copy_message(chat_id=user_id, from_chat_id=channel, message_id=f["message_id"])
+                    message = await bot.copy_message(chat_id=user_id, from_chat_id=channel, message_id=f["message_id"], protect_content=protect)
                     sent.append(message.message_id)
                 except (BadRequest, Forbidden, RetryAfter):
                     failed.append({**f, "reason": "explicitly_rejected"})

@@ -47,8 +47,9 @@ async def bot_username(bot):
 async def referral_links(bot, user_id):
     username = await bot_username(bot)
     link = f"https://t.me/{username}?start=ref_{int(user_id)}"
+    from persona import share_text
     share = "https://t.me/share/url?" + urlencode({
-        "url": link, "text": "Stream exclusive media now!"})
+        "url": link, "text": share_text()})
     return link, share
 
 

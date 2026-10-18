@@ -651,8 +651,18 @@ async def maybe_qualify_referral(bot, friend_id: int, friend_name: str):
     if not doc.get("notified"):
         balance = int((await db.get_user(inviter) or {}).get("tokens", 0))
         try:
+            # Link belongs to the INVITER, not the friend who just joined.
+            # A temporary username lookup failure must not suppress the reward notice.
+            markup = None
+            try:
+                _, share = await referral_links(bot, inviter)
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "📤 Share on Telegram", url=share, style="success")]])
+            except RuntimeError:
+                pass
             await bot.send_message(inviter, persona.referral_notify(friend_name,
-                config.REFERRAL_INVITER_BONUS, balance), parse_mode="HTML")
+                config.REFERRAL_INVITER_BONUS, balance), parse_mode="HTML",
+                reply_markup=markup)
             await db.mark_referral_notified(friend_id)
         except Exception:
             pass
@@ -763,6 +773,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /remove_userbot — disconnect and remove saved session\n"
         "• /cancel — cancel userbot setup\n"
         "• /botstatus — detected username\n"
+        "• /protect on|off — forwarding/saving protection (default ON)\n"
         "• /stats — counts")
 
 
@@ -1087,3 +1098,23 @@ async def cmd_collections(update, context):
     text = "🎀 Indexed collections (latest 20)\n" + "\n".join(
         f"{d['collection_id']} | {d.get('category')} | {d.get('file_count', 0)} delivery files" for d in docs)
     await update.message.reply_text(text if docs else "No collections indexed yet. Use /addchannel then /scan.", parse_mode=None)
+
+
+async def cmd_protect(update, context):
+    """Owner/admin only. Persist policy; apply to future sends and re-streams."""
+    if not _is_admin(update.effective_user.id):
+        return
+    args = context.args or []
+    if len(args) > 1 or (args and args[0].lower() not in ("on", "off")):
+        await update.message.reply_text("Usage: /protect on|off")
+        return
+    if args:
+        enabled = args[0].lower() == "on"
+        await db.update_settings({"protect_content": enabled})
+    else:
+        enabled = bool((await db.get_settings()).get("protect_content", True))
+    await update.message.reply_text(
+        "🎀 Content protection: " + ("ON 🔒" if enabled else "OFF 🔓") +
+        "\nApplies to new deliveries and Re-Streams, not files already sent."
+        "\n/protect on — block Telegram forwarding/saving"
+        "\n/protect off — allow forwarding/saving")

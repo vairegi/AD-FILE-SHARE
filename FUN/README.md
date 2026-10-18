@@ -292,3 +292,19 @@ the simplified userbot credential encryption derives its key from MONGO_URI.
 Changing the URI therefore requires a fresh import of your existing session.
 Do not send the replacement password to support. This ZIP has no live URI,
 Render log, userbot session, account API hash or production media.
+
+
+## v1.9.0 touch-ups
+- Upload all ZIP files into the existing FUN/ directory. No new environment variables.
+- `/protect` displays policy. `/protect on` and `/protect off` are admin-only,
+  persisted in MongoDB and apply to future deliveries and free re-streams.
+  Default is ON. All copy-message paths, including album fallback, receive
+  protect_content. Existing messages are unchanged. Telegram's forwarding/saving
+  restriction is not DRM and cannot prevent filming a screen.
+- Referral qualification notifications include a green Share on Telegram button
+  tied to the inviter's own referral ID. Existing atomic referral rewards remain.
+- Four cute invitation texts and four narration variants on home, referral reward,
+  delivery completion and successful check-in. Economy, IDs and command labels
+  are not randomized. Share opens the recipient picker; user sends the message.
+- Previous v1.8 preview behavior retained unchanged. No client-rendering/instant
+  preview guarantee is made by this release.
