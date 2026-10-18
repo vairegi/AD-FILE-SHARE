@@ -66,12 +66,21 @@ async def ensure_token(client):
     return (await db.get_settings()).get("telegraph_token")
 
 
-async def host_cover(client, file_bytes, token=None):
-    """Direct files only: Telegraph -> Graph -> Catbox. Legacy token ignored."""
+async def host_cover(client, file_bytes, token=None, **legacy_kwargs):
+    """Direct files only: asks DB for owner's preferred host, then falls back
+    through the multi-host adapter order. Legacy ``token``, ``primary``,
+    ``mirror``, ``userhash`` kwargs are accepted for backward-compat with the
+    pre-1.6 test suite and silently ignored when the owner did not opt-in."""
     import cover_hosts
-    return await cover_hosts.upload(client, file_bytes,
-        primary=config.COVER_PRIMARY_HOST, mirror=config.COVER_FALLBACK_HOST,
-        userhash=getattr(config, "CATBOX_USERHASH", ""), pace=_pace)
+    settings = await db.get_settings()
+    preferred = settings.get("preferred_host")
+    if not preferred:
+        for legacy in ("primary", "preferred"):
+            value = legacy_kwargs.get(legacy)
+            if value and value in cover_hosts.HOSTS:
+                preferred = value
+                break
+    return await cover_hosts.upload(client, file_bytes, preferred=preferred, pace=_pace)
 
 
 def normalize_image(data):

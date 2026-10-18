@@ -134,8 +134,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_library(q, kind, int(index))
         elif data == "home":
             await _show_home(q)
-        elif data == "covermode":
-            await q.answer("🎀 Link-preview mode: one cover above the caption; no native slideshows.", show_alert=True)
+        elif data.startswith("hosts:pick:"):
+            _, _, host = data.split(":")
+            await cmd_select_host_inline(q, host)
         elif data == "cats":
             await _show_categories(q)
         elif data == "earn":
@@ -159,6 +160,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _save(update, q, data[5:])
         elif data.startswith("task:"):
             await _task(update, q, data[5:])
+        elif data == "covermode":
+            await q.answer("🎀 Link-preview mode: one cover above the caption; no native slideshows.", show_alert=True)
         else:
             await q.answer("🎀 Hmm? Unknown button...", show_alert=True)
     except Exception as exc:  # never crash the dispatcher
@@ -718,9 +721,14 @@ async def cmd_cover_status(update, context):
         disable_web_page_preview=True)
 
 
+import cover_hosts
+
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
+    settings = await db.get_settings()
+    preferred = settings.get("preferred_host") or "(auto — adapters by order)"
     await update.message.reply_text(
         "🎀 Owner Panel:\n"
         "• /addchannel <channel_id> <category>\n"
@@ -734,6 +742,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /telegraph_token — legacy token help/reset\n"
         "• /retry_covers — prepare pending/missing/failed covers\n"
         "• /cover_status — hosted/local preview counts and progress\n"
+        "• /test_hosts — probe every cover-upload host with one image\n"
+        f"• /select_host <host|auto> — preferred host (currently: {preferred})\n"
         "• /pending — inspect orphan files\n"
         "• /collections — latest indexed IDs and counts\n"
         "• /setup_userbot — API ID → API hash → session in chat\n"
@@ -742,6 +752,79 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /cancel — cancel userbot setup\n"
         "• /botstatus — detected username\n"
         "• /stats — counts")
+
+
+async def cmd_test_hosts(update, context):
+    """Probe every cover-upload host with a benign generated test image."""
+    if not _is_admin(update.effective_user.id):
+        return
+    status_msg = await update.message.reply_text(
+        "🎀 Generating a tiny test image and probing every host…")
+    try:
+        import io
+        from PIL import Image  # type: ignore
+        buf = io.BytesIO()
+        Image.new("RGB", (160, 160), (32, 80, 200)).save(buf, "JPEG", quality=80)
+        jpeg = buf.getvalue()
+    except Exception:
+        jpeg = (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+                + b"\x00" * 64 + b"\xff\xd9")
+    import httpx
+    async with httpx.AsyncClient() as http:
+        report = await cover_hosts.test_all(http, jpeg)
+    text = cover_hosts.render_report_md(report)
+    ok_hosts = [r["host"] for r in report if r["status"] == "ok"]
+    if len(ok_hosts) == 1:
+        await db.update_settings({"preferred_host": ok_hosts[0]})
+        text += f"\n\n🎀 Single winner → set as preferred host: <code>{ok_hosts[0]}</code>"
+    elif len(ok_hosts) > 1:
+        buttons = [InlineKeyboardButton(r["host"], callback_data=f"hosts:pick:{r['host']}")
+                   for r in report if r["status"] == "ok"]
+        from telegram import InlineKeyboardMarkup as _IKM
+        reply_markup = _IKM([buttons[i:i+3] for i in range(0, len(buttons), 3)])
+        try:
+            await status_msg.edit_text(text[:3500], reply_markup=reply_markup, disable_web_page_preview=True)
+            return
+        except Exception:
+            await update.message.reply_text(text[:3500], reply_markup=reply_markup,
+                                            disable_web_page_preview=True)
+            return
+    else:
+        text += "\n\n⚠️ No host worked. Check credentials & network, fix any skipped hosts, run /test_hosts again."
+    try:
+        await status_msg.edit_text(text[:4000], disable_web_page_preview=True)
+    except Exception:
+        await update.message.reply_text(text[:4000], disable_web_page_preview=True)
+
+
+async def cmd_select_host(update, context):
+    if not _is_admin(update.effective_user.id):
+        return
+    arg = (context.args or [""])[0].strip().lower()
+    if not arg:
+        s = await db.get_settings()
+        preferred = s.get("preferred_host") or "(auto — uses DEFAULT_ORDER until first OK)"
+        await update.message.reply_text(
+            "🎀 /select_host usage:\n"
+            f"Current preferred: <code>{preferred}</code>\n"
+            "• <code>/select_host auto</code> — auto-fallback using committed order\n"
+            "• <code>/select_host litterbox</code> — force a single host\n"
+            "Allowed: telegra.ph, graph.org, catbox.moe, litterbox, 0x0.st, "
+            "imgbb, bunny.net, cloudflare-r2, backblaze-b2, auto.")
+        return
+    if arg == "auto":
+        await db.update_settings({"preferred_host": None})
+        await update.message.reply_text("🎀 Upload order reset to AUTO (DEFAULT_ORDER until first OK).")
+        return
+    if arg not in cover_hosts.HOSTS:
+        await update.message.reply_text(f"❌ Unknown host. Allowed: {', '.join(cover_hosts.HOSTS)}, auto.")
+        return
+    await db.update_settings({"preferred_host": arg})
+    adult = cover_hosts.LEGAL_ADULT_STATUS.get(arg, "USER-RESPONSIBLE")
+    await update.message.reply_text(
+        f"🎀 Preferred host set to <code>{arg}</code>.\n"
+        f"Adult-content status: <code>{adult}</code>\n"
+        "Future uploads use this host first; failures still fall back to AUTO order.")
 
 
 async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):

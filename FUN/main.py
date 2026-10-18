@@ -36,6 +36,7 @@ def build_bot():
         "help": handlers.cmd_help, "covermode": handlers.cmd_covermode,
     "telegraph_token": handlers.cmd_telegraph_token,
         "retry_covers": handlers.cmd_retry_covers, "cover_status": handlers.cmd_cover_status,
+        "test_hosts": handlers.cmd_test_hosts, "select_host": handlers.cmd_select_host,
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,

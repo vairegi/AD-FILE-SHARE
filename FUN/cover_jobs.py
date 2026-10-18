@@ -118,6 +118,7 @@ async def statistics():
               'Hosted URL ready': await col.count_documents(ready),
               'Telegraph links ready': await col.count_documents({'cover.url_status': 'ok', 'cover.url': {'$regex': r'^https://(telegra\.ph|graph\.org)/file/'}}),
               'Catbox links ready': await col.count_documents({'cover.url_status': 'ok', 'cover.url': {'$regex': r'^https://files\.catbox\.moe/'}}),
+              'Litterbox links ready': await col.count_documents({'cover.url_status': 'ok', 'cover.url': {'$regex': r'^https://litter\.catbox\.moe/'}}),
               'Feed mode': 'in-place direct-image link preview; cached-photo fallback if no URL',
               'Pending': await col.count_documents({'cover.url_status': 'pending'}),
               'No status yet': await col.count_documents({'cover.url_status': {'$exists': False}}),
@@ -125,6 +126,11 @@ async def statistics():
               'Cached cover assets ready': await col.count_documents({'cover.asset_keys.0': {'$exists': True}}),
               'Cached images': await db.col('cover_assets').count_documents({'data': {'$exists': True}}),
               'Worker running': 'yes' if busy() else 'no'}
+    settings = await db.get_settings()
+    if settings.get('preferred_host'):
+        result['Preferred host (owner)'] = settings['preferred_host']
+    else:
+        result['Preferred host (owner)'] = '(auto — multi-host fallback)'
     state = await db.col('cover_jobs').find_one({'_id': 'current'})
     if state:
         result['Last job'] = f"{state.get('processed',0)}/{state.get('total',0)} attempted; {state.get('hosted',0)} hosted; {state.get('state','unknown')}"
