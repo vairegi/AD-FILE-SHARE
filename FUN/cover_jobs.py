@@ -55,8 +55,9 @@ async def _run(userbot, message, reply):
                             return
                         await _progress(message,"⏳ Telegraph rate limit hit — waiting 3 minutes, then continuing automatically…")
                         await asyncio.sleep(180)
-                        continue  # retry the SAME cover after cooldown
-                    if result["hosted"]: state["hosted"]+=1
+                    if result.get("rate_limited"):
+                        state["failed"] += 0  # still pending; not a hard failure
+                    elif result["hosted"]: state["hosted"]+=1
                     elif result["ready"]: state["local_ready"]+=1
                     else: state["failed"]+=1
                 except Exception:

@@ -1,9 +1,9 @@
-FUN v1.4.1 — Telegraph rate-limit handling + token safety, offline sandbox verification
+FUN v1.4.2 — Telegraph 400 fall-through fix + new caption + plain nav buttons
 
 ........................................................................ [ 35%]
 ........................................................................ [ 71%]
 .........................................................                [100%]
-201 passed in 43.11s
+201 passed in 43.29s
 
 Legacy runner:
 PASS - classifier: 3 collections
@@ -64,4 +64,4 @@ PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-Compileall: passed. Not covered: live Telegraph acceptance, real client rendering, production latency.
+Compileall: passed. Not covered: live Telegraph acceptance, client rendering, production latency.

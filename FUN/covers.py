@@ -121,6 +121,7 @@ async def _try_upload(client, url, file_bytes, token=None):
     if r.status_code == 429 or "try again later" in err_text.lower():
         raise RateLimited(f"{url.split('?')[0]}: rate limited (try again later)")
     if r.status_code != 200:
+        # 400/403/5xx: NOT a dead end — caller tries the next attempt/host.
         raise UploadError(f"{url}: HTTP {r.status_code} {_sanitize(str(payload))[:80]}")
     if isinstance(payload, dict) and payload.get("error"):
         raise UploadError(f"{url}: {_sanitize(payload.get('error'))}")
@@ -158,8 +159,9 @@ async def host_cover(client, file_bytes, token=None):
     errors = []
     for host, base in (("telegra.ph", config.COVER_PRIMARY_HOST),
                        ("graph.org", config.COVER_FALLBACK_HOST)):
-        attempts = [(base, token)] if token else []
-        attempts.append((base, None))
+        # /upload accepts anonymous multipart only; an access_token form field
+        # makes Telegraph return HTTP 400. Token belongs to api.telegra.ph/*.
+        attempts = [(base, None)]
         for url, tok in attempts:
             try:
                 direct = await _try_upload(client, url, file_bytes, token=tok)

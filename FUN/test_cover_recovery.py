@@ -87,15 +87,16 @@ async def test_retry_selects_pending_missing_failed_and_bad_ok_but_skips_cached(
 
 
 class TokenHTTP:
-    """createAccount returns a token; upload requires it in form data."""
+    """createAccount returns a token; /upload itself is anonymous (a form
+    access_token makes Telegraph return HTTP 400 — the production bug)."""
     def __init__(self):
         self.posts = []
     async def get(self, url, params=None, timeout=None):
         return NS(status_code=200, json=lambda: {"ok": True, "result": {"access_token": "tok123"}})
     async def post(self, url, files=None, timeout=None, data=None, **kw):
         self.posts.append((url, data))
-        if not (data or {}).get("access_token") == "tok123":
-            return NS(status_code=403, json=lambda: {"error": "ACCESS_TOKEN_INVALID"})
+        if data and data.get("access_token"):
+            return NS(status_code=400, json=lambda: {"error": "BAD_REQUEST"})
         return NS(status_code=200, json=lambda: [{"src": "/file/ok.jpg"}])
 
 
@@ -103,10 +104,11 @@ async def test_telegraph_token_created_cached_and_used_for_upload():
     http = TokenHTTP()
     assert await covers.ensure_token(http) == "tok123"
     assert (await db.get_settings())["telegraph_token"] == "tok123"
-    assert await covers.ensure_token(http) == "tok123"  # cached, no second createAccount
+    assert await covers.ensure_token(http) == "tok123"  # cached
     r = await covers.host_cover(http, jpeg(), token="tok123")
     assert r["status"] == "ok" and r["url"] == "https://telegra.ph/file/ok.jpg"
-    assert any((d or {}).get("access_token") == "tok123" for _, d in http.posts)
+    # token must NOT be sent as a form field to /upload (that is the 400 bug)
+    assert all(not (d or {}).get("access_token") for _, d in http.posts)
 
 
 async def test_anonymous_403_falls_back_to_token_then_mirror(monkeypatch):

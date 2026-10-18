@@ -284,8 +284,8 @@ async def _show_library(q, kind, index):
     unlocked = await db.is_unlocked(uid, c["collection_id"])
     keyboard = _feed_kb(c["collection_id"], "all", 0, 1, unlocked)
     rows = list(keyboard.inline_keyboard)
-    rows.insert(0, [InlineKeyboardButton("⬅️ Previous", callback_data=f"library:{kind}:{index-1}" if index else "noop"),
-                   InlineKeyboardButton("Next ➡️", callback_data=f"library:{kind}:{index+1}" if index+1<len(collections) else "noop")])
+    rows.insert(0, [InlineKeyboardButton("Previous", callback_data=f"library:{kind}:{index-1}" if index else "noop"),
+                   InlineKeyboardButton("Next", callback_data=f"library:{kind}:{index+1}" if index+1<len(collections) else "noop")])
     import rich_cards
     await rich_cards.show_cover_card(q.get_bot(), uid, await _feed_text(uid, c),
         InlineKeyboardMarkup(rows), c, "link", edit_message_id=getattr(q.message, "message_id", None))
@@ -356,12 +356,12 @@ async def _feed_text(uid, c):
 
 def _feed_kb(cid, category, idx, total, unlocked):
     rows = [[
-        InlineKeyboardButton("⬅️ Previous",
+        InlineKeyboardButton("Previous",
                              callback_data=f"feed:{category}:{idx - 1}" if idx > 0 else "noop"),
-        InlineKeyboardButton("🔄 Re-Stream" if unlocked else "🔓 Unlock",
+        InlineKeyboardButton("Re-Stream" if unlocked else "Unlock",
                              callback_data=(f"restream:{cid}" if unlocked
                                             else f"unlock:{cid}")),
-        InlineKeyboardButton("Next ➡️",
+        InlineKeyboardButton("Next",
                              callback_data=f"feed:{category}:{idx + 1}" if idx < total - 1 else "noop"),
     ], [
         InlineKeyboardButton("🗂 Categories", callback_data="cats"),

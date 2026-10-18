@@ -41,11 +41,17 @@ def feed_empty():
 
 
 def feed_caption(title, files, views, unlocks, price, balance, unlocked):
-    state = "✅ Already in your Vault — Re-Stream is FREE!" if unlocked else f"🔒 Unlock for {price} Tokens"
-    return (head("🎀 New Drop ོ࿐") + f"<b>{h(title)}</b>\n{SEP}\n"
-        + stat("📦", "Media files", files) + stat("👁", "Views", views)
-        + stat("❤️", "Unlocks", unlocks) + stat("🪙", "Cost", f"{price} tokens")
-        + stat("👛", "Token Balance", f"{balance} Tokens") + SEP + "\n" + cute(state))
+    """New layout: bold title, compact two-stat lines, brand footer.
+    Unlocked state swaps the footer line for a free re-stream notice."""
+    footer = (f"✅ <b>Already in your Vault</b> — Re-Stream is FREE!\n{SEP}\n"
+              if unlocked else
+              f"✨ <b>COLLECTION BY {h(config.BOT_NAME)}</b> ✨\n{SEP}\n")
+    return (f"<b>🎀 New Drop જ⁀➴</b>\n{SEP}\n"
+        + f"<b>{h(title)}</b>\n\n"
+        + f"📦 <b>{h(files)}</b> media files\n"
+        + f"👁 Views: <code>{h(views)}</code>  •  ❤️ Unlocks: <code>{h(unlocks)}</code>\n"
+        + f"🪙 Cost: <code>{h(price)} tokens</code>  •  👛 Balance: <code>{h(balance)}</code>\n\n"
+        + footer)
 
 
 def insufficient(price, balance):
