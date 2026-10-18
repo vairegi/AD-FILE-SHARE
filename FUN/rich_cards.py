@@ -20,11 +20,10 @@ log = logging.getLogger("fun.cards")
 
 
 def _hosted_url(cover):
-    for u in [cover.get("url"), *(cover.get("urls") or [])]:
-        if isinstance(u, str) and u.startswith((
-                "https://telegra.ph/", "https://graph.org/",
-                "http://telegra.ph/", "http://graph.org/")):
-            return u
+    from cover_hosts import valid_direct_url
+    for url in [cover.get("url"), *(cover.get("urls") or [])]:
+        if valid_direct_url(url):
+            return url
     return None
 
 
@@ -78,7 +77,14 @@ async def show_cover_card(bot, chat_id, text, markup, collection, mode=None,
                     if _is_not_modified(exc):
                         return None
                     if "no text in the message" in str(exc).lower():
-                        pass  # current card is a media message: convert below
+                        result = await bot.send_message(
+                            chat_id=chat_id, text=body, parse_mode="HTML",
+                            reply_markup=markup, link_preview_options=options)
+                        try:
+                            await bot.delete_message(chat_id=chat_id, message_id=mid)
+                        except TelegramError:
+                            log.info("Old photo card retained; new link-preview card sent")
+                        return result
                     else:
                         raise
             else:

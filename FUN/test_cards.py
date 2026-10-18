@@ -100,17 +100,16 @@ async def test_not_modified_is_ignored_silently():
     assert result is None and len(bot.calls) == 1
 
 
-async def test_current_media_message_with_url_converts_via_media_edit_and_caches_file_id():
-    bot = CardBot(edit_text_error=BadRequest("Bad Request: there is no text in the message to edit"))
-    key = "-100:10"
-    await db.col("cover_assets").insert_one({"_id": key, "data": Binary(jpeg())})
-    await rich_cards.show_cover_card(bot, 7, "cap", None,
-                                     {"cover": {"url": TG_URL, "asset_keys": [key]}},
-                                     edit_message_id=42)
-    assert [e for e, _ in bot.calls] == ["editMessageText", "editMessageMedia"]
-    media = bot.calls[1][1]["media"]
-    assert media.media == TG_URL and media.caption == "cap"  # URL, zero upload
-    assert (await db.col("cover_assets").find_one({"_id": key}))["telegram_file_id"] == "FID_1"
+async def test_old_photo_converts_once_to_a_text_link_preview_not_another_photo():
+    bot=CardBot(edit_text_error=BadRequest("there is no text in the message to edit"))
+    key="-100:10"
+    await db.col("cover_assets").insert_one({"_id":key,"data":Binary(jpeg())})
+    result=await rich_cards.show_cover_card(bot,7,"cap",None,
+        {"cover":{"url":TG_URL,"asset_keys":[key]}},edit_message_id=42)
+    assert [e for e,_ in bot.calls]==["editMessageText","sendMessage","deleteMessage"]
+    assert result.message_id==500
+    assert bot.calls[1][1]["link_preview_options"].url==TG_URL
+    assert "telegram_file_id" not in await db.col("cover_assets").find_one({"_id":key})
 
 
 async def test_no_host_cached_file_id_media_edit_without_upload():

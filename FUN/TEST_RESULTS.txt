@@ -1,11 +1,13 @@
-FUN v1.4.2 — Telegraph 400 fall-through fix + new caption + plain nav buttons
+FUN v1.5.0 — direct-file upload adapters, 2026-10-18
 
-........................................................................ [ 35%]
-........................................................................ [ 71%]
-.........................................................                [100%]
-201 passed in 43.29s
+FINAL OFFLINE TEST RUN
+........................................................................ [ 31%]
+........................................................................ [ 63%]
+........................................................................ [ 94%]
+............                                                             [100%]
+228 passed in 2.04s
 
-Legacy runner:
+SEPARATE LEGACY RUNNER (overlapping features, not extra independent tests)
 PASS - classifier: 3 collections
 PASS - classifier: cover1 title is first caption line
 PASS - classifier: cover1 has 3 delivery files (short-caption photo is delivery)
@@ -64,4 +66,17 @@ PASS - save: second tap removes bookmark
 
 55/55 checks passed
 
-Compileall: passed. Not covered: live Telegraph acceptance, client rendering, production latency.
+Compileall: passed.
+
+LIVE BENIGN JPEG UPLOAD PROBES (no user images/credentials)
+{"host": "Telegraph", "status": 400, "response": "\"Unknown error\""}
+{"host": "Graph", "status": 400, "response": "\"Unknown error\""}
+{"host": "Catbox", "status": 412, "response": "Invalid uploader"}
+
+A separate requests-based Catbox probe also returned HTTP 412 Invalid uploader.
+No hosted image URL was obtained, so no live direct-image GET/Telegram preview was verified.
+No production database was read/written. No deployment was performed.
+
+Test migration: old Render-hosted-preview tests and account/token auto-creation
+assertions were replaced with explicit no-Render/no-account/Catbox integration checks.
+The original scanner, economy, delivery and userbot regressions remain.

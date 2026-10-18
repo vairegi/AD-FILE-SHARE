@@ -34,7 +34,7 @@ def build_bot():
         Defaults(parse_mode=None)).build()
     commands = {"start": handlers.cmd_start, "checkin": handlers.cmd_checkin,
         "help": handlers.cmd_help, "covermode": handlers.cmd_covermode,
-    "telegraph_token": handlers.cmd_telegraph_token, "covermode": handlers.cmd_telegraph_token,
+    "telegraph_token": handlers.cmd_telegraph_token,
         "retry_covers": handlers.cmd_retry_covers, "cover_status": handlers.cmd_cover_status,
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
@@ -93,7 +93,7 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"ok": True, "service": "fun-bot3", "version": "1.4.2"}
+    return {"ok": True, "service": "fun-bot3", "version": "1.5.0"}
 
 
 @app.post("/webhook")

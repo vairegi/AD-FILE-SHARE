@@ -34,7 +34,7 @@ async def test_try_again_later_detected_as_rate_limited_and_stops():
     http = RateLimitHTTP()
     r = await covers.host_cover(http, jpeg(), token="secret_tok")
     assert r["status"] == "rate_limited"
-    assert http.posts == 1  # does NOT hammer all attempts/hosts after a limit
+    assert http.posts == 3  # try each independent host once, then stop
     assert "secret_tok" not in r["error"] and "access_token=[hidden]" not in r["error"]
 
 async def test_http_429_detected():
@@ -51,6 +51,7 @@ async def test_errors_sanitize_tokens():
     assert r["status"] == "failed" and "abc123XYZ" not in r["error"]
 
 async def test_pacing_spaces_uploads(monkeypatch):
+    monkeypatch.setattr(covers, "MIN_UPLOAD_INTERVAL", 2.0)
     covers._last_upload_at = 0.0
     slept = []
     real_sleep = asyncio.sleep
@@ -91,7 +92,7 @@ async def test_job_pauses_cleanly_on_persistent_rate_limit(monkeypatch):
     await cover_jobs._task
     state = await db.col("cover_jobs").find_one({"_id": "current"})
     assert state["state"] == "rate_limited_paused"
-    assert any("rate-limit" in r[0] for r in u.message.replies) or True
+    assert state["processed"] == 0 and state["hosted"] == 0  # same cover was not consumed
 
 async def test_telegraph_token_reset_removes_leaked_token():
     await db.update_settings({"telegraph_token": "leaked_tok"})

@@ -100,15 +100,13 @@ class TokenHTTP:
         return NS(status_code=200, json=lambda: [{"src": "/file/ok.jpg"}])
 
 
-async def test_telegraph_token_created_cached_and_used_for_upload():
-    http = TokenHTTP()
-    assert await covers.ensure_token(http) == "tok123"
-    assert (await db.get_settings())["telegraph_token"] == "tok123"
-    assert await covers.ensure_token(http) == "tok123"  # cached
-    r = await covers.host_cover(http, jpeg(), token="tok123")
-    assert r["status"] == "ok" and r["url"] == "https://telegra.ph/file/ok.jpg"
-    # token must NOT be sent as a form field to /upload (that is the 400 bug)
-    assert all(not (d or {}).get("access_token") for _, d in http.posts)
+async def test_no_account_creation_and_no_token_sent_to_image_upload():
+    http=TokenHTTP()
+    # Legacy helper does NOT create accounts anymore.
+    assert await covers.ensure_token(http) is None
+    result=await covers.host_cover(http,jpeg(),token="ignored_legacy_token")
+    assert result["status"]=="ok"
+    assert all(not (data or {}).get("access_token") for _,data in http.posts)
 
 
 async def test_anonymous_403_falls_back_to_token_then_mirror(monkeypatch):
@@ -170,18 +168,17 @@ async def test_cover_status_reports_telegraph_links_and_pending():
     await handlers.cmd_cover_status(u, context())
     text = u.message.replies[-1][0]
     assert "Telegraph links ready: 1" in text and "Pending: 1" in text
-    assert "in-place edit" in text
+    assert "in-place" in text and "Catbox links ready: 0" in text
 
 
-async def test_telegraph_token_admin_command():
-    u = update()
-    await handlers.cmd_telegraph_token(u, context())
-    assert "createAccount" in u.message.replies[-1][0]
-    await handlers.cmd_telegraph_token(u, context(args=["abc123def"]))
-    assert "saved" in u.message.replies[-1][0]
-    assert (await db.get_settings())["telegraph_token"] == "abc123def"
-    other = update(uid=9)
-    await handlers.cmd_telegraph_token(other, context())
+async def test_legacy_token_command_help_and_reset_only():
+    u=update();await handlers.cmd_telegraph_token(u,context())
+    assert "do not create accounts" in u.message.replies[-1][0]
+    await db.update_settings({"telegraph_token":"old_token"})
+    await handlers.cmd_telegraph_token(u,context(args=["reset"]))
+    assert "removed" in u.message.replies[-1][0]
+    assert not (await db.get_settings()).get("telegraph_token")
+    other=update(uid=9);await handlers.cmd_telegraph_token(other,context())
     assert not other.message.replies
 
 

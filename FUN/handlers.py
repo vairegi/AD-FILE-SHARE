@@ -672,40 +672,30 @@ async def cmd_covermode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     await update.message.reply_text(
-        "\U0001f380 Feed mode: Telegraph link preview, edited in place.\n"
-        "Next/Previous edit the same card — no delete-and-resend flicker.\n"
-        "If telegra.ph/graph.org are unreachable, the bot edits in the cached "
-        "image once (editMessageMedia) and reuses its Telegram file_id.\n"
-        "Native slideshow/collage rendering stays disabled in this mode.")
+        "🎀 Feed mode: direct-image link preview, edited in place.\n"
+        "Hosts: telegra.ph → graph.org → Catbox.\n"
+        "No articles or Render-hosted images. If all hosts reject the upload, "
+        "the cached Telegram photo fallback is used. Native slideshow/collage disabled.")
 
 
 async def cmd_telegraph_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    if context.args:
-        if context.args[0].strip().lower() == "reset":
-            await db.col("settings").update_one({"_id": "main"},
-                {"$unset": {"telegraph_token": ""}})
-            await update.message.reply_text("\u2705 Telegraph token removed — a fresh account/token is created automatically on the next upload. Run /retry_covers.")
-            return
-        await db.update_settings({"telegraph_token": context.args[0].strip()})
-        await update.message.reply_text("\u2705 Telegraph token saved. /retry_covers will use it.")
+    if context.args and context.args[0].lower() == "reset":
+        await db.col("settings").update_one({"_id": "main"}, {"$unset": {"telegraph_token": ""}})
+        await update.message.reply_text("✅ Legacy Telegraph token removed. Direct-image uploads do not use it.")
         return
-    settings = await db.get_settings()
-    token = settings.get("telegraph_token")
     await update.message.reply_text(
-        "\U0001f380 Telegraph token: " + (f"set ({token[:6]}\u2026)" if token else
-        "not stored yet — created automatically via api.telegra.ph/createAccount "
-        "on the first cover upload."))
+        "🎀 Direct-image uploads do not create accounts or use Telegraph tokens.\n"
+        "Catbox is anonymous by default; CATBOX_USERHASH is optional in Render.\n"
+        "Use /telegraph_token reset to remove an old stored token.")
 
 
 async def cmd_retry_covers(update, context):
     if not _is_admin(update.effective_user.id):
         return
     import runtime, cover_jobs
-    if not runtime.userbot:
-        await update.message.reply_text("🎀 Connect the userbot first: /setup_userbot")
-        return
+    # Cached cover_assets can be uploaded even without a connected userbot.
     if cover_jobs.busy():
         await update.message.reply_text("⏳ Cover preparation is already running. Use /cover_status for progress.")
         return
@@ -724,7 +714,8 @@ async def cmd_cover_status(update, context):
     import cover_jobs
     stats = await cover_jobs.statistics()
     await update.message.reply_text(
-        "🎀 Cover status\n" + "\n".join(f"{key}: {value}" for key,value in stats.items()))
+        "🎀 Cover status\n" + "\n".join(f"{key}: {value}" for key,value in stats.items()),
+        disable_web_page_preview=True)
 
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -740,7 +731,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /setprice <collection_id> <tokens>\n"
         "• /scan <channel_id> — run scanner now\n"
         "• /covermode — in-place Telegraph preview mode\n"
-        "• /telegraph_token — view/set the Telegraph API token\n"
+        "• /telegraph_token — legacy token help/reset\n"
         "• /retry_covers — prepare pending/missing/failed covers\n"
         "• /cover_status — hosted/local preview counts and progress\n"
         "• /pending — inspect orphan files\n"

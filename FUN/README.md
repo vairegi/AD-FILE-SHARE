@@ -1,90 +1,103 @@
-# FUN Bot 3 — v1.3.0 ordinary link previews (2026-10-17)
+# FUN Bot 3 v1.5.0 — direct-file hosts + Catbox (2026-10-18)
 
-This release changes only FUN. Bots 1–2 at the repository root are unchanged.
-Every shipped file is directly inside FUN/ (no nested code/test folders).
+All files remain directly inside FUN/. Bots 1–2 are not changed.
+No articles, page titles, createPage calls, automatic Telegraph accounts or
+Render-served images are used. Only the small prepared cover JPEG is uploaded.
 
-## What changed — this is not the previous rich-image renderer
-The feed now uses sendMessage with HTML text, an invisible U+2063 link anchor,
-and LinkPreviewOptions: explicit url, prefer_large_media=True,
-show_above_text=True, is_disabled=False. Colored inline keyboards remain.
-It does NOT call sendPhoto, editMessageMedia, sendRichMessage or editMessageText
-for cover navigation. An image-looking preview is still expected visually:
-it is the text message's LINK PREVIEW, not a photo message with a caption.
+## Verified facts, not another claim that the remote host is fixed
+Live tests from this sandbox using a harmless 320x180 synthetic JPEG returned:
+- https://telegra.ph/upload: HTTP 400, "Unknown error"
+- https://graph.org/upload: HTTP 400, "Unknown error"
+- https://catbox.moe/user/api.php: HTTP 412, "Invalid uploader"
+The Catbox request was also tried with requests instead of httpx: same 412.
+These results do NOT establish the reason for each service's refusal, nor
+prove uploads from your Render account will get the same result. They DO mean
+we cannot honestly claim a working external URL was obtained in the live test.
+A timeout, 400, 412 and a 429 are different errors; do not call them all flood
+limits. Telegraph account tokens are not an established fix for /upload.
+The official Telegraph API does not document /upload authentication.
 
-Next/Previous: send a NEW card -> receive its Telegram message ID -> delete the
-old bot card. No edit means no edited label on that cover card. Old bot photos
-from earlier versions are also replaced this way. If sending fails or times
-out, keep the old card; do not automatically resend an uncertain outcome. If
-old-card deletion is rejected, keep the usable replacement; an old card may
-remain. Repeated taps on an already-replaced card are ignored in this process.
-This reproduces the requested behaviour; it does not identify a rival's code.
+## Correct direct-file API requests
+Telegraph/Graph: POST https://telegra.ph/upload then https://graph.org/upload
+with multipart field file=(cover.jpg, JPEG bytes, image/jpeg). Responses are
+JSON arrays such as [{"src":"/file/...jpg"}]. Join src to the host URL.
+Posting to the Graph homepage, https://graph.org, is not the upload API.
 
-## Why 162 prepared covers still produced photo messages
-The supplied screenshot reports zero hosted URLs and 162 mirror failures.
-The prior renderer fell back to native Telegram photos, sometimes by a cached
-file_id. A visible photo does NOT prove that bytes were uploaded on every tap.
-The old release also incorrectly called rich images the ordinary preview trick.
+Catbox: POST https://catbox.moe/user/api.php with form reqtype=fileupload and
+multipart field fileToUpload=(cover.jpg, JPEG bytes, image/jpeg). The response
+is a PLAIN-TEXT direct URL, e.g. https://files.catbox.moe/abc123.jpg — not JSON.
+Posting to the Catbox homepage is not the upload API. Anonymous is the default;
+the userhash field is omitted, as the official API specifies. If you already
+have a Catbox account, optional Render secret CATBOX_USERHASH may be supplied.
+It is not guaranteed to fix a provider's refusal. Never paste it into logs.
 
-Preferred URL: previously successful telegra.ph/graph.org URL, reused as-is.
-When both mirrors fail: the Render app now serves an opaque public preview page
-and cached JPEG directly from cover_assets. No need to keep retrying unavailable
-mirrors. A metadata-only startup backfill creates stable links for existing
-cached covers; browsing can create a missing link without source downloads.
-No upload to Telegram, source download, mirror HTTP call or JPEG read from Mongo
-is performed in the feed navigation path. Telegram fetches a public preview
-separately; the Render fallback serves cached image bytes over HTTP.
+The clean asynchronous implementation is in cover_hosts.py (httpx-compatible
+client). covers.py handles MongoDB image caching and orchestrates the adapters.
+No image upload/download occurs on a normal Next/Previous tap with a cached URL.
 
-## Public-link disclosure and hosting limits
-Like Telegraph links, these fallback links can be opened by ANYONE holding
-them. Only prepared cover JPEGs are served, through random 192-bit tokens;
-source message/channel IDs, API credentials, sessions, database credentials,
-and full delivery videos are not served. There is no asset directory listing.
-Do not use this for covers that must remain confidential after viewing.
-Removing an asset returns 404 at the origin, but cannot erase Telegram/client
-or intermediate cached copies. Render serves image bandwidth; this is not
-zero-byte viewing and is subject to your hosting limits and availability.
-No guarantee of sub-0.5-second response or live preview generation is made.
-A first preview, a cold start or an old client may be slow or fail to render.
+## Behaviour changes
+- Host order: telegra.ph -> graph.org -> Catbox. A rejection/rate limit on one
+  host does not stop the next independent host being tried.
+- Correct Catbox URLs are accepted by the Telegram preview renderer; merely
+  uploading to Catbox without fixing the old domain filter would not work.
+- Returned URLs are checked for expected scheme/domain/path and stored in Mongo.
+  A plain-text error or HTML page returned with HTTP 200 is NOT a hosted URL.
+- Successful URLs are reused on rescans/retries (even force=True); old cached
+  JPEGs are used for pending hosting retries instead of re-downloading sources.
+- Provider-level cooldowns prevent 162 requests to an endpoint known to reject
+  the request. When all hosts refuse, the job pauses with clear per-host errors.
+- Rate retries use an INNER loop, retrying the same collection before advancing.
+- Metadata is read before upload waits; a long job does not leave a MongoDB
+  cursor idle through host cooldowns (which can abort after the first 101 rows).
+- Job totals separate attempted, actually hosted, cached-photo-only, failures,
+  and not attempted. Zero hosted links is explicitly reported as a failure,
+  not as successful link-preview preparation.
+- No Render cover routes are enabled; the old link_previews.py is an external-
+  URL-only compatibility shim so uploading this release overwrites stale code.
+- /covermode was incorrectly registered to a token command in the old release;
+  command routing is fixed.
 
-## Deploy this upgrade
-1. Upload ALL files from this ZIP's FUN/ into your repository's existing FUN/.
-2. Keep Render Root Directory FUN and deploy the latest commit.
-3. Keep existing variables; no new variable, DB reset, rescan, or userbot
-   re-import is required solely for this update. RENDER_EXTERNAL_URL must be
-   your correct public HTTPS service URL, without trailing slash.
-4. After startup, /cover_status shows 'Render preview links' and the feed mode.
-   For the screenshot's already-cached 162 images, you do NOT need /retry_covers.
-5. Send /start -> Start Watching -> Next -> Previous.
-   New cards should be text messages with an image preview ABOVE the body;
-   Next/Previous should have new message IDs, not an edited marker.
-6. If an image was never cached, /retry_covers can prepare it with the userbot.
-   It still tries telegra.ph first, graph.org second. Failed mirror counts remain
-   truthful even when Render fallback preview links are available.
+## Feed behaviour
+With a valid direct URL: editMessageText + HTML invisible-link anchor and
+LinkPreviewOptions(url, prefer_large_media=True, show_above_text=True).
+If the current card is an OLD PHOTO, it must be converted into a TEXT message
+once: send the link-preview card successfully, then delete the old photo.
+Continuing to edit that photo with editMessageMedia would keep it a photo.
+Subsequent text-card navigation edits in place. Telegram's edited marker can
+appear; live client preview generation and sub-0.5-second speed are not promised.
+If every public host rejects the upload, the existing cached photo/file_id
+fallback remains available. A photo fallback is clearly NOT a link preview.
+The previous plain Previous/Unlock/Next labels and compact caption are preserved.
 
-Very old installations: delete FUN/handlers/__init__.py, FUN/rich/cards.py,
-and FUN/tests/test_bot3.py. GitHub uploads do not remove obsolete folders.
-Do NOT delete the current flat FUN/handlers.py. Current flat installations
-need only overwrite/add the supplied files.
+## Deploy
+1. Upload ALL files from this ZIP's FUN/ into the repository's FUN/ and redeploy.
+2. No DB reset, new required variable, rescan, or session re-import is needed.
+3. Run /retry_covers, then /cover_status. Existing cached covers can be uploaded
+   without a connected userbot; only missing source images require the userbot.
+4. Catbox links ready > 0 or Telegraph links ready > 0 confirms direct URLs
+   were actually accepted/stored. A cached-image count does not confirm hosting.
+5. Send /start -> Start Watching; normal text cards update in place.
+6. If Catbox also returns HTTP 412 Invalid uploader from Render, there is no
+   valid public URL to preview. Do NOT repeatedly retry 162 uploads or assume
+   a token/format change fixes it. Check the provider/account or use a host
+   that accepts uploads from your network. This release cannot force acceptance.
 
-## Preview-mode tradeoff
-An ordinary link preview has ONE selected image; it is not a native rich
-slideshow or collage. In this release the first prepared cover is used.
-/covermode explains this limitation; old slideshow/collage preferences cannot
-switch the feed back to photo/rich-message uploads. Video covers use their
-prepared JPEG thumbnail. Original delivery videos still come from the database
-channel on Unlock; captions, access gates and scheduled deletion are unchanged.
+All three are public third-party hosts. Running /retry_covers publishes cover
+JPEGs to them, not the full delivery videos. Only upload material you may share,
+and comply with the hosts' policies. Anonymous uploads may not be manageable
+or deletable later; the bot does not guarantee their lifetime or confidentiality.
 
-## Sandbox verification
-Run python -m pytest -q and python test_legacy.py after installing
-requirements-test.txt. test_link_previews.py checks real PTB request serialization,
-no multipart file upload, no rich/photo/edit methods, send-before-delete order,
-failed-send safety, rapid duplicate taps, stable cached URLs, 162 cached covers,
-and real ASGI HTML/image routes. Network services and MongoDB are simulated.
-Actual Telegram rendering and end-to-end deployment latency need live checking.
+## Test results
+python -m pytest -q  (after pip install -r requirements-test.txt)
+python test_legacy.py
+TEST_RESULTS.txt contains the exact final sandbox and live-probe results.
+Mocks verify integration logic, not actual third-party acceptance or Telegram
+client rendering. No production DB, account session or user media was used.
 
-Official API reference:
+References:
+https://catbox.moe/tools.php
+https://telegra.ph/api
 https://core.telegram.org/bots/api#linkpreviewoptions
-https://core.telegram.org/bots/api#sendmessage
 
 ## v1.1.1: simple owner-chat userbot setup
 Send /setup_userbot in YOUR private bot chat. The bot asks for:
@@ -250,7 +263,7 @@ rendering, real Atlas latency, real userbot login success, endpoint uptime,
 or sponsor-provider completion. No production credentials were used.
 
 ## Existing scope limitations, not hidden by this repair
-This repair fixes menus, onboarding, source scanning and referral sharing.
+This release changes cover hosting and preview integration; unrelated limitations remain.
 The old release incorrectly described every feature as fully wired:
 - The pipeline has regression tests for 162 cached/no-hosted-URL rows and real
   PTB callback binding/request serialization, not just permissive fake q.bot
