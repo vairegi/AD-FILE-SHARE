@@ -1,82 +1,28 @@
-FUN v1.5.0 — direct-file upload adapters, 2026-10-18
+FUN Bot 3 v1.7.0 — Pruned Multi-Host Uploader
+=============================================
+2026-10-18 — sandbox verification (no live network in tests)
 
-FINAL OFFLINE TEST RUN
-........................................................................ [ 31%]
-........................................................................ [ 63%]
-........................................................................ [ 94%]
-............                                                             [100%]
-228 passed in 2.04s
+- pytest -q:                221 passed
+- test_legacy.py:           55/55 checks passed
+- compileall:               OK
 
-SEPARATE LEGACY RUNNER (overlapping features, not extra independent tests)
-PASS - classifier: 3 collections
-PASS - classifier: cover1 title is first caption line
-PASS - classifier: cover1 has 3 delivery files (short-caption photo is delivery)
-PASS - classifier: cover1 excludes cover msg 10
-PASS - classifier: 20s video with long caption IS a cover
-PASS - classifier: captionless 9s video is NOT a cover
-PASS - classifier: album grouped as one cover unit
-PASS - classifier: orphan files held as pending
-PASS - classifier: captionless long video NOT cover (duration never decides)
-PASS - classifier: 2-line caption NOT cover
-PASS - classifier: 3-line caption IS cover
-PASS - start: welcome tokens = 5
-PASS - start: cute welcome text
-PASS - start: post-credit balance shown in card
-PASS - start: no double welcome on repeat /start
-PASS - referral: friend gets 8 (5+3)
-PASS - referral: pending record created
-PASS - referral: inviter not paid before qualification
-PASS - referral: inviter +5 after qualification
-PASS - referral: inviter notified
-PASS - referral: never double-credits
-PASS - referral: self-referral ignored
-PASS - checkin: complete text
-PASS - checkin: base +3
-PASS - checkin: balance 3
-PASS - checkin: streak 1 + next bonus in 4
-PASS - checkin: same-day repeat shows cooldown
-PASS - checkin: no double credit
-PASS - unlock: non-member blocked with join card
-PASS - unlock: blocked user not charged
-PASS - unlock: charged exactly 2
-PASS - unlock: 3 files copied server-side
-PASS - unlock: completion card sent
-PASS - unlock: delivered count is actual (3)
-PASS - unlock: vaulted
-PASS - unlock: double-tap no double charge
-PASS - restream: free (balance unchanged)
-PASS - unlock: insufficient balance card
-PASS - unlock: no vault entry when unpaid
-PASS - unlock: zero-delivery full refund
-PASS - unlock: refund card shown
-PASS - deletion: expired files deleted
-PASS - deletion: status marked done
-PASS - task: first credit ok
-PASS - task: 24h cooldown blocks repeat
-PASS - task: cooldown no double credit
-PASS - task: valid signature -> cooldown (already ran)
-PASS - task: bad signature rejected
-PASS - task: expired signature rejected
-PASS - task: unknown task rejected
-PASS - covers: telegraph failure -> graph.org fallback ok
-PASS - covers: both mirror hosts down -> external hosting failed (cached Render previews handled separately)
-PASS - save: bookmark added
-PASS - save: cute confirm
-PASS - save: second tap removes bookmark
+v1.7 changes (from live /test_hosts probe 2026-10-18):
+- REMOVED 0x0.st        (HTTP 503 — site disabled uploads, "AI botnet spam")
+- REMOVED imgbb         (ImgBB ToS bans obscene/adult content)
+- REMOVED cloudflare-r2, backblaze-b2 (unused, owner-carried ToS risk)
+- KEPT catbox.moe       PRIMARY — permanent links; needs CATBOX_USERHASH on
+                        Render's network (anonymous returns HTTP 412)
+- KEPT telegra.ph/graph.org fallbacks (permanent links if restriction lifts)
+- KEPT litterbox        EMERGENCY only — links EXPIRE (LITTERBOX_TTL, 72h
+                        default); never auto-selected as preferred host
+- KEPT bunny.net        needs BUNNY_* env vars; adult content explicitly
+                        allowed per https://bunny.net/acceptable-use/
+- FIXED userhash masking bug: blind string replace corrupted success URLs
+  when the hash was a substring of "https" (now word-boundary regex)
+- FIXED /test_hosts report: parse_mode=HTML (no more raw <code> tags)
+- FIXED auto-select: only permanent-link hosts can win automatically
+- cover_jobs/covers: 'rate_limited' status restored so pending covers are
+  retried by /retry_covers instead of being marked failed
 
-55/55 checks passed
-
-Compileall: passed.
-
-LIVE BENIGN JPEG UPLOAD PROBES (no user images/credentials)
-{"host": "Telegraph", "status": 400, "response": "\"Unknown error\""}
-{"host": "Graph", "status": 400, "response": "\"Unknown error\""}
-{"host": "Catbox", "status": 412, "response": "Invalid uploader"}
-
-A separate requests-based Catbox probe also returned HTTP 412 Invalid uploader.
-No hosted image URL was obtained, so no live direct-image GET/Telegram preview was verified.
-No production database was read/written. No deployment was performed.
-
-Test migration: old Render-hosted-preview tests and account/token auto-creation
-assertions were replaced with explicit no-Render/no-account/Catbox integration checks.
-The original scanner, economy, delivery and userbot regressions remain.
+Deploy: overwrite FUN/ files, set CATBOX_USERHASH in Render env, redeploy,
+then /test_hosts → /retry_covers → /cover_status → /start.

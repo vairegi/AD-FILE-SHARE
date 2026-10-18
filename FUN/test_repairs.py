@@ -707,8 +707,13 @@ async def test_cover_host_primary_fallback_and_preparation():
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
         async def post(self, url, files=None, timeout=None, **kw):
+            # v1.7 order: catbox first (rejected anonymously), then telegra.ph
+            # fails, so graph.org mirror wins.
+            if "catbox.moe" in url or "litterbox" in url:
+                return NS(status_code=412, text="Invalid uploader")
             if "telegra.ph" in url: raise RuntimeError("down")
-            return NS(status_code=200, json=lambda: [{"src": "/file/g.jpg"}])
+            return NS(status_code=200, text="",
+                      json=lambda: [{"src": "/file/g.jpg"}])
         async def head(self, url, **kw):
             return NS(status_code=200, headers={"content-type": "image/jpeg"})
     async with MirrorHTTP() as http:

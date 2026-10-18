@@ -302,8 +302,12 @@ async def test_covers_fallback():
 
     class FailPrimaryClient:
         def __init__(self): self.calls = []
-        async def post(self, url, files=None, timeout=None):
+        async def post(self, url, files=None, timeout=None, **kw):
             self.calls.append(url)
+            # v1.7 order: catbox tried first (rejected anonymously), then
+            # telegra.ph fails, so the graph.org mirror wins.
+            if "catbox.moe" in url or "litterbox" in url:
+                return Resp(412)
             if "telegra.ph" in url: raise RuntimeError("down")
             return Resp(200, [{"src": "/file/abc.jpg"}])
         async def head(self, url, timeout=None, follow_redirects=None):
@@ -315,8 +319,8 @@ async def test_covers_fallback():
           and r["url"] == "https://graph.org/file/abc.jpg")
 
     class AllFailClient:
-        async def post(self, url, files=None, timeout=None): raise RuntimeError("down")
-        async def head(self, url, timeout=None, follow_redirects=None): raise RuntimeError("down")
+        async def post(self, url, files=None, timeout=None, **kw): raise RuntimeError("down")
+        async def head(self, url, timeout=None, follow_redirects=None, **kw): raise RuntimeError("down")
 
     r2 = await covers.host_cover(AllFailClient(), b"jpeg-bytes")
     check("covers: both mirror hosts down -> external hosting failed (cached Render previews handled separately)",

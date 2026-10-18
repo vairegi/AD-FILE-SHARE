@@ -1,27 +1,13 @@
-"""Tests for the pluggable multi-host uploader (cover_hosts.py).
+"""Tests for the pluggable multi-host uploader (cover_hosts.py) — v1.7 set.
 
-These tests do NOT touch the network — every adapter is verified against a
-mock httpx.AsyncClient whose post/put methods return canned responses.
+No network access: every adapter is verified against a mock httpx client with
+canned responses matching the live-probe results from 2026-10-18.
 """
-
-import base64
 import io
 import os
 import pytest
 
 import cover_hosts as ch
-from cover_hosts import (
-    post_image,
-    test_all,
-    upload,
-    LEGAL_ADULT_STATUS,
-    valid_direct_url,
-)
-
-
-def test_all_unused():
-    # silence the "imported but unused" warning; this assignment documents intent
-    return (post_image, test_all, upload, LEGAL_ADULT_STATUS, valid_direct_url)
 
 
 def _jpeg_bytes() -> bytes:
@@ -31,268 +17,216 @@ def _jpeg_bytes() -> bytes:
         Image.new("RGB", (40, 40), (10, 20, 30)).save(buf, "JPEG", quality=70)
         return buf.getvalue()
     except Exception:
-        # Minimal placeholder JPEG bytes
         return b"\xff\xd8\xff\xe0" + b"\x00" * 32 + b"\xff\xd9"
 
 
-# ─── url validator ────────────────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _clean(monkeypatch):
+    ch._blocked.clear()
+    for k in ("CATBOX_USERHASH", "BUNNY_STORAGE_ZONE", "BUNNY_API_KEY",
+              "BUNNY_PULL_ZONE_URL", "LITTERBOX_TTL"):
+        monkeypatch.delenv(k, raising=False)
+    yield
+    ch._blocked.clear()
+
+
 class TestValidUrl:
     def test_accepts_https_no_query(self):
-        assert valid_direct_url("https://telegra.ph/file/abcd1234.jpg")
-    def test_rejects_http(self):
-        assert not valid_direct_url("http://telegra.ph/file/abcd1234.jpg")
-    def test_rejects_query(self):
-        assert not valid_direct_url("https://telegra.ph/file/abcd1234.jpg?x=1")
-    def test_rejects_userinfo(self):
-        assert not valid_direct_url("https://user:pass@telegra.ph/file/x.jpg")
-    def test_rejects_fragment(self):
-        assert not valid_direct_url("https://telegra.ph/file/abcd1234.jpg#frag")
-    def test_rejects_garbage(self):
-        assert not valid_direct_url("not a url")
-        assert not valid_direct_url(None)
-        assert not valid_direct_url("")
+        assert ch.valid_direct_url("https://telegra.ph/file/abcd1234.jpg")
+
+    def test_rejects_http_query_fragment_userinfo(self):
+        assert not ch.valid_direct_url("http://telegra.ph/file/x.jpg")
+        assert not ch.valid_direct_url("https://telegra.ph/file/x.jpg?q=1")
+        assert not ch.valid_direct_url("https://telegra.ph/file/x.jpg#f")
+        assert not ch.valid_direct_url("https://u:p@telegra.ph/file/x.jpg")
+        assert not ch.valid_direct_url("")
+        assert not ch.valid_direct_url(None)
 
 
-# ─── test_all() with a single recording client ─────────────────────────────
+class _Resp:
+    def __init__(self, status, text="", json_obj=None, headers=None):
+        self.status_code = status
+        self.text = text
+        self._json = json_obj
+        self.headers = headers or {}
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("not json")
+        return self._json
+
+
 class _Recording:
-    def __init__(self, route_table):
-        self._routes = list(route_table)
+    def __init__(self, routes):
+        self._routes = list(routes)
         self.calls = []
 
     async def post(self, url, **kw):
-        from unittest.mock import AsyncMock
         self.calls.append(("post", url, kw))
-        # Walk routes until one matches url prefix
-        for prefix, response in self._routes:
+        for prefix, resp in self._routes:
             if url.startswith(prefix):
-                return response
-        raise AssertionError(f"unexpected POST to {url}")
+                return resp
+        raise AssertionError(f"unexpected POST {url}")
 
     async def put(self, url, **kw):
         self.calls.append(("put", url, kw))
-        for prefix, response in self._routes:
+        for prefix, resp in self._routes:
             if url.startswith(prefix):
-                return response
-        raise AssertionError(f"unexpected PUT to {url}")
+                return resp
+        raise AssertionError(f"unexpected PUT {url}")
 
 
-def _json_resp(status, body, ctype="application/json", headers=None):
-    class _Resp:
-        def __init__(self):
-            self.status_code = status
-            self.text = (
-                '"OK error"' if ctype == "application/json" and isinstance(body, str)
-                else (body if isinstance(body, str) else str(body))
-            )
-            try:
-                import json as _json
-                self._json_obj = _json.loads(body) if isinstance(body, str) and ctype.startswith("application/json") else None
-            except Exception:
-                self._json_obj = None
-            self.headers = headers or {}
-
-        def json(self):
-            if self._json_obj is None:
-                import json as _json
-                self._json_obj = _json.loads(self.text)
-            return self._json_obj
-    return _Resp()
-
-
-def _txt_resp(status, body, headers=None):
-    class _Resp:
-        def __init__(self):
-            self.status_code = status
-            self.text = body
-            self._json_obj = None
-            self.headers = headers or {}
-        def json(self):
-            raise ValueError("not json")
-    return _Resp()
-
-
-# ─── each adapter's success path ──────────────────────────────────────────
+# ─── adapter success paths ────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_telegraph_ok():
-    ch._blocked.clear()
-    client = _Recording([
-        ("https://telegra.ph",
-         _json_resp(200, '[{"src":"/file/abcdef0123abcdef0123abcd.jpg"}]')),
-    ])
-    url = await post_image(client, "telegra.ph", _jpeg_bytes())
-    assert url == "https://telegra.ph/file/abcdef0123abcdef0123abcd.jpg"
+    client = _Recording([("https://telegra.ph",
+        _Resp(200, json_obj=[{"src": "/file/abcdef0123.jpg"}]))])
+    url = await ch.post_image(client, "telegra.ph", _jpeg_bytes())
+    assert url == "https://telegra.ph/file/abcdef0123.jpg"
 
 
 @pytest.mark.asyncio
 async def test_graph_ok():
-    ch._blocked.clear()
-    client = _Recording([
-        ("https://graph.org",
-         _json_resp(200, '[{"src":"/file/abcdef0123abcdef0123abcd.jpg"}]')),
-    ])
-    url = await post_image(client, "graph.org", _jpeg_bytes())
-    assert url == "https://graph.org/file/abcdef0123abcdef0123abcd.jpg"
+    client = _Recording([("https://graph.org",
+        _Resp(200, json_obj=[{"src": "/file/abcdef0123.jpg"}]))])
+    url = await ch.post_image(client, "graph.org", _jpeg_bytes())
+    assert url == "https://graph.org/file/abcdef0123.jpg"
 
 
 @pytest.mark.asyncio
-async def test_catbox_ok_with_userhash():
-    ch._blocked.clear()
-    os.environ["CATBOX_USERHASH"] = "secret-hash"
+async def test_telegraph_400_blocked_then_graph_fallback():
     client = _Recording([
-        ("https://catbox.moe",
-         _txt_resp(200, "https://files.catbox.moe/abc.jpg")),
+        ("https://telegra.ph", _Resp(400, '"Unknown error"')),
+        ("https://graph.org", _Resp(200, json_obj=[{"src": "/file/zz.jpg"}])),
     ])
-    url = await post_image(client, "catbox.moe", _jpeg_bytes())
+    res = await ch.upload(client, _jpeg_bytes(), preferred="telegra.ph")
+    assert res["status"] == "ok" and res["host"] == "graph.org"
+
+
+@pytest.mark.asyncio
+async def test_catbox_with_userhash_ok():
+    os.environ["CATBOX_USERHASH"] = "hash123"
+    client = _Recording([("https://catbox.moe",
+        _Resp(200, "https://files.catbox.moe/abc.jpg"))])
+    url = await ch.post_image(client, "catbox.moe", _jpeg_bytes())
     assert url == "https://files.catbox.moe/abc.jpg"
+    # userhash actually sent
+    _, _, kw = client.calls[0]
+    assert kw["data"]["userhash"] == "hash123"
 
 
 @pytest.mark.asyncio
-async def test_catbox_anonymous_412_marks_needs_creds():
-    ch._blocked.clear()
-    os.environ.pop("CATBOX_USERHASH", None)
-    client = _Recording([
-        ("https://catbox.moe",
-         _txt_resp(412, "Invalid uploader", headers={"Content-Type": "text/html"})),
-    ])
+async def test_catbox_412_marks_needs_creds_and_sanitizes():
+    client = _Recording([("https://catbox.moe",
+        _Resp(412, "Invalid uploader"))])
     with pytest.raises(ch.HostFailure) as ei:
-        await post_image(client, "catbox.moe", _jpeg_bytes())
+        await ch.post_image(client, "catbox.moe", _jpeg_bytes())
     assert ei.value.needs_creds is True
-    assert "Invalid uploader" in ei.value.diagnostic
+    assert "CATBOX_USERHASH" in ei.value.diagnostic
 
 
 @pytest.mark.asyncio
-async def test_litterbox_ok():
-    ch._blocked.clear()
-    client = _Recording([
-        ("https://litterbox.catbox.moe",
-         _txt_resp(200, "https://litter.catbox.moe/abc123.jpg")),
-    ])
-    url = await post_image(client, "litterbox", _jpeg_bytes())
-    assert url == "https://litter.catbox.moe/abc123.jpg"
+async def test_litterbox_ok_and_default_ttl_72h():
+    client = _Recording([("https://litterbox.catbox.moe",
+        _Resp(200, "https://litter.catbox.moe/xyz.jpg"))])
+    url = await ch.post_image(client, "litterbox", _jpeg_bytes())
+    assert url == "https://litter.catbox.moe/xyz.jpg"
+    _, _, kw = client.calls[0]
+    assert kw["data"]["time"] == "72h"
 
 
 @pytest.mark.asyncio
-async def test_0x0_ok():
-    ch._blocked.clear()
-    client = _Recording([
-        ("https://0x0.st",
-         _txt_resp(200, "https://0x0.st/abc.jpg")),
-    ])
-    url = await post_image(client, "0x0.st", _jpeg_bytes())
-    assert url == "https://0x0.st/abc.jpg"
+async def test_litterbox_marks_temporary_in_upload_result():
+    client = _Recording([("https://litterbox.catbox.moe",
+        _Resp(200, "https://litter.catbox.moe/xyz.jpg"))])
+    res = await ch.upload(client, _jpeg_bytes(), preferred="litterbox")
+    assert res["status"] == "ok" and res["host"] == "litterbox"
+    assert "expires" in (res.get("warning") or "")
 
 
 @pytest.mark.asyncio
-async def test_imgbb_needs_key():
-    ch._blocked.clear()
-    os.environ.pop("IMGBB_API_KEY", None)
-    client = _Recording([])
+async def test_bunny_needs_creds():
     with pytest.raises(ch.HostFailure) as ei:
-        await post_image(client, "imgbb", _jpeg_bytes())
+        await ch.post_image(_Recording([]), "bunny.net", _jpeg_bytes())
     assert ei.value.needs_creds is True
 
 
 @pytest.mark.asyncio
-async def test_bunny_needs_all_creds():
-    ch._blocked.clear()
-    for k in ("BUNNY_STORAGE_ZONE", "BUNNY_API_KEY", "BUNNY_PULL_ZONE_URL"):
-        os.environ.pop(k, None)
-    client = _Recording([])
-    with pytest.raises(ch.HostFailure) as ei:
-        await post_image(client, "bunny.net", _jpeg_bytes())
-    assert ei.value.needs_creds is True
+async def test_removed_hosts_rejected():
+    for host in ("0x0.st", "imgbb", "cloudflare-r2", "backblaze-b2"):
+        with pytest.raises(ch.HostFailure) as ei:
+            await ch.post_image(_Recording([]), host, _jpeg_bytes())
+        assert "removed" in ei.value.diagnostic
 
 
-# ─── upload() ordering ────────────────────────────────────────────────────
+# ─── ordering / fallback ──────────────────────────────────────────────────
 @pytest.mark.asyncio
-async def test_upload_honors_preferred_when_ok():
-    ch._blocked.clear()
-    client = _Recording([
-        ("https://0x0.st", _txt_resp(200, "https://0x0.st/abc.jpg")),
-    ])
-    res = await upload(client, _jpeg_bytes(), preferred="0x0.st")
-    assert res["status"] == "ok"
-    assert res["host"] == "0x0.st"
+async def test_upload_prefers_catbox_by_default():
+    client = _Recording([("https://catbox.moe",
+        _Resp(200, "https://files.catbox.moe/first.jpg"))])
+    os.environ["CATBOX_USERHASH"] = "h"
+    res = await ch.upload(client, _jpeg_bytes())
+    assert res["host"] == "catbox.moe"
 
 
 @pytest.mark.asyncio
-async def test_upload_falls_back_when_preferred_fails():
-    ch._blocked.clear()
-    os.environ.pop("CATBOX_USERHASH", None)
-    client = _Recording([
-        ("https://catbox.moe", _txt_resp(412, "Invalid uploader")),
-        ("https://litterbox.catbox.moe", _txt_resp(200, "https://litter.catbox.moe/abc.jpg")),
-    ])
-    res = await upload(client, _jpeg_bytes(), preferred="catbox.moe")
-    assert res["status"] == "ok"
-    assert res["host"] == "litterbox"
-
-
-@pytest.mark.asyncio
-async def test_upload_marks_failed_when_all_fail():
-    ch._blocked.clear()
-    os.environ.pop("CATBOX_USERHASH", None)
-    client = _Recording([
-        ("https://telegra.ph", _json_resp(400, '"Unknown error"')),
-        ("https://graph.org", _json_resp(400, '"Unknown error"')),
-        ("https://catbox.moe", _txt_resp(412, "Invalid uploader")),
-        ("https://litterbox.catbox.moe", _txt_resp(500, "Internal")),
-        ("https://0x0.st", _txt_resp(502, "Bad Gateway")),
-    ])
-    res = await upload(client, _jpeg_bytes())
-    assert res["status"] == "failed"
-    assert res["url"] is None
-
-
-# ─── test_all() runs every adapter exactly once ───────────────────────────
-@pytest.mark.asyncio
-async def test_test_all_runs_every_host():
-    ch._blocked.clear()
-    os.environ.pop("CATBOX_USERHASH", None)
-    for k in (
-        "IMGBB_API_KEY", "BUNNY_STORAGE_ZONE", "BUNNY_API_KEY",
-        "BUNNY_PULL_ZONE_URL",
-    ):
-        os.environ.pop(k, None)
-
+async def test_upload_all_fail_reports_errors():
     routes = [
-        ("https://telegra.ph", _json_resp(400, '"Unknown error"')),
-        ("https://graph.org", _json_resp(400, '"Unknown error"')),
-        ("https://catbox.moe", _txt_resp(412, "Invalid uploader")),
-        ("https://litterbox.catbox.moe", _txt_resp(200, "https://litter.catbox.moe/abc.jpg")),
-        ("https://0x0.st", _txt_resp(200, "https://0x0.st/abc.jpg")),
-        # imgbb / bunny / cloudflare-r2 / backblaze-b2 all need creds
+        ("https://catbox.moe", _Resp(412, "Invalid uploader")),
+        ("https://telegra.ph", _Resp(400, '"Unknown error"')),
+        ("https://graph.org", _Resp(400, '"Unknown error"')),
+        ("https://litterbox.catbox.moe", _Resp(500, "boom")),
     ]
     client = _Recording(routes)
-    report = await test_all(client, _jpeg_bytes())
-    by_host = {r["host"]: r for r in report}
-    assert set(by_host) == set(ch.HOSTS)
-    assert by_host["litterbox"]["status"] == "ok"
-    assert by_host["litterbox"]["url"].startswith("https://litter.catbox.moe/")
-    assert by_host["0x0.st"]["status"] == "ok"
-    # Catbox anonymous 412 is a "needs creds" status — owner must set
-    # CATBOX_USERHASH in Render. We treat that as a separate status.
-    assert by_host["catbox.moe"]["status"] in ("skipped-needs-creds", "fail")
-    assert by_host["catbox.moe"]["error"]
-    assert by_host["telegra.ph"]["status"] == "fail"
-    assert by_host["imgbb"]["status"] == "skipped-needs-creds"
-    assert by_host["bunny.net"]["status"] == "skipped-needs-creds"
-    assert by_host["cloudflare-r2"]["status"] == "skipped-needs-creds"
-    assert by_host["backblaze-b2"]["status"] == "skipped-needs-creds"
-    # adult-ToS info table
-    assert "BANNED" in ch.LEGAL_ADULT_STATUS["imgbb"]
-    assert "OK" in ch.LEGAL_ADULT_STATUS["bunny.net"]
+    res = await ch.upload(client, _jpeg_bytes())
+    assert res["status"] == "failed" and res["url"] is None
+    assert "catbox.moe" in res["error"] and "telegra.ph" in res["error"]
 
 
-def test_render_report_md_contains_all_hosts():
-    report = [
-        {"host": "telegra.ph", "status": "ok", "url": "https://telegra.ph/file/x.jpg",
-         "elapsed_ms": "312", "legal_adult": "OK", "gating": "anonymous", "error": ""},
-        {"host": "imgbb", "status": "skipped-needs-creds", "url": "",
-         "elapsed_ms": "0", "legal_adult": "BANNED", "gating": "registered", "error": "imgbb: IMGBB_API_KEY missing"},
+@pytest.mark.asyncio
+async def test_circuit_breaker_skips_blocked_host():
+    routes = [("https://telegra.ph", _Resp(429, "Try again later"))]
+    client = _Recording(routes)
+    res1 = await ch.upload(client, _jpeg_bytes(), preferred="telegra.ph")
+    assert res1["status"] == "failed"
+    calls_after_first = len(client.calls)
+    res2 = await ch.upload(client, _jpeg_bytes(), preferred="telegra.ph")
+    assert res2["status"] == "failed"
+    assert len(client.calls) == calls_after_first  # blocked → not retried
+
+
+# ─── test_all() + report ──────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_test_all_covers_exactly_the_pruned_hosts(monkeypatch):
+    routes = [
+        ("https://catbox.moe", _Resp(200, "https://files.catbox.moe/a.jpg")),
+        ("https://telegra.ph", _Resp(400, '"Unknown error"')),
+        ("https://graph.org", _Resp(400, '"Unknown error"')),
+        ("https://litterbox.catbox.moe", _Resp(200, "https://litter.catbox.moe/b.jpg")),
     ]
-    text = ch.render_report_md(report)
-    assert "telegra.ph" in text
-    assert "imgbb" in text
-    assert "ok: 1" in text
-    assert "skipped (no creds): 1" in text
+    os.environ["CATBOX_USERHASH"] = "h"
+    client = _Recording(routes)
+    report = await ch.test_all(client, _jpeg_bytes())
+    by_host = {r["host"]: r for r in report}
+    assert set(by_host) == set(ch.HOSTS)  # exactly the 5 kept hosts
+    assert by_host["catbox.moe"]["status"] == "ok"
+    assert by_host["litterbox"]["status"] == "ok"
+    assert "expires" in by_host["litterbox"]["url"]
+    assert by_host["telegra.ph"]["status"] == "fail"
+    assert by_host["bunny.net"]["status"] == "skipped-needs-creds"
+    # removed hosts are NOT in the probe set
+    assert "0x0.st" not in by_host and "imgbb" not in by_host
+
+
+def test_render_report_html_escapes_and_mentions_removals():
+    report = [
+        {"host": "catbox.moe", "status": "ok", "url": "https://files.catbox.moe/<x>.jpg",
+         "elapsed_ms": "312", "legal_adult": "OK", "error": ""},
+        {"host": "telegra.ph", "status": "fail", "url": "",
+         "elapsed_ms": "99", "legal_adult": "OK", "error": 'HTTP 400; <b>"Unknown"</b>'},
+    ]
+    text = ch.render_report_html(report)
+    assert "catbox.moe" in text and "telegra.ph" in text
+    assert "&lt;b&gt;" in text  # error text escaped — safe for parse_mode=HTML
+    assert "0x0.st" in text and "imgbb" in text  # removal reasons listed
+    assert "ok: 1" in text and "fail: 1" in text

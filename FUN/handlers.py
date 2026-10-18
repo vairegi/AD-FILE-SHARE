@@ -772,29 +772,55 @@ async def cmd_test_hosts(update, context):
     import httpx
     async with httpx.AsyncClient() as http:
         report = await cover_hosts.test_all(http, jpeg)
-    text = cover_hosts.render_report_md(report)
+    text = cover_hosts.render_report_html(report)
+    # Never auto-select litterbox: its links expire (LITTERBOX_TTL). Only
+    # hosts with permanent links may become the preferred host automatically.
+    PERMANENT = ("catbox.moe", "telegra.ph", "graph.org", "bunny.net")
     ok_hosts = [r["host"] for r in report if r["status"] == "ok"]
-    if len(ok_hosts) == 1:
-        await db.update_settings({"preferred_host": ok_hosts[0]})
-        text += f"\n\n🎀 Single winner → set as preferred host: <code>{ok_hosts[0]}</code>"
-    elif len(ok_hosts) > 1:
-        buttons = [InlineKeyboardButton(r["host"], callback_data=f"hosts:pick:{r['host']}")
-                   for r in report if r["status"] == "ok"]
+    permanent_winners = [h for h in ok_hosts if h in PERMANENT]
+    if len(permanent_winners) == 1:
+        await db.update_settings({"preferred_host": permanent_winners[0]})
+        text += (f"\n\n🎀 Single permanent-link winner → preferred host: "
+                 f"<code>{permanent_winners[0]}</code>")
+        if "litterbox" in ok_hosts:
+            text += ("\n⚠️ litterbox also passed but its links EXPIRE — "
+                     "kept as emergency fallback only.")
+        try:
+            await status_msg.edit_text(text[:4000], parse_mode="HTML",
+                                       disable_web_page_preview=True)
+        except Exception:
+            await update.message.reply_text(text[:4000], parse_mode="HTML",
+                                            disable_web_page_preview=True)
+        return
+    elif len(permanent_winners) > 1:
+        buttons = [InlineKeyboardButton(h, callback_data=f"hosts:pick:{h}")
+                   for h in permanent_winners]
         from telegram import InlineKeyboardMarkup as _IKM
         reply_markup = _IKM([buttons[i:i+3] for i in range(0, len(buttons), 3)])
+        text += "\n\n🎀 Multiple hosts passed — tap one to set it as preferred:"
         try:
-            await status_msg.edit_text(text[:3500], reply_markup=reply_markup, disable_web_page_preview=True)
+            await status_msg.edit_text(text[:3800], parse_mode="HTML",
+                                       reply_markup=reply_markup,
+                                       disable_web_page_preview=True)
             return
         except Exception:
-            await update.message.reply_text(text[:3500], reply_markup=reply_markup,
+            await update.message.reply_text(text[:3800], parse_mode="HTML",
+                                            reply_markup=reply_markup,
                                             disable_web_page_preview=True)
             return
+    elif ok_hosts == ["litterbox"]:
+        text += ("\n\n⚠️ Only litterbox passed — its links EXPIRE after "
+                 "LITTERBOX_TTL, so it was NOT set as preferred. Set "
+                 "CATBOX_USERHASH in Render, then /test_hosts again. "
+                 "You may still force it temporarily: /select_host litterbox")
     else:
-        text += "\n\n⚠️ No host worked. Check credentials & network, fix any skipped hosts, run /test_hosts again."
+        text += "\n\n⚠️ No host worked. Check credentials & network, then /test_hosts again."
     try:
-        await status_msg.edit_text(text[:4000], disable_web_page_preview=True)
+        await status_msg.edit_text(text[:4000], parse_mode="HTML",
+                                   disable_web_page_preview=True)
     except Exception:
-        await update.message.reply_text(text[:4000], disable_web_page_preview=True)
+        await update.message.reply_text(text[:4000], parse_mode="HTML",
+                                        disable_web_page_preview=True)
 
 
 async def cmd_select_host(update, context):
@@ -808,23 +834,55 @@ async def cmd_select_host(update, context):
             "🎀 /select_host usage:\n"
             f"Current preferred: <code>{preferred}</code>\n"
             "• <code>/select_host auto</code> — auto-fallback using committed order\n"
-            "• <code>/select_host litterbox</code> — force a single host\n"
-            "Allowed: telegra.ph, graph.org, catbox.moe, litterbox, 0x0.st, "
-            "imgbb, bunny.net, cloudflare-r2, backblaze-b2, auto.")
+            "• <code>/select_host catbox.moe</code> — permanent links (needs CATBOX_USERHASH)\n"
+            "Allowed: catbox.moe, telegra.ph, graph.org, litterbox, bunny.net, auto.\n"
+            "Removed: 0x0.st (site disabled uploads), imgbb (ToS bans adult), "
+            "cloudflare-r2 / backblaze-b2 (unused).",
+            parse_mode="HTML")
         return
     if arg == "auto":
         await db.update_settings({"preferred_host": None})
         await update.message.reply_text("🎀 Upload order reset to AUTO (DEFAULT_ORDER until first OK).")
         return
-    if arg not in cover_hosts.HOSTS:
-        await update.message.reply_text(f"❌ Unknown host. Allowed: {', '.join(cover_hosts.HOSTS)}, auto.")
+    if arg in cover_hosts.REMOVED_HOSTS:
+        await update.message.reply_text(
+            f"❌ {arg} was removed: {cover_hosts.REMOVED_HOSTS[arg]}")
         return
+    if arg not in cover_hosts.HOSTS:
+        await update.message.reply_text(
+            f"❌ Unknown host. Allowed: {', '.join(cover_hosts.HOSTS)}, auto.")
+        return
+    if arg == "litterbox":
+        await update.message.reply_text(
+            "⚠️ litterbox links EXPIRE after LITTERBOX_TTL — feed cards will go "
+            "blank when they die. Use only as a temporary emergency host.")
     await db.update_settings({"preferred_host": arg})
     adult = cover_hosts.LEGAL_ADULT_STATUS.get(arg, "USER-RESPONSIBLE")
     await update.message.reply_text(
         f"🎀 Preferred host set to <code>{arg}</code>.\n"
         f"Adult-content status: <code>{adult}</code>\n"
-        "Future uploads use this host first; failures still fall back to AUTO order.")
+        "Future uploads use this host first; failures still fall back to AUTO order.",
+        parse_mode="HTML")
+
+
+async def cmd_select_host_inline(q, host):
+    """Inline-button host picker used by /test_hosts results."""
+    if host == "litterbox":
+        await q.answer("⚠️ litterbox links expire — emergency only", show_alert=True)
+        return
+    if host not in cover_hosts.HOSTS or host in cover_hosts.REMOVED_HOSTS:
+        await q.answer("Invalid host", show_alert=True)
+        return
+    await db.update_settings({"preferred_host": host})
+    await q.answer(f"✅ Preferred host: {host}")
+    try:
+        await q.edit_message_text(
+            f"🎀 Preferred host locked: <code>{host}</code>\n"
+            f"Adult-content status: <code>{cover_hosts.LEGAL_ADULT_STATUS.get(host, '?')}</code>\n"
+            "Run /retry_covers to prepare all pending covers with this host.",
+            parse_mode="HTML")
+    except Exception:
+        pass
 
 
 async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):

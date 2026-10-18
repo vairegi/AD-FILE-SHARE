@@ -25,7 +25,9 @@ async def isolated(monkeypatch):
 
 
 class FakeHTTP:
-    """telegra.ph works, returns hosted image."""
+    """Multi-host aware mock (v1.7 order: catbox first): catbox rejected
+    anonymously (412), telegraph family works and returns a hosted image.
+    primary_fails=True makes telegra.ph fail so graph.org is used."""
     def __init__(self, primary_fails=False):
         self.primary_fails = primary_fails
         self.posted = []
@@ -33,10 +35,13 @@ class FakeHTTP:
     async def __aexit__(self, *a): return False
     async def post(self, url, files=None, timeout=None, **kw):
         self.posted.append(url)
+        if "catbox.moe" in url or "litterbox" in url:
+            return NS(status_code=412, text="Invalid uploader")
         if self.primary_fails and "telegra.ph" in url:
             raise RuntimeError("down")
         host = "graph.org" if "graph.org" in url else "telegra.ph"
-        return NS(status_code=200, json=lambda: [{"src": "/file/cover.jpg"}])
+        return NS(status_code=200, text="",
+                  json=lambda: [{"src": "/file/cover.jpg"}])
     async def head(self, url, timeout=None, follow_redirects=None):
         return NS(status_code=200, headers={"content-type": "image/jpeg"})
 
@@ -123,11 +128,15 @@ async def test_rescan_does_not_reupload_cached_cover(monkeypatch):
     client = ScanClient(posts)
     await scanner.scan_channel(client, -100, "movies")
     posts.append(source_message(12))
-    before = len(fake.posted)
+    # v1.7 order: catbox is tried (412 anonymous) before telegraph succeeds,
+    # so the invariant is "exactly one SUCCESSFUL telegraph upload", not the
+    # raw post count.
+    before_telegraph = sum(1 for u in fake.posted if "telegra.ph" in u)
     downloads=len(client.downloads)
-    assert before==1 and downloads==1
+    assert before_telegraph==1 and downloads==1
+    before_all = len(fake.posted)
     await scanner.scan_channel(client, -100, "movies")
-    assert len(fake.posted) == before  # cached — no re-upload for same cover
+    assert len(fake.posted) == before_all  # cached — no re-upload for same cover
     assert len(client.downloads)==downloads
 
 

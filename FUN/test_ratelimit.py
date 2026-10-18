@@ -34,7 +34,9 @@ async def test_try_again_later_detected_as_rate_limited_and_stops():
     http = RateLimitHTTP()
     r = await covers.host_cover(http, jpeg(), token="secret_tok")
     assert r["status"] == "rate_limited"
-    assert http.posts == 3  # try each independent host once, then stop
+    # v1.7 pruned set: catbox + telegraph + graph + litterbox each tried once
+    # (bunny.net skipped — no creds), then stop.
+    assert http.posts == 4
     assert "secret_tok" not in r["error"] and "access_token=[hidden]" not in r["error"]
 
 async def test_http_429_detected():
@@ -53,6 +55,10 @@ async def test_errors_sanitize_tokens():
 async def test_pacing_spaces_uploads(monkeypatch):
     monkeypatch.setattr(covers, "MIN_UPLOAD_INTERVAL", 2.0)
     covers._last_upload_at = 0.0
+    # Single-host order so the count asserts pacing between UPLOADS, not
+    # between adapters of the multi-host chain.
+    import cover_hosts
+    monkeypatch.setattr(cover_hosts, "DEFAULT_ORDER", ("telegra.ph",))
     slept = []
     real_sleep = asyncio.sleep
     async def spy(t): slept.append(t); await real_sleep(0)
@@ -61,7 +67,7 @@ async def test_pacing_spaces_uploads(monkeypatch):
         def __init__(self): self.n = 0
         async def post(self, url, **kw):
             self.n += 1
-            return NS(status_code=200, json=lambda: [{"src": "/file/x.jpg"}])
+            return NS(status_code=200, text="", json=lambda: [{"src": "/file/x.jpg"}])
     h = H()
     await covers.host_cover(h, jpeg()); await covers.host_cover(h, jpeg())
     assert h.n == 2 and len(slept) == 1 and 0 < slept[0] <= covers.MIN_UPLOAD_INTERVAL

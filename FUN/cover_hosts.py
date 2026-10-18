@@ -1,91 +1,81 @@
-"""Async direct-file upload adapters for Bot 3 (FUN).
+"""Async direct-file upload adapters for Bot 3 (FUN) — v1.7 pruned set.
 
-Provides a common upload() interface with one adapter per host, per-host
-circuit breakers, and a /test_hosts + /select_host admin workflow.
+Common upload() interface, one adapter per host, per-host circuit breakers,
+and /test_hosts + /select_host admin workflow.
 
-ToS compliance:
-- Telegraph / Graph.org: anonymous upload, public file URLs. Allowed for
-  legal adult content (image hosting for legal material).
-- Catbox / Litterbox: anonymous OR registered (userhash) uploads. Allowed,
-  per catbox.moe/tools.php. Registered accounts enable higher reliability.
-- 0x0.st: anonymous. Allowed.
-- ImgBB: REQUIRES_IMGBB_API_KEY; ImgBB ToS bans obscene content, so this
-  adapter is OFF by default and only enabled when explicit opt-in is set.
-- Bunny.net: storage + CDN. ToS allows legal adult content (verified via
-  https://bunny.net/acceptable-use/).
-- Cloudflare R2: S3-compatible, public bucket. ToS does not categorically
-  prohibit legal adult content but the user must supply credentials.
-- Backblaze B2: S3-compatible, public bucket.
+Included hosts (live-probed 2026-10-18 from the Render egress IP):
+- catbox.moe  : PERMANENT direct links. Anonymous upload is blocked with
+                HTTP 412 "Invalid uploader" on this network, so a registered
+                CATBOX_USERHASH is required. Adult content allowed per
+                https://catbox.moe/tools.php. PRIMARY host.
+- telegra.ph  : permanent /file/ links; currently HTTP 400 from this egress
+                IP (anonymous /upload restricted). Kept as a fallback in case
+                the restriction lifts. No account rotation — direct only.
+- graph.org   : same endpoint family as telegra.ph, alternate domain.
+- litterbox   : WORKS anonymously, but links EXPIRE (LITTERBOX_TTL, default
+                72h here). Emergency fallback only — never preferred, because
+                dead cover URLs kill the link-preview feed.
+- bunny.net   : storage+CDN, explicitly allows legal adult content
+                (https://bunny.net/acceptable-use/). Needs BUNNY_* creds.
+
+Removed hosts (with reasons, no silent drops):
+- 0x0.st      : HTTP 503 "uploads disabled ... AI botnet spam" — site-wide.
+- imgbb       : ImgBB ToS bans obscene/adult content (https://imgbb.com/tos).
+- cloudflare-r2 / backblaze-b2: unused credential-gated S3 adapters; the
+                owner carries all ToS risk and no creds were ever configured.
 """
 
 from __future__ import annotations
 
 import asyncio
-import html
-import io
+import html as _html
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urljoin, urlsplit
 
-# ─── endpoint table ────────────────────────────────────────────────────────
-# Each adapter either does anonymous upload (no creds), or requires its
-# specific secrets; the test command reports "skipped-needs-creds" rather
-# than failing.
-HOSTS = (
-    "telegra.ph",
-    "graph.org",
-    "catbox.moe",
-    "litterbox",
-    "0x0.st",
-    "imgbb",
-    "bunny.net",
-    "cloudflare-r2",
-    "backblaze-b2",
-)
+HOSTS = ("catbox.moe", "telegra.ph", "graph.org", "litterbox", "bunny.net")
 
-DEFAULT_ORDER = (
-    "litterbox",        # 1-hour temp — fastest reliable anonymous
-    "catbox.moe",       # 412 from anonymous on some networks → userhash helps
-    "telegra.ph",       # rate-limited on shared Render IP, deprecated path
-    "graph.org",        # same as telegra.ph, alt host
-    "0x0.st",           # anonymous, can be slow
-    "imgbb",            # needs IMGBB_API_KEY; ADULT-BANNED by ImgBB ToS
-    "bunny.net",        # needs BUNNY_STORAGE_ZONE + BUNNY_API_KEY; adult-OK
-    "cloudflare-r2",    # needs R2_*; user responsible for ToS
-    "backblaze-b2",     # needs B2_*; user responsible for ToS
-)
+# catbox first (permanent links once CATBOX_USERHASH is set), telegraph family
+# next (permanent if the egress-IP restriction lifts), litterbox LAST (links
+# expire — emergency only), bunny whenever the owner adds creds.
+DEFAULT_ORDER = ("catbox.moe", "telegra.ph", "graph.org", "litterbox", "bunny.net")
 
 LEGAL_ADULT_STATUS = {
-    "telegra.ph":   "OK",
-    "graph.org":    "OK",
-    "catbox.moe":   "OK",
-    "litterbox":    "OK (1-hour temp)",
-    "0x0.st":       "OK",
-    "imgbb":        "BANNED (obscene content prohibited by ImgBB ToS)",
-    "bunny.net":    "OK (verified via https://bunny.net/acceptable-use/)",
-    "cloudflare-r2":"USER-RESPONSIBLE",
-    "backblaze-b2": "USER-RESPONSIBLE",
+    "catbox.moe": "OK (permanent links; needs CATBOX_USERHASH on this network)",
+    "telegra.ph": "OK",
+    "graph.org":  "OK",
+    "litterbox":  "OK but links EXPIRE — emergency fallback only",
+    "bunny.net":  "OK (verified via https://bunny.net/acceptable-use/)",
 }
+
+REMOVED_HOSTS = {
+    "0x0.st":       "removed — site disabled uploads (HTTP 503, 'AI botnet spam')",
+    "imgbb":        "removed — ImgBB ToS bans obscene/adult content",
+    "cloudflare-r2":"removed — unused; owner carries all ToS risk",
+    "backblaze-b2": "removed — unused; owner carries all ToS risk",
+}
+
+CATBOX_ENDPOINT = "https://catbox.moe/user/api.php"
+USER_AGENT = "FUN-Bot3/1.7 (+github.com/vairegi/AD-FILE-SHARE)"
 
 
 def sanitize(value: str) -> str:
     text = str(value)
-    # strip anything that looks like an access_token / api_key
     text = re.sub(
         r'(?i)(access_token|userhash|api[_-]?key)(["\']?\s*[:=]\s*["\']?)[A-Za-z0-9_.\-]+',
-        r"\1\2[hidden]",
-        text,
-    )
-    # trim query strings from URLs in messages
+        r"\1\2[hidden]", text)
     text = re.sub(r"https?://\S+", lambda m: m.group(0).split("?")[0], text)
     text = re.sub(r"\s+", " ", text)
     return text[:480]
 
 
 def valid_direct_url(url: Optional[str]) -> bool:
+    """Strict allowlist: only URLs from hosts this module can produce. Anything
+    else (e.g. old Render /previews/ links) is rejected so it can never be
+    embedded as a feed-card preview again."""
     if not isinstance(url, str) or not url:
         return False
     try:
@@ -94,34 +84,22 @@ def valid_direct_url(url: Optional[str]) -> bool:
         return False
     if p.scheme != "https" or p.username or p.password or p.port not in (None, 443):
         return False
-    if p.query or p.fragment:
+    if p.query or p.fragment or not p.hostname:
         return False
-    return bool(p.hostname and p.path)
-
-
-def _classify_host(host: str) -> str:
-    """Returns '(anonymous | registered | creds)' gating level."""
-    if host in ("telegra.ph", "graph.org", "litterbox", "0x0.st", "catbox.moe", "imgbb"):
-        if host == "imgbb":
-            return "registered"
-        if host == "catbox.moe" and os.environ.get("CATBOX_USERHASH"):
-            return "registered"
-        return "anonymous"
-    return "creds"
+    host, path = p.hostname, p.path
+    if host in ("telegra.ph", "graph.org"):
+        return path.startswith("/file/") and len(path) > 6 and ".." not in path
+    if host in ("files.catbox.moe", "litter.catbox.moe"):
+        return bool(re.fullmatch(r"/[A-Za-z0-9_\-]+\.(jpg|jpeg|png|gif|webp)", path, re.I))
+    if host.endswith(".b-cdn.net"):  # bunny.net pull zone
+        return path.startswith("/fun-bot3/") and path.lower().endswith(".jpg")
+    return False
 
 
 class HostFailure(Exception):
-    def __init__(
-        self,
-        host: str,
-        diagnostic: str,
-        *,
-        transient: bool = False,
-        retry_after: int = 120,
-        block: bool = False,
-        limited: bool = False,
-        needs_creds: bool = False,
-    ):
+    def __init__(self, host: str, diagnostic: str, *, transient: bool = False,
+                 retry_after: int = 120, block: bool = False, limited: bool = False,
+                 needs_creds: bool = False):
         self.host = host
         self.diagnostic = sanitize(f"{host}: {diagnostic}")
         self.transient = transient
@@ -132,7 +110,6 @@ class HostFailure(Exception):
         super().__init__(self.diagnostic)
 
 
-# ─── per-host adapter state ───────────────────────────────────────────────
 @dataclass
 class _State:
     until: float = 0.0
@@ -147,136 +124,135 @@ _blocked: Dict[str, _State] = {}
 
 def diagnostics() -> Dict[str, str]:
     now = time.monotonic()
-    out = {}
-    for host, st in _blocked.items():
-        if st.until > now:
-            out[host] = f"{st.diagnostic} (cooldown {max(0, int(st.until - now))}s)"
-    return out
+    return {host: f"{st.diagnostic} (cooldown {max(0, int(st.until - now))}s)"
+            for host, st in _blocked.items() if st.until > now}
 
 
 def unblock(host: str) -> None:
     _blocked.pop(host, None)
 
 
-# ─── per-adapter upload implementations ───────────────────────────────────
-async def _post_telegraph(client, image: bytes, kind: str, _token: str = "") -> str:
-    endpoint = "https://telegra.ph/upload" if kind == "telegra.ph" else "https://graph.org/upload"
-    headers = {"User-Agent": "FUN-Bot3/1.6 (+github.com/vairegi/AD-FILE-SHARE)"}
-    resp = await client.post(endpoint, files={"file": ("cover.jpg", image, "image/jpeg")}, headers=headers, timeout=30)
-    if resp.status_code in (429,) or "try again later" in resp.text.lower():
-        raise HostFailure(kind, f"HTTP {resp.status_code}; {resp.text[:200]}", transient=True, retry_after=180, block=True, limited=True)
-    if resp.status_code != 200:
-        raise HostFailure(kind, f"HTTP {resp.status_code}; {resp.text[:200]}", block=True)
+def _resp_text(response) -> str:
+    try:
+        return str(response.text)
+    except Exception:
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                return str(payload.get("error", payload))
+            return str(payload)
+        except Exception:
+            return "unreadable response"
+
+
+# ─── adapters ──────────────────────────────────────────────────────────────
+async def _post_telegraph(client, image: bytes, kind: str) -> str:
+    endpoint = ("https://telegra.ph/upload" if kind == "telegra.ph"
+                else "https://graph.org/upload")
+    headers = {"User-Agent": USER_AGENT}
+    try:
+        resp = await client.post(endpoint,
+            files={"file": ("cover.jpg", image, "image/jpeg")},
+            headers=headers, timeout=30)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise HostFailure(kind, f"{type(exc).__name__}", transient=True,
+                          retry_after=60, block=True) from exc
+    status = resp.status_code
+    detail = _resp_text(resp)
+    if status == 429 or "try again later" in detail.lower():
+        retry = 180
+        try:
+            retry = max(30, min(3600, int(getattr(resp, "headers", {}).get("Retry-After", 180))))
+        except (ValueError, TypeError):
+            pass
+        raise HostFailure(kind, f"HTTP {status}; {detail[:160]}",
+                          transient=True, retry_after=retry, block=True, limited=True)
+    if status != 200:
+        raise HostFailure(kind, f"HTTP {status}; {detail[:160]}",
+                          transient=status >= 500, block=status in (400, 401, 403, 412) or status >= 500)
     try:
         payload = resp.json()
     except Exception:
         raise HostFailure(kind, "non-JSON response", block=True)
-    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
-        raise HostFailure(kind, "missing src in payload", block=True)
-    src = payload[0].get("src")
-    url = urljoin(endpoint, src or "")
+    src = (payload[0].get("src") if isinstance(payload, list) and payload
+           and isinstance(payload[0], dict) else None)
+    url = urljoin(endpoint, src) if isinstance(src, str) else None
     if not valid_direct_url(url):
-        raise HostFailure(kind, f"invalid URL: {url!r}", block=True)
+        raise HostFailure(kind, f"HTTP 200 but invalid direct URL; {detail[:120]}", block=True)
     return url
 
 
 async def _post_catbox(client, image: bytes) -> str:
-    endpoint = "https://catbox.moe/user/api.php"
     userhash = os.environ.get("CATBOX_USERHASH", "").strip()
-    headers = {"User-Agent": "FUN-Bot3/1.6 (anonymous)"}
     data = {"reqtype": "fileupload"}
     if userhash:
         data["userhash"] = userhash
+    headers = {"User-Agent": USER_AGENT}
     try:
-        resp = await client.post(
-            endpoint,
-            data=data,
+        resp = await client.post(CATBOX_ENDPOINT, data=data,
             files={"fileToUpload": ("cover.jpg", image, "image/jpeg")},
-            headers=headers,
-            timeout=30,
-        )
+            headers=headers, timeout=60)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        raise HostFailure("catbox.moe", f"{type(exc).__name__}", transient=True, block=True)
-    body = resp.text.strip()
+        raise HostFailure("catbox.moe", f"{type(exc).__name__}", transient=True,
+                          retry_after=60, block=True) from exc
+    raw = _resp_text(resp).strip()
+    # Diagnostics only: mask the userhash at WORD BOUNDARIES. A blind
+    # str.replace would corrupt a successful URL when the hash is a substring
+    # of it (e.g. hash 'h' eats the 'h' in 'https').
+    if userhash:
+        body = re.sub(rf"(?<![A-Za-z0-9]){re.escape(userhash)}(?![A-Za-z0-9])",
+                      "[hidden]", raw)
+    else:
+        body = raw
+    if resp.status_code == 429 or "try again later" in body.lower():
+        raise HostFailure("catbox.moe", f"HTTP {resp.status_code}; {body[:160]}",
+                          transient=True, retry_after=180, block=True, limited=True)
     if resp.status_code == 412 and "invalid uploader" in body.lower():
-        # Anonymous upload rejected. Retry with a fresh client UA — many
-        # network egress IPs hit 412 due to TLS fingerprint; tell owner to
-        # configure CATBOX_USERHASH.
         raise HostFailure(
             "catbox.moe",
-            "HTTP 412 Invalid uploader — set CATBOX_USERHASH for reliable uploads",
-            block=True,
-            needs_creds=not bool(userhash),
-        )
-    if resp.status_code == 200 and body.startswith("http"):
-        url = body.split()[0]
+            "HTTP 412 Invalid uploader — set CATBOX_USERHASH in Render env vars",
+            block=True, needs_creds=not bool(userhash))
+    if resp.status_code == 200 and raw.startswith("http"):
+        url = raw.split()[0]  # validate the ORIGINAL response, never the masked copy
         if valid_direct_url(url):
             return url
-    raise HostFailure("catbox.moe", f"HTTP {resp.status_code}; {body[:200]}", block=True)
+    raise HostFailure("catbox.moe", f"HTTP {resp.status_code}; {body[:160]}",
+                      transient=resp.status_code >= 500,
+                      block=resp.status_code in (400, 401, 403, 412) or resp.status_code >= 500)
 
 
 async def _post_litterbox(client, image: bytes) -> str:
+    # EMERGENCY ONLY: links die after TTL. 72h default so a broken primary
+    # host doesn't blank the whole feed while the owner fixes it.
+    ttl = os.environ.get("LITTERBOX_TTL", "72h")  # 1h|12h|24h|72h
+    if ttl not in ("1h", "12h", "24h", "72h"):
+        ttl = "72h"
     endpoint = "https://litterbox.catbox.moe/resources/internals/api.php"
-    ttl = os.environ.get("LITTERBOX_TTL", "1h")  # 1h|12h|24h|72h
-    headers = {"User-Agent": "FUN-Bot3/1.6"}
+    headers = {"User-Agent": USER_AGENT}
     try:
-        resp = await client.post(
-            endpoint,
+        resp = await client.post(endpoint,
             data={"reqtype": "fileupload", "userhash": "", "time": ttl},
             files={"fileToUpload": ("cover.jpg", image, "image/jpeg")},
-            headers=headers,
-            timeout=60,
-        )
+            headers=headers, timeout=60)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        raise HostFailure("litterbox", f"{type(exc).__name__}", transient=True, block=True)
-    body = resp.text.strip()
+        raise HostFailure("litterbox", f"{type(exc).__name__}", transient=True,
+                          retry_after=60, block=True) from exc
+    body = _resp_text(resp).strip()
+    if resp.status_code == 429 or "try again later" in body.lower():
+        raise HostFailure("litterbox", f"HTTP {resp.status_code}; {body[:160]}",
+                          transient=True, retry_after=180, block=True, limited=True)
     if resp.status_code == 200 and body.startswith("http"):
         url = body.split()[0]
         if valid_direct_url(url):
             return url
-    raise HostFailure("litterbox", f"HTTP {resp.status_code}; {body[:200]}", transient=True, block=True)
-
-
-async def _post_0x0(client, image: bytes) -> str:
-    endpoint = "https://0x0.st"
-    headers = {"User-Agent": "FUN-Bot3/1.6"}
-    try:
-        resp = await client.post(
-            endpoint,
-            files={"file": ("cover.jpg", image, "image/jpeg")},
-            headers=headers,
-            timeout=60,
-        )
-    except Exception as exc:
-        raise HostFailure("0x0.st", f"{type(exc).__name__}", transient=True, block=True)
-    body = resp.text.strip()
-    if resp.status_code == 200 and body.startswith("http") and valid_direct_url(body):
-        return body
-    raise HostFailure("0x0.st", f"HTTP {resp.status_code}; {body[:200]}", transient=True, block=True)
-
-
-async def _post_imgbb(client, image: bytes) -> str:
-    key = os.environ.get("IMGBB_API_KEY", "").strip()
-    if not key:
-        raise HostFailure("imgbb", "IMGBB_API_KEY missing", block=True, needs_creds=True)
-    endpoint = "https://api.imgbb.com/1/upload"
-    import base64
-    payload = base64.b64encode(image).decode("ascii")
-    try:
-        resp = await client.post(endpoint, params={"key": key}, data={"image": payload}, timeout=60)
-    except Exception as exc:
-        raise HostFailure("imgbb", f"{type(exc).__name__}", transient=True, block=True)
-    if resp.status_code != 200:
-        raise HostFailure("imgbb", f"HTTP {resp.status_code}; {resp.text[:200]}", block=True)
-    try:
-        payload = resp.json()
-    except Exception:
-        raise HostFailure("imgbb", "non-JSON response", block=True)
-    data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
-    url = data.get("url")
-    if valid_direct_url(url):
-        return url
-    raise HostFailure("imgbb", "no image URL in response", block=True)
+    raise HostFailure("litterbox", f"HTTP {resp.status_code}; {body[:160]}",
+                      transient=True, block=True)
 
 
 async def _post_bunny(client, image: bytes) -> str:
@@ -284,221 +260,172 @@ async def _post_bunny(client, image: bytes) -> str:
     apikey = os.environ.get("BUNNY_API_KEY", "").strip()
     cdn = os.environ.get("BUNNY_PULL_ZONE_URL", "").strip().rstrip("/")
     if not (zone and apikey and cdn):
-        raise HostFailure(
-            "bunny.net",
+        raise HostFailure("bunny.net",
             "BUNNY_STORAGE_ZONE / BUNNY_API_KEY / BUNNY_PULL_ZONE_URL missing",
-            block=True, needs_creds=True,
-        )
+            block=True, needs_creds=True)
+    key = f"fun-bot3/{int(time.time() * 1000)}.jpg"
     headers = {"AccessKey": apikey, "Content-Type": "application/octet-stream"}
     try:
-        resp = await client.put(
-            f"https://storage.bunnycdn.com/{zone}/fun-bot3/{int(time.time())}.jpg",
-            content=image,
-            headers=headers,
-            timeout=60,
-        )
+        resp = await client.put(f"https://storage.bunnycdn.com/{zone}/{key}",
+                                content=image, headers=headers, timeout=60)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        raise HostFailure("bunny.net", f"{type(exc).__name__}", transient=True, block=True)
+        raise HostFailure("bunny.net", f"{type(exc).__name__}", transient=True,
+                          retry_after=60, block=True) from exc
     if resp.status_code not in (200, 201):
-        raise HostFailure("bunny.net", f"HTTP {resp.status_code}; {resp.text[:200]}", block=True)
-    return f"{cdn}/fun-bot3/{int(time.time())}.jpg"
+        detail = _resp_text(resp).replace(apikey, "[hidden]")
+        raise HostFailure("bunny.net", f"HTTP {resp.status_code}; {detail[:160]}",
+                          transient=resp.status_code >= 500, block=True)
+    url = f"{cdn}/{key}"
+    if not valid_direct_url(url):
+        raise HostFailure("bunny.net", "constructed URL failed validation", block=True)
+    return url
 
 
-async def _post_r2(client, image: bytes, provider: str) -> str:
-    account = os.environ.get(f"{provider.upper().replace('-', '_')}_ACCOUNT_ID", "").strip()
-    keyid = os.environ.get(f"{provider.upper().replace('-', '_')}_ACCESS_KEY_ID", "").strip()
-    secret = os.environ.get(f"{provider.upper().replace('-', '_')}_SECRET_ACCESS_KEY", "").strip()
-    bucket = os.environ.get(f"{provider.upper().replace('-', '_')}_BUCKET", "").strip()
-    public_base = os.environ.get(f"{provider.upper().replace('-', '_')}_PUBLIC_BASE", "").strip().rstrip("/")
-    if not all([account, keyid, secret, bucket, public_base]):
-        raise HostFailure(provider, f"{provider} credentials missing", block=True, needs_creds=True)
-    # Real S3 multipart upload is non-trivial; we abstract via boto3 if
-    # installed, else fail gracefully. For test purposes we attempt simple PUT.
-    try:
-        import boto3  # type: ignore
-    except ImportError:
-        raise HostFailure(provider, "boto3 not installed", block=True, needs_creds=True)
-    try:
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=f"https://{account}.r2.cloudflarestorage.com" if provider == "cloudflare-r2" else None,
-            aws_access_key_id=keyid,
-            aws_secret_access_key=secret,
-            region_name="auto",
-        )
-        key = f"fun-bot3/{int(time.time())}.jpg"
-        s3.put_object(Bucket=bucket, Key=key, Body=image, ContentType="image/jpeg")
-        return f"{public_base}/{key}"
-    except Exception as exc:
-        raise HostFailure(provider, str(exc), block=True)
-
-
-# Public dispatcher
 async def post_image(client, host: str, image: bytes) -> str:
     if host == "telegra.ph":
-        return await _post_telegraph(client, image, kind="telegra.ph")
+        return await _post_telegraph(client, image, "telegra.ph")
     if host == "graph.org":
-        return await _post_telegraph(client, image, kind="graph.org")
+        return await _post_telegraph(client, image, "graph.org")
     if host == "catbox.moe":
         return await _post_catbox(client, image)
     if host == "litterbox":
         return await _post_litterbox(client, image)
-    if host == "0x0.st":
-        return await _post_0x0(client, image)
-    if host == "imgbb":
-        return await _post_imgbb(client, image)
     if host == "bunny.net":
         return await _post_bunny(client, image)
-    if host == "cloudflare-r2":
-        return await _post_r2(client, image, provider="cloudflare-r2")
-    if host == "backblaze-b2":
-        return await _post_r2(client, image, provider="backblaze-b2")
-    raise HostFailure(host, "unknown host", block=True)
+    raise HostFailure(host, REMOVED_HOSTS.get(host, "unknown host"), block=True)
 
 
 # ─── high-level helpers ────────────────────────────────────────────────────
-async def upload(
-    client,
-    image: bytes,
-    *,
-    preferred: Optional[str] = None,
-    pace: Optional[Callable[[], Awaitable[None]]] = None,
-) -> Dict[str, Optional[str]]:
+def _creds_available(host: str) -> bool:
+    """Hosts that need env credentials are skipped entirely when unconfigured
+    (they never count as an attempt, an error, or a rate-limit vote)."""
+    if host == "bunny.net":
+        return bool(os.environ.get("BUNNY_STORAGE_ZONE", "").strip()
+                    and os.environ.get("BUNNY_API_KEY", "").strip()
+                    and os.environ.get("BUNNY_PULL_ZONE_URL", "").strip())
+    return True
+
+
+async def upload(client, image: bytes, *, preferred: Optional[str] = None,
+                 pace: Optional[Callable[[], Awaitable[None]]] = None) -> Dict[str, Optional[str]]:
     """Try preferred host first, then DEFAULT_ORDER, until one returns OK."""
     errors: List[str] = []
-    tried = set()
-    queue = []
+    queue: List[str] = []
     if preferred and preferred in HOSTS:
         queue.append(preferred)
     for h in DEFAULT_ORDER:
-        if h not in tried:
+        if h not in queue:
             queue.append(h)
-            tried.add(h)
+    limited: List[bool] = []
+    attempted: List[str] = []
     for host in queue:
-        # Skip circuits on cooldown
+        if not _creds_available(host):
+            continue  # not an attempt; /test_hosts reports these as skipped
         st = _blocked.get(host)
-        if st and st.until > time.monotonic() and not preferred:
-            errors.append(f"{host}: {st.diagnostic}")
+        if st and st.until > time.monotonic():
+            errors.append(st.diagnostic)
+            limited.append(st.limited)
+            attempted.append(host)
             continue
         if pace:
             try:
                 await pace()
             except asyncio.CancelledError:
                 raise
+        attempted.append(host)
         try:
             url = await post_image(client, host, image)
             unblock(host)
-            return {"url": url, "host": host, "status": "ok", "error": None}
+            result: Dict[str, Optional[str]] = {"url": url, "host": host,
+                                                "status": "ok", "error": None}
+            if host == "litterbox":
+                result["warning"] = "temporary link — expires after LITTERBOX_TTL"
+            return result
         except HostFailure as exc:
             errors.append(exc.diagnostic)
+            limited.append(exc.limited)
             if exc.block:
                 _blocked[host] = _State(
                     until=time.monotonic() + exc.retry_after,
-                    diagnostic=exc.diagnostic,
-                    limited=exc.limited,
-                    needs_creds=exc.needs_creds,
-                    transient=exc.transient,
-                )
-            if preferred and preferred == host:
-                # Caller wanted this host; keep going but preserve error chain.
-                continue
-    return {
-        "url": None,
-        "host": None,
-        "status": "failed",
-        "error": "; ".join(errors)[:1200],
-    }
+                    diagnostic=exc.diagnostic, limited=exc.limited,
+                    needs_creds=exc.needs_creds, transient=exc.transient)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # One broken adapter must never kill the whole chain.
+            errors.append(sanitize(f"{host}: {type(exc).__name__}"))
+            limited.append(False)
+    # 'rate_limited' tells cover_jobs to keep covers pending for a later
+    # /retry_covers instead of marking them failed: only when EVERY attempted
+    # host was actually rate-limited.
+    all_unavailable = bool(attempted) and all(
+        (_blocked.get(h) and _blocked[h].until > time.monotonic()) for h in attempted)
+    status = "rate_limited" if (limited and all(limited)) else "failed"
+    return {"url": None, "host": None, "status": status,
+            "error": "; ".join(errors)[:1200],
+            "all_hosts_unavailable": all_unavailable}
 
 
 async def test_all(client, image: bytes) -> List[Dict[str, str]]:
-    """Run every adapter once with the same image. Returns a rich report."""
+    """Run every remaining adapter once with the same image."""
     report: List[Dict[str, str]] = []
     for host in HOSTS:
         t0 = time.monotonic()
         try:
             url = await post_image(client, host, image)
-            elapsed = int((time.monotonic() - t0) * 1000)
-            report.append({
-                "host": host,
-                "status": "ok",
-                "url": url,
-                "elapsed_ms": str(elapsed),
-                "legal_adult": LEGAL_ADULT_STATUS.get(host, "USER-RESPONSIBLE"),
-                "gating": _classify_host(host),
-                "error": "",
-            })
+            elapsed = str(int((time.monotonic() - t0) * 1000))
+            entry = {"host": host, "status": "ok", "url": url,
+                     "elapsed_ms": elapsed,
+                     "legal_adult": LEGAL_ADULT_STATUS.get(host, "?"), "error": ""}
+            if host == "litterbox":
+                entry["url"] = f"{url}  (expires!)"
+            report.append(entry)
             unblock(host)
         except HostFailure as exc:
-            elapsed = int((time.monotonic() - t0) * 1000)
+            elapsed = str(int((time.monotonic() - t0) * 1000))
             report.append({
                 "host": host,
                 "status": "skipped-needs-creds" if exc.needs_creds else "fail",
-                "url": "",
-                "elapsed_ms": str(elapsed),
-                "legal_adult": LEGAL_ADULT_STATUS.get(host, "USER-RESPONSIBLE"),
-                "gating": _classify_host(host),
-                "error": exc.diagnostic,
-            })
+                "url": "", "elapsed_ms": elapsed,
+                "legal_adult": LEGAL_ADULT_STATUS.get(host, "?"),
+                "error": exc.diagnostic})
             if exc.block and not exc.needs_creds:
                 _blocked[host] = _State(
                     until=time.monotonic() + exc.retry_after,
-                    diagnostic=exc.diagnostic,
-                    limited=exc.limited,
-                    needs_creds=False,
-                    transient=exc.transient,
-                )
+                    diagnostic=exc.diagnostic, limited=exc.limited,
+                    needs_creds=False, transient=exc.transient)
         except Exception as exc:
-            elapsed = int((time.monotonic() - t0) * 1000)
-            report.append({
-                "host": host,
-                "status": "fail",
-                "url": "",
-                "elapsed_ms": str(elapsed),
-                "legal_adult": LEGAL_ADULT_STATUS.get(host, "USER-RESPONSIBLE"),
-                "gating": _classify_host(host),
-                "error": f"{type(exc).__name__}: {str(exc)[:140]}",
-            })
+            elapsed = str(int((time.monotonic() - t0) * 1000))
+            report.append({"host": host, "status": "fail", "url": "",
+                           "elapsed_ms": elapsed,
+                           "legal_adult": LEGAL_ADULT_STATUS.get(host, "?"),
+                           "error": f"{type(exc).__name__}: {str(exc)[:140]}"})
     return report
 
 
-def render_report_md(report: List[Dict[str, str]]) -> str:
-    pad = max(len(h) for h in HOSTS)
-    lines = [
-        "🎀 Cover Upload Probe — live results",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    ]
+def render_report_html(report: List[Dict[str, str]]) -> str:
+    """HTML-safe report for Telegram (caller MUST send with parse_mode=HTML)."""
+    e = _html.escape
     ok = sum(1 for r in report if r["status"] == "ok")
     creds = sum(1 for r in report if r["status"] == "skipped-needs-creds")
     fail = sum(1 for r in report if r["status"] == "fail")
-    lines.append(f"🟢 ok: {ok}   🟡 skipped (no creds): {creds}   🔴 fail: {fail}")
-    lines.append("")
-    lines.append(
-        f"{'host'.ljust(pad)}  {'status'.ljust(20)}  {'ms':>5}  {'adult-ok':<33}  url / err"
-    )
-    lines.append("─" * (pad + 100))
-    for r in report:
-        host = r["host"].ljust(pad)
-        status = r["status"].ljust(20)
-        ms = r["elapsed_ms"].rjust(5)
-        adult = r["legal_adult"][:33].ljust(33)
-        url = r["url"] or r["error"][:120]
-        lines.append(f"{host}  {status}  {ms}  {adult}  {url}")
-    lines.append("")
-    lines.append("Adult-content legality (per ToS check 2026-10-18):")
-    lines.append("• ImgBB: BANNED obscene content (skipped, opt-in only).")
-    lines.append("• Bunny.net: OK per https://bunny.net/acceptable-use/ (verified).")
-    lines.append("• Telegraph / Graph / Catbox / Litterbox / 0x0.st: allow legal upload.")
-    lines.append("• Cloudflare R2 / Backblaze B2: USER-RESPONSIBLE for ToS compliance.")
-    return "\n".join(lines)
-
-
-def render_report_table(report: List[Dict[str, str]]) -> str:
-    """Render an HTML table for Telegram so /test_hosts stays readable."""
-    rows = [
-        f"<b>{html.escape(r['host'])}</b>",
-        f"<code>{html.escape(r['status'])}</code>",
-        f"{html.escape(r['elapsed_ms'])} ms",
-        html.escape(r["legal_adult"][:24]),
-        html.escape((r["url"] or r["error"][:80]) or "—"),
+    lines = [
+        "🎀 <b>Cover Upload Probe — live results</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🟢 ok: {ok}   🟡 skipped (no creds): {creds}   🔴 fail: {fail}",
+        "",
     ]
-    return " | ".join(rows)
+    for r in report:
+        icon = {"ok": "🟢", "fail": "🔴", "skipped-needs-creds": "🟡"}.get(r["status"], "⚪")
+        lines.append(f"{icon} <b>{e(r['host'])}</b> — {e(r['status'])} ({e(r['elapsed_ms'])} ms)")
+        lines.append(f"   adult: {e(r['legal_adult'])}")
+        detail = r["url"] or r["error"]
+        if detail:
+            lines.append(f"   <code>{e(detail[:150])}</code>")
+    lines.append("")
+    lines.append("<b>Removed hosts (why):</b>")
+    for host, why in REMOVED_HOSTS.items():
+        lines.append(f"• {e(host)} — {e(why)}")
+    return "\n".join(lines)
