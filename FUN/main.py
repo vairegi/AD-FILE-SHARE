@@ -37,6 +37,7 @@ def build_bot():
     "telegraph_token": handlers.cmd_telegraph_token,
         "retry_covers": handlers.cmd_retry_covers, "cover_status": handlers.cmd_cover_status,
         "test_hosts": handlers.cmd_test_hosts, "select_host": handlers.cmd_select_host,
+        "warm_covers": handlers.cmd_warm_covers,
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,

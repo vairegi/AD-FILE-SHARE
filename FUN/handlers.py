@@ -711,6 +711,17 @@ async def cmd_retry_covers(update, context):
     cover_jobs.start(runtime.userbot, status_message, update.message.reply_text)
 
 
+async def cmd_warm_covers(update, context):
+    if not _is_admin(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🎀 Pre-warming link previews, Senpai…")
+    n = await covers.warm_recent_hosted(120)
+    try:
+        await msg.edit_text(f"🔥 Pre-warmed {n} cover previews — feed cards open instantly now.")
+    except Exception:
+        await update.message.reply_text(f"🔥 Pre-warmed {n} cover previews.")
+
+
 async def cmd_cover_status(update, context):
     if not _is_admin(update.effective_user.id):
         return
@@ -743,6 +754,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /retry_covers — prepare pending/missing/failed covers\n"
         "• /cover_status — hosted/local preview counts and progress\n"
         "• /test_hosts — probe every cover-upload host with one image\n"
+        "• /warm_covers — pre-warm link previews for instant display\n"
         f"• /select_host <host|auto> — preferred host (currently: {preferred})\n"
         "• /pending — inspect orphan files\n"
         "• /collections — latest indexed IDs and counts\n"

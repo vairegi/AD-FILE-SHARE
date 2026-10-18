@@ -94,6 +94,12 @@ async def _run(userbot, message, reply):
                 f"Cached photo only (hosting failed): {state['local_ready']}\n"
                 f"Source/preparation failures: {state['failed']}\n"
                 f"Not attempted: {state['remaining']}" + warning + '\nUse /cover_status for per-host diagnostics.')
+        try:
+            warmed = await covers.warm_recent_hosted(60)
+            if warmed:
+                text += f"\n🔥 Pre-warmed {warmed} link previews — cards now open instantly."
+        except Exception:
+            pass
         await _progress(message, text)
         if reply and not (getattr(message, 'edit_text', None) or getattr(message, 'edit_message_text', None)):
             await reply(text)

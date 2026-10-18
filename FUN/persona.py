@@ -48,9 +48,9 @@ def feed_caption(title, files, views, unlocks, price, balance, unlocked):
               f"✨ <b>COLLECTION BY {h(config.BOT_NAME)}</b> ✨\n{SEP}\n")
     return (f"<b>🎀 New Drop જ⁀➴</b>\n{SEP}\n"
         + f"<b>{h(title)}</b>\n\n"
-        + f"📦 <b>{h(files)}</b> media files\n"
-        + f"👁 Views: <code>{h(views)}</code>  •  ❤️ Unlocks: <code>{h(unlocks)}</code>\n"
-        + f"🪙 Cost: <code>{h(price)} tokens</code>  •  👛 Balance: <code>{h(balance)}</code>\n\n"
+        + f"📦 <code>{h(files)}</code> <b>media files</b>\n"
+        + f"👁 <b>Views:</b> <code>{h(views)}</code>  •  ❤️ <b>Unlocks:</b> <code>{h(unlocks)}</code>\n"
+        + f"🪙 <b>Cost:</b> <code>{h(price)} tokens</code>  •  👛 <b>Balance:</b> <code>{h(balance)}</code>\n\n"
         + footer)
 
 

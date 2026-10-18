@@ -278,7 +278,7 @@ async def test_feed_balance_and_real_vault_bookmarks():
     await db.insert_unlock(7,"a");await db.toggle_bookmark(7,"b")
     qa=Q();await handlers._show_library(qa,"unlocks",0)
     assert "Already in your Vault" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[0]
-    assert "Balance: <code>5</code>" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[0]
+    assert "Balance:</b> <code>5</code>" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[0]
     assert "restream:a" in (qa.bot.sent[-1][1], qa.bot.sent[-1][2])[1]["reply_markup"].to_json()
     qb=Q();await handlers._show_library(qb,"bookmarks",0)
     assert "unlock:b" in (qb.bot.sent[-1][1], qb.bot.sent[-1][2])[1]["reply_markup"].to_json()
