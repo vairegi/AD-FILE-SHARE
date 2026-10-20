@@ -106,7 +106,8 @@ DEFAULT_CATEGORY = {
     "post_channel_id": None,
     "post_main_channel_id": None,
     "post_tag": None,
-    "post_time": "18:00",                 # always interpreted as IST
+    "post_time": "18:00",                 # legacy single (first slot, kept for back-compat)
+    "post_times": ["18:00"],              # v4.9.10: canonical multi-slot list
     "schedule_enabled": True,
     "schedule_paused": False,
     "queue_cursor": None,
@@ -120,9 +121,58 @@ DEFAULT_CATEGORY = {
 
 CATEGORY_EDITABLE = {
     "db_channel_id", "post_channel_id", "post_main_channel_id", "post_tag",
-    "post_time", "force_sub_channel_id", "protect_content",
+    "post_time", "post_times",                 # v4.9.10
+    "force_sub_channel_id", "protect_content",
     "auto_delete_minutes", "with_file_message", "label", "enabled",
 }
+
+
+# ── v4.9.10: multi-slot post-time helper ──────────────────────
+def _norm_hhmm(t):
+    """Normalize 'HH:MM' (24h) -> 'HH:MM' or None."""
+    s = str(t or "").strip()
+    try:
+        h, m = s.split(":")[:2]
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return f"{h:02d}:{m:02d}"
+    except Exception:
+        pass
+    return None
+
+
+def read_post_times(cat):
+    """All post slots for one category, normalized, deduped.
+    Backward-compat: legacy single `post_time` is returned as a 1-slot list,
+    missing key falls back to ['18:00']. Times are always IST."""
+    if not cat:
+        return ["18:00"]
+    raw = cat.get("post_times")
+    if isinstance(raw, list) and raw:
+        out, seen = [], set()
+        for t in raw:
+            v = _norm_hhmm(t)
+            if v and v not in seen:
+                seen.add(v); out.append(v)
+        return out or ["18:00"]
+    single = _norm_hhmm(cat.get("post_time")) or "18:00"
+    return [single] if single else ["18:00"]
+
+
+def parse_post_times_csv(text):
+    """Parse '07:00, 18:00' -> ['07:00','18:00'] (deduped, normalized).
+    Returns (list, None) on success, (None, error_msg) on bad input."""
+    parts = [p.strip() for p in (text or "").split(",") if p.strip()]
+    if not parts:
+        return None, "Send at least one HH:MM — e.g. 07:00, 18:00."
+    out, seen = [], set()
+    for p in parts:
+        v = _norm_hhmm(p)
+        if not v:
+            return None, f"'{p}' is not HH:MM. Try 07:00, 18:00."
+        if v not in seen:
+            seen.add(v); out.append(v)
+    return out, None
 
 
 def now() -> float:
@@ -229,6 +279,7 @@ async def migrate_to_categories():
     if not (s.get("db_channel_id") or config.DB_CHANNEL_ID):
         return False  # nothing configured yet -> fresh install, wizard flow
     key = _norm_key(config.MIGRATION_CATEGORY_KEY) or "manga"
+    _seed = s.get("post_time") or "18:00"
     doc = dict(DEFAULT_CATEGORY)
     doc.update({
         "key": key,
@@ -237,7 +288,8 @@ async def migrate_to_categories():
         "post_channel_id": s.get("post_channel_id") or config.POST_CHANNEL_ID,
         "post_main_channel_id": s.get("post_main_channel_id"),
         "post_tag": s.get("post_tag"),
-        "post_time": s.get("post_time") or "18:00",
+        "post_time": _seed,
+        "post_times": [_seed],                 # v4.9.10: seed multi-slot from legacy
         "schedule_enabled": bool(s.get("schedule_enabled", True)),
         "schedule_paused": bool(s.get("schedule_paused", False)),
         "queue_cursor": s.get("queue_cursor"),
@@ -774,6 +826,41 @@ async def list_admin_ids():
         if doc["user_id"] not in ids:
             ids.append(doc["user_id"])
     return ids
+
+
+# ── v4.9.10: extended admin listing + revocation ─────────────
+async def list_admins_full():
+    """Every admin (ENV + DB-promoted) with display info + source flag and
+    timestamp. ENV rows come first so the table can mark them non-removable."""
+    out = []
+    for uid in (config.ADMIN_IDS or []):
+        u = await get_user(int(uid))
+        out.append({
+            "user_id": int(uid), "source": "ENV",
+            "username": (u or {}).get("username"),
+            "name": ((u or {}).get("name")
+                     or (u or {}).get("first_name")
+                     or f"id:{uid}"),
+            "added_at": None,
+        })
+    async for row in _db.admins.find({}).sort("at", 1):
+        uid = int(row["user_id"])
+        u = await get_user(uid)
+        out.append({
+            "user_id": uid, "source": "DB",
+            "username": (u or {}).get("username"),
+            "name": ((u or {}).get("name")
+                     or (u or {}).get("first_name")
+                     or f"id:{uid}"),
+            "added_at": float(row.get("at") or 0.0),
+        })
+    return out
+
+
+async def remove_db_admin(user_id):
+    """Drop a DB-promoted admin. False if no row existed."""
+    r = await _db.admins.delete_one({"user_id": int(user_id)})
+    return bool(r.deleted_count)
 
 
 # ── auto-delete queue (restart-safe) ──────────────────────────

@@ -750,6 +750,204 @@ async def withfilemessages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── delivery ──────────────────────────────────────────────────
+MEDIA_GROUP_MAX = 10                # Telegram hard cap per album
+MEDIA_GROUP_RETRY = 5              # RetryAfter/FloodWait retries per chunk
+MEDIA_GROUP_GAP = 1.0              # sec sleep between successful chunks
+
+
+async def _deliver_bulk_media_groups(bot, chat_id, item):
+    """v4.9.10: deliver an item's files as one or more albums (send_media_group).
+
+    Why albums instead of copyMessages per file:
+      * The user asked for 'send all at once' — albums achieve that explicitly
+        (no per-file copy_message spacing on the wire).
+      * Albums batch up to 10 media in a single Telegram call → 250 videos
+        = 25 round-trips instead of 250.
+      * Per-file /addfilecaption is added via paced editMessageCaption on the
+        individual media inside each album.
+
+    Constraints honoured:
+      * Telegram media groups can NOT mix photos/videos with documents.
+        Videos go in their own chunks of ≤10, subtitle files (.srt = document)
+        go in a SEPARATE chunk of ≤10 so the user sees a clean
+        "videos-album then subtitles-row" rendering.
+      * 429 RetryAfter / FloodWait: caught, sleep `retry_after + 1`, retry up
+        to MEDIA_GROUP_RETRY times per chunk — never crashes the event loop.
+      * Per-chunk 1s pacing keeps us under Telegram's ~30 msg/sec global
+        limit; one album every 1×N is well below that.
+      * Auto-delete queued in one batch (all delivered msg_ids per chunk).
+      * One trailing notice with auto-delete timer / keep-forever text.
+    """
+    db_channel = await _db_channel_for(item)
+    if not db_channel:
+        await bot.send_message(chat_id, "❌ Delivery channel is not configured.")
+        return
+    protect = await _protect_flag(item.get("category"))
+
+    videos = item.get("videos") or []
+    srts = item.get("srts") or []
+    if not videos:
+        await bot.send_message(chat_id, "❌ This file is no longer available.")
+        return
+
+    delivered_total = []
+    # ---- videos first, chunked ≤ MEDIA_GROUP_MAX ----
+    for chunk in _chunks(videos, MEDIA_GROUP_MAX):
+        ids = [v["db_message_id"] for v in chunk]
+        sent_ids = await _send_album_with_retry(
+            bot, chat_id=chat_id, from_chat_id=db_channel,
+            message_ids=ids, captions=[v.get("caption") or "" for v in chunk],
+            protect=protect, media_kind="video")
+        if sent_ids is None:
+            await bot.send_message(
+                chat_id,
+                "⚠️ Delivery of some files failed under Telegram rate limits. "
+                "Please tap Download again so we retry the whole album.")
+            return
+        delivered_total.extend(sent_ids)
+        await asyncio.sleep(MEDIA_GROUP_GAP)
+
+    # ---- subtitle documents in their own chunk (.srt = document) ----
+    if srts:
+        for chunk in _chunks(srts, MEDIA_GROUP_MAX):
+            ids = [s["db_message_id"] for s in chunk]
+            sent_ids = await _send_album_with_retry(
+                bot, chat_id=chat_id, from_chat_id=db_channel,
+                message_ids=ids, captions=[s.get("caption") or "" for s in chunk],
+                protect=protect, media_kind="document")
+            if sent_ids is None:
+                log.warning("srt album chunk failed (continuing): %s",
+                            ids[:3])
+                continue
+            delivered_total.extend(sent_ids)
+            await asyncio.sleep(MEDIA_GROUP_GAP)
+
+    # ---- /addfilecaption extra on each video that carries an original caption
+    extra_html = (await db.get_settings()).get("file_caption_extra_html")
+    extra_plain = (await db.get_settings()).get("file_caption_extra")
+    if (extra_html or extra_plain) and delivered_total:
+        only_videos = delivered_total[:len(videos)]
+        for idx, video in enumerate(videos):
+            new_caption = None
+            pm = None
+            if extra_html:
+                new_caption = ((video.get("caption") or "").strip()
+                               + "\n" + str(extra_html).strip()).strip()[:1024]
+                pm = "HTML"
+            elif extra_plain:
+                new_caption = ((video.get("caption") or "").strip()
+                               + "\n" + str(extra_plain).strip()).strip()[:1024]
+            if not new_caption or idx >= len(only_videos):
+                continue
+            target_mid = only_videos[idx]
+            for attempt in range(3):
+                try:
+                    kwargs = {"chat_id": chat_id, "message_id": target_mid,
+                              "caption": new_caption}
+                    if pm:
+                        kwargs["parse_mode"] = pm
+                    await bot.editMessageCaption(**kwargs)
+                    break
+                except Exception as exc:
+                    wait = getattr(exc, "retry_after", None)
+                    if wait is not None:
+                        await asyncio.sleep(min(float(wait) + 1.0, 30.0))
+                        continue
+                    log.debug("edit caption failed for mid %s: %s",
+                              target_mid, exc)
+                    break
+            await asyncio.sleep(0.4)
+
+    # ---- one auto-delete queue per chunk (restart-safe, bot='bot2') ----
+    minutes = await _autodelete_minutes(chat_id, item.get("category"))
+    if minutes and minutes > 0 and delivered_total:
+        await db.add_deletion(chat_id, delivered_total,
+                              db.now() + minutes * 60, bot="bot2")
+
+    # ---- one trailing notice ----
+    if minutes and minutes > 0:
+        default_note = f"⏳ These files will be auto-deleted in {human_duration(minutes * 60)}."
+    else:
+        default_note = "📌 These files will stay in the chat."
+    template = await _withfile_template(item.get("category"))
+    note = render_withfile_message(template, minutes) if template else default_note
+    await bot.send_message(chat_id, note)
+
+
+def _chunks(seq, n):
+    """Yield successive n-sized chunks from seq."""
+    seq = list(seq)
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+async def _send_album_with_retry(bot, *, chat_id, from_chat_id, message_ids,
+                                 captions, protect, media_kind):
+    """Fetch the source messages (single getMessages call), build an album,
+    send it via send_media_group. Honour RetryAfter/FloodWait up to
+    MEDIA_GROUP_RETRY times per chunk. Returns delivered message_ids or None."""
+    try:
+        src_msgs = await bot.get_messages(
+            chat_id=from_chat_id, message_ids=list(message_ids))
+    except Exception as exc:
+        log.error("get_messages failed chunk=%s: %s", message_ids[:3], exc)
+        return None
+
+    medias = []
+    for i, msg in enumerate(src_msgs):
+        if msg is None:
+            log.warning("album chunk: source msg missing for one of %s",
+                        message_ids[:3])
+            continue
+        cap = (captions[i] if i < len(captions) else "") or None
+        if cap and len(cap) > 1024:
+            cap = cap[:1024]
+        if media_kind == "video" and getattr(msg, "video", None):
+            medias.append({
+                "type": "video",
+                "media": msg.video.file_id,
+                "caption": cap,
+                "protect_content": bool(protect),
+            })
+        elif media_kind == "document" and getattr(msg, "document", None):
+            medias.append({
+                "type": "document",
+                "media": msg.document.file_id,
+                "caption": cap,
+                "protect_content": bool(protect),
+            })
+        elif getattr(msg, "photo", None):  # images allowed in a 'video' chunk
+            medias.append({
+                "type": "photo",
+                "media": msg.photo[-1].file_id,
+                "caption": cap,
+                "protect_content": bool(protect),
+            })
+        else:
+            log.debug("album: msg %s has no %s payload; skipping",
+                      getattr(msg, "message_id", "?"), media_kind)
+    if not medias:
+        return []
+
+    for attempt in range(MEDIA_GROUP_RETRY):
+        try:
+            sent = await bot.send_media_group(
+                chat_id=chat_id, media=medias)
+            return [getattr(m, "message_id", None) for m in (sent or [])]
+        except Exception as exc:
+            wait = getattr(exc, "retry_after", None)
+            if wait is None:
+                log.error("send_media_group chunk failed (%s); ids=%s",
+                          exc, message_ids[:3])
+                return None
+            sleep_for = min(float(wait) + 1.0, 60.0)
+            log.info("album 429 retry_after=%ss chunk=%s (attempt %d/%d)",
+                     wait, message_ids[:3], attempt + 1, MEDIA_GROUP_RETRY)
+            await asyncio.sleep(sleep_for)
+    log.error("send_media_group exhausted retries: chunk=%s", message_ids[:3])
+    return None
+
+
 async def send_item(bot, chat_id, item, index, note=True):
     """Deliver one version (video at `index`) + (for the first version) the
     subtitle files. `note=False` skips the trailing auto-delete notice so a
@@ -898,12 +1096,14 @@ async def process_delivery(bot, chat_id, user_id, file_id, token):
         await bot.send_message(chat_id,
                                "❌ Delivery channel is not configured.")
         return
-    log.info("delivering %s: %d videos + %d srts from channel %s to %s",
+    log.info("delivering %s: %d videos + %d srts -> user %s",
              file_id, len(item["videos"]), len(item.get("srts") or []),
-             db_channel, chat_id)
-    videos = item["videos"]
-    for i in range(len(videos)):
-        await send_item(bot, chat_id, item, i, note=(i == len(videos) - 1))
+             chat_id)
+    # v4.9.10: bulk delivery via send_media_group (album). Videos + srt(s) go
+    # in their OWN groups because Telegram forbids mixing documents with
+    # photos/videos in one album. Chunks of ≤10 respect Telegram's media-group
+    # hard limit. RetryAfter / FloodWait are honored on every request.
+    await _deliver_bulk_media_groups(bot, chat_id, item)
 
 
 # ── handlers ──────────────────────────────────────────────────

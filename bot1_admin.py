@@ -175,11 +175,16 @@ def _p_tag(t, mode="add"):
 
 
 def _p_time(t, mode="add"):
+    """v4.9.10: wizard step 5/5 — comma-separated HH:MM -> post_times list.
+    'skip' keeps current (edit) or defaults to ['18:00'] (add).
+    Writes both `post_times` (canonical) AND `post_time` (legacy, first slot)
+    so every existing reader (dashboard, /categories, tests) keeps working."""
     if t.strip().lower() in ("skip", "-", "none"):
-        return (None, None) if mode == "edit" else ("post_time", "18:00")
-    v = _parse_hhmm(t)
-    return (("post_time", v) if v
-            else (None, "Send the time as HH:MM (24h, IST), e.g. 21:30 — or 'skip'."))
+        return (None, None) if mode == "edit" else ("post_times", ["18:00"])
+    parsed, err = db.parse_post_times_csv(t)
+    if err:
+        return (None, err)
+    return ("post_times", parsed)
 
 
 
@@ -189,7 +194,7 @@ _WIZARD_STEPS = [
     ("post_channel", "2/5 · Send the <b>Posting Channel</b> id (where covers are drip-posted). In edit mode: <code>skip</code> keeps the current one.", _p_post_channel),
     ("main_channel", "3/5 · Send the <b>Main Posting Channel</b> id. In edit mode: <code>skip</code> keeps the current one (add mode: skip = none).", _p_main_channel),
     ("tag",          "4/5 · Send the <b>tag line</b> — a caption shown above each forward in the Main Channel (e.g. a hashtag or @handle). Optional: <code>skip</code> keeps the current one.", _p_tag),
-    ("time",         "5/5 · Send the <b>daily post time</b> as HH:MM (IST). In edit mode: <code>skip</code> keeps the current one (add mode: skip = 18:00).", _p_time),
+    ("time",         "5/5 · Send the <b>daily post time(s)</b> as HH:MM (IST). Multi-slot: <code>07:00, 18:00</code>. In edit mode: <code>skip</code> keeps the current one(s) (add mode: skip = 18:00).", _p_time),
 ]
 
 
@@ -400,7 +405,7 @@ async def _send_category_card(update, context, key):
         f"   📣 Posting: {post_ch}",
         f"   🏠 Main: {main_ch}"
         + (f" · tag: {_h(cat['post_tag'])}" if cat.get("post_tag") else ""),
-        f"   🕒 Schedule: {_h(cat.get('post_time') or '18:00')} IST daily",
+        f"   🕒 Schedule: {_h(', '.join(db.read_post_times(cat)))} IST daily",
         f"   📦 Queue: {total} total · {posted} posted · {remaining} remaining",
         f"   ▶️ Next: #{posted + 1}"
         + (f" — {_h((nxt.get('caption') or nxt.get('file_id') or '')[:40])}" if nxt else " (queue empty)"),
@@ -1268,7 +1273,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(
             f"  {status} <b>{_h(cat.get('label') or k)}</b> — "
             f"{posted} posted / {pending} queued / {total} total"
-            f" · {cat.get('post_time') or '18:00'} IST")
+            f" · {', '.join(db.read_post_times(cat))} IST")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML",
                                     disable_web_page_preview=True)
 
@@ -1771,12 +1776,75 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v4.9.10:
+       /addadmin           -> list admins as a tap-to-copy monospace table
+       /addadmin <user_id> -> promote one admin (legacy behaviour)
+    Owner-only guard: both branches are admin-only via @admin_only, which
+    honours both env ADMIN_IDS and DB-promoted admins."""
     args = context.args or []
-    if not args or not args[0].lstrip("-").isdigit():
-        await update.message.reply_text("Usage: /addadmin <user_id>")
+    if not args:
+        await _send_admin_table(update, context)
+        return
+    if not args[0].lstrip("-").isdigit():
+        await update.message.reply_text(
+            "Usage:\n"
+            "  /addadmin              — list admins\n"
+            "  /addadmin <user_id>    — promote one admin\n"
+            "  /radmin  <user_id>     — remove a DB-promoted admin")
         return
     await db.add_db_admin(int(args[0]))
     await update.message.reply_text(f"✅ {args[0]} is now an admin.")
+
+
+async def _send_admin_table(update, context):
+    """Render the admin list as a fixed-width HTML/monospace block. The
+    action cell carries the unban-equivalent (`<code>/radmin <id></code>`)
+    for DB-promoted rows; ENV rows show `(env)` so admins can't revoke them
+    by accident (env-only removal happens by editing ADMIN_IDS)."""
+    rows = await db.list_admins_full()
+    body = ["📋 <b>Bot 1 admins</b>",
+            f"<i>{len(rows)} total · "
+            f"{sum(1 for r in rows if r['source'] == 'ENV')} ENV · "
+            f"{sum(1 for r in rows if r['source'] == 'DB')} DB</i>",
+            "<pre>",
+            f"{'#':<3} {'User':<22} {'Source':<6} {'Added':<22} {'Action':<26}",
+            f"{'-'*3} {'-'*22} {'-'*6} {'-'*22} {'-'*26}"]
+    for i, a in enumerate(rows, 1):
+        uname = f"@{a['username']}" if a.get("username") else (a.get("name") or f"id:{a['user_id']}")
+        added = "—" if not a.get("added_at") else _fmt_ist_ts(a["added_at"])
+        if a["source"] == "DB":
+            action = f"/radmin {a['user_id']}"
+            action_cell = f"<code>/radmin {a['user_id']}</code>"
+        else:
+            action = "(env — edit ADMIN_IDS)"
+            action_cell = "<i>(env)</i>"
+        body.append(f"{i:<3} {_h(uname)[:22]:<22} {a['source']:<6} "
+                    f"{_h(added)[:22]:<22} {action_cell}")
+    body.append("</pre>")
+    body.append("\n<i>Tap the rightmost cell to copy the /radmin command. "
+                "ENV-listed admins persist until removed from the env.</i>")
+    await update.message.reply_text("\n".join(body), parse_mode="HTML",
+                                    disable_web_page_preview=True)
+
+
+@admin_only
+async def cmd_radmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/radmin <user_id> — remove a DB-promoted admin. ENV-listed admins are
+    flagged and NOT removed here (delete from ADMIN_IDS env instead)."""
+    args = context.args or []
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /radmin <user_id>")
+        return
+    uid = int(args[0])
+    if uid in (config.ADMIN_IDS or []):
+        await update.message.reply_text(
+            f"⚠️ {uid} is listed in ADMIN_IDS (env) — edit the env to remove.")
+        return
+    if await db.remove_db_admin(uid):
+        await update.message.reply_text(f"✅ {uid} removed from admin list.")
+    else:
+        await update.message.reply_text(
+            f"ℹ️ {uid} was not in the DB admin list.")
 
 
 @admin_only
@@ -1987,20 +2055,40 @@ async def cmd_setposttag(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_setposttime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/setposttime HH:MM [category] — daily post time, always IST."""
+    """/setposttime HH:MM[, HH:MM…] [category] — daily post time(s), IST.
+    Multi-slot: '07:00, 18:00' posts once at 07:00 and once at 18:00 IST daily.
+    The atomic per-item mark_posted prevents double-posting even when both
+    slots fire on the same day. Reschedules immediately so the new slots
+    are active without redeploy."""
     args = list(context.args or [])
     key, args = await _resolve_active(update, args)
     key = await _auto_key(update, key)
     if not await _require_active(update, key):
         return
-    t = _parse_hhmm(args[0]) if args else None
-    if not t:
-        await update.message.reply_text("Usage: /setposttime HH:MM [category]  (IST)")
+    if not args:
+        await update.message.reply_text(
+            "Usage: /setposttime HH:MM[, HH:MM…] [category]  (IST)\n"
+            "Examples: 18:00   ·   07:00, 18:00   ·   06:00, 14:00, 22:00")
         return
-    await db.update_category(key, {"post_time": t})
-    from bot1 import schedule_daily
-    await schedule_daily(context.application.job_queue)
-    await update.message.reply_text(f"✅ [{key}] Daily post time set to {t} IST.")
+    # If a category key is appended, peel it off BEFORE joining on commas.
+    schedule_part = args[:-1] if key and len(args) > 1 else args
+    joined = ",".join(schedule_part)
+    parsed, err = db.parse_post_times_csv(joined)
+    if err:
+        await update.message.reply_text(
+            f"❌ {err}\nUsage: /setposttime HH:MM[, HH:MM…] [category]  (IST)")
+        return
+    await db.update_category(key, {
+        "post_times": parsed,
+        "post_time":  parsed[0],     # legacy field — keeps every reader working
+    })
+    try:
+        from bot1 import schedule_daily
+        await schedule_daily(context.application.job_queue)
+    except Exception as exc:
+        log.warning("reschedule after /setposttime failed: %s", exc)
+    await update.message.reply_text(
+        f"✅ [{key}] Schedule set to: {', '.join(parsed)} IST daily.")
 
 
 @admin_only
@@ -2643,6 +2731,7 @@ COMMANDS = {
     "checkram": cmd_checkram,
     "checkram": cmd_checkram,
     "addadmin": cmd_addadmin,
+    "radmin": cmd_radmin,
     "setforcesub": cmd_setforcesub,
     "setautodelete": cmd_setautodelete,
     "setpostchannel": cmd_setpostchannel,

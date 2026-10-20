@@ -732,8 +732,12 @@ async def do_post(bot, category=None, _depth=0):
 
 # ── per-category scheduling (times are IST) ───────────────────
 async def schedule_daily(job_queue):
-    """(Re)install ONE daily drip job per enabled category, each at that
-    category's post_time in IST. Accepts an Application or a JobQueue."""
+    """v4.9.10: install ONE daily drip job PER post slot (multi-slot ready).
+    Legacy single-time categories still get their one job. Cleanup rule uses
+    the same `daily_post:*` name prefix, so adding new slots auto-replaces any
+    older single-slot job for that category on the next call.
+    Same do_post callback handles every slot — the atomic mark_posted per item
+    guarantees no item posts twice even if multiple slots fire the same day."""
     job_queue = getattr(job_queue, "job_queue", job_queue)  # Application or JobQueue
     if job_queue is None:
         log.warning("schedule_daily: no job_queue available; skipping")
@@ -747,13 +751,14 @@ async def schedule_daily(job_queue):
         if not cat.get("schedule_enabled", True):
             log.info("schedule disabled for %s", cat["key"])
             continue
-        hh, mm = _hhmm(cat.get("post_time"))
         key = cat["key"]
-        job_queue.run_daily(
-            _make_daily_cb(key),
-            time=datetime.time(hour=hh, minute=mm, tzinfo=ist),
-            name=f"daily_post:{key}")
-        log.info("daily post [%s] scheduled at %02d:%02d IST", key, hh, mm)
+        for t in db.read_post_times(cat):
+            hh, mm = _hhmm(t)
+            job_queue.run_daily(
+                _make_daily_cb(key),
+                time=datetime.time(hour=hh, minute=mm, tzinfo=ist),
+                name=f"daily_post:{key}:{hh:02d}:{mm:02d}")
+            log.info("daily post [%s] slot %02d:%02d IST scheduled", key, hh, mm)
 
 
 def _make_daily_cb(key):
