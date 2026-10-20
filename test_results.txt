@@ -1,0 +1,28 @@
+test_custom_notice_preserved (test_delivery_hotfix.DeliveryTests.test_custom_notice_preserved) ... ok
+test_html_caption_escaped_protection_kept (test_delivery_hotfix.DeliveryTests.test_html_caption_escaped_protection_kept) ... ok
+test_hundred_videos_paced_without_downloading (test_delivery_hotfix.DeliveryTests.test_hundred_videos_paced_without_downloading) ... ok
+test_partial_failure_queues_success_and_reports_partial (test_delivery_hotfix.DeliveryTests.test_partial_failure_queues_success_and_reports_partial) ... copy_message failed mid=2 error=BadRequest
+ok
+test_plain_caption_is_not_parsed_as_html (test_delivery_hotfix.DeliveryTests.test_plain_caption_is_not_parsed_as_html) ... ok
+test_real_rate_limit_exhaustion_bounded (test_delivery_hotfix.DeliveryTests.test_real_rate_limit_exhaustion_bounded) ... copy_message RetryAfter mid=1 wait=2.0s attempt=1/4
+copy_message RetryAfter mid=1 wait=2.0s attempt=2/4
+copy_message RetryAfter mid=1 wait=2.0s attempt=3/4
+copy_message RetryAfter mid=1 wait=2.0s attempt=4/4
+ok
+test_real_retryafter_full_wait_not_capped (test_delivery_hotfix.DeliveryTests.test_real_retryafter_full_wait_not_capped) ... copy_message RetryAfter mid=1 wait=65.0s attempt=1/4
+ok
+test_simultaneous_same_token_serialized (test_delivery_hotfix.DeliveryTests.test_simultaneous_same_token_serialized) ... ok
+test_single_video_and_used_token (test_delivery_hotfix.DeliveryTests.test_single_video_and_used_token) ... ok
+test_three_videos_and_subtitle (test_delivery_hotfix.DeliveryTests.test_three_videos_and_subtitle) ... ok
+test_timedelta_retryafter (test_delivery_hotfix.DeliveryTests.test_timedelta_retryafter) ... copy_message RetryAfter mid=1 wait=90.0s attempt=1/4
+ok
+test_two_videos (test_delivery_hotfix.DeliveryTests.test_two_videos) ... ok
+test_used_token_not_replayed (test_delivery_hotfix.DeliveryTests.test_used_token_not_replayed) ... ok
+test_wrong_user_and_expired_tokens_rejected (test_delivery_hotfix.DeliveryTests.test_wrong_user_and_expired_tokens_rejected) ... ok
+test_zero_files_keeps_token_reusable (test_delivery_hotfix.DeliveryTests.test_zero_files_keeps_token_reusable) ... copy_message failed mid=1 error=BadRequest
+ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.089s
+
+OK
