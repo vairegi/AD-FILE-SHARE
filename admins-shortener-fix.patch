@@ -1,0 +1,880 @@
+diff --git a/bot1.py b/bot1.py
+index 0fe1335..cdc9422 100644
+--- a/bot1.py
++++ b/bot1.py
+@@ -289,16 +289,17 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
+         # configured): hand the file over directly, NEVER ban the user for
+         # our outage, and alert the admins which provider(s) failed.
+         await db.mark_token_used(token)
+-        log.warning("shorteners down %s — direct delivery to user %s",
++        log.warning("link generation attempts exhausted %s — direct delivery to user %s",
+                     failures, user_id)
+         for aid in await db.list_admin_ids():
+             try:
+                 await bot.send_message(
+                     aid,
+-                    "⚠️ Shortener outage: no provider could shorten a link "
++                    "⚠️ Link generation failed after provider attempts "
+                     f"(failed: {', '.join(failures) or 'none active'}).\n"
+                     f"User {user_id} got the file directly — no verification, "
+-                    "no ban. Check the /shortenerapi dashboard.")
++                    "no ban. This does not prove a provider-wide outage. "
++                    "Check Render logs for host + error type or HTTP status.")
+             except Exception as exc:
+                 log.warning("admin outage alert to %s failed: %s", aid, exc)
+         await deliver_now(bot, chat_id, user_id, item)
+diff --git a/bot1_admin.py b/bot1_admin.py
+index 8ef21cf..3c617dc 100644
+--- a/bot1_admin.py
++++ b/bot1_admin.py
+@@ -1802,7 +1802,9 @@ async def _send_admin_table(update, context):
+     Links are outside <pre>/<code> in the fallback so Telegram can make
+     names clickable. Access checks and ENV-admin privileges are unchanged.
+     """
+-    rows = await db.list_admins_full()
++    env_ids = set(config._int_list(",".join(map(str, config.ADMIN_IDS or []))))
++    rows = [row for row in await db.list_admins_full()
++            if row.get("source") == "DB" and int(row["user_id"]) not in env_ids]
+     if not rows:
+         await update.message.reply_text(
+             "📋 No bot-added admins.\nAdd one with /addadmin <user_id>.")
+@@ -1844,7 +1846,7 @@ async def _send_admin_table(update, context):
+                 {"text": f"/radmin {uid}"},
+             ])
+         payload = {"blocks": [
+-            {"type": "heading", "text": "📋 Bot-added admins", "size": 3},
++            {"type": "heading", "text": "📋 Bot-added admins · DB only", "size": 3},
+             {"type": "paragraph",
+              "text": f"{len(rows)} total · showing {offset + 1}–{offset + len(page)}. Tap a name to open their profile."},
+             {"type": "table", "cells": cells, "is_bordered": True,
+@@ -1858,7 +1860,7 @@ async def _send_admin_table(update, context):
+             log.warning("rich admin table unavailable; using linked HTML list: %s", exc)
+ 
+         # Keep escaped profile titles intact; never truncate an HTML entity.
+-        lines = [f"📋 <b>Bot-added admins ({len(rows)})</b>"]
++        lines = [f"📋 <b>Bot-added admins · DB only ({len(rows)})</b>"]
+         for i, row in enumerate(page, offset + 1):
+             uid = int(row["user_id"])
+             lines.extend([
+diff --git a/config.py b/config.py
+index 0069ac3..8fb2d6a 100644
+--- a/config.py
++++ b/config.py
+@@ -1,6 +1,7 @@
+ """Central configuration. Everything is read from environment variables —
+ no secret is ever hardcoded in the source."""
+ import os
++import re
+ 
+ from dotenv import load_dotenv
+ 
+@@ -12,15 +13,17 @@ def _clean_username(value: str) -> str:
+ 
+ 
+ def _int_list(raw: str):
+-    """Parse '111,222, 333' -> [111, 222, 333], ignoring junk."""
++    """Accept comma/space/newline/semicolon lists, optionally bracketed/quoted.
++    Never turn '111 222' into the unrelated account 111222.
++    """
+     out = []
+-    for part in (raw or "").replace(" ", "").split(","):
+-        if not part:
++    for part in re.split(r"[,;\s]+", str(raw or "").strip().strip("[]()")):
++        part = part.strip("\"'")
++        if not re.fullmatch(r"[+-]?\d+", part):
+             continue
+-        try:
+-            out.append(int(part))
+-        except ValueError:
+-            pass
++        uid = int(part)
++        if uid not in out:
++            out.append(uid)
+     return out
+ 
+ 
+diff --git a/db.py b/db.py
+index 94ae14e..0f7b992 100644
+--- a/db.py
++++ b/db.py
+@@ -836,8 +836,8 @@ async def list_admins_full():
+     even if somebody previously promoted the same ID using /addadmin.
+     """
+     out, seen = [], set()
+-    env_ids = {int(uid) for uid in (config.ADMIN_IDS or [])}
+-    async for row in _db.admins.find({}).sort("at", 1):
++    env_ids = set(config._int_list(",".join(map(str, config.ADMIN_IDS or []))))
++    async for row in _db.admins.find({"user_id": {"$nin": list(env_ids)}}).sort("at", 1):
+         uid = int(row["user_id"])
+         if uid in env_ids or uid in seen:
+             continue
+diff --git a/linkguard.py b/linkguard.py
+index a55c0d3..ce99145 100644
+--- a/linkguard.py
++++ b/linkguard.py
+@@ -14,17 +14,43 @@ paid-shortener path (mirroring shortener.py's 'down' semantics — never punish
+ the user for our outage).
+ """
+ import logging
++import asyncio
+ from urllib.parse import urlparse
+ 
+ import httpx
+ 
+ import db
++import outbound
+ 
+ log = logging.getLogger("linkguard")
+ 
+ _TIMEOUT = httpx.Timeout(15.0)
+ 
+ 
++async def _post(url, **kwargs):
++    """One retry for transient Worker transport/5xx errors; no auth retry.
++    A lost POST response can leave an unused extra slug/grant, but never
++    changes the intended destination or relaxes the verification checks.
++    """
++    path = urlparse(url).path
++    for attempt in range(2):
++        try:
++            response = await outbound.request("POST", url, timeout=_TIMEOUT, **kwargs)
++        except (httpx.TransportError, asyncio.TimeoutError) as exc:
++            log.warning("linkguard route=%s attempt=%s/2 error=%s",
++                        path, attempt + 1, type(exc).__name__)
++            if attempt == 0:
++                await asyncio.sleep(0.5)
++                continue
++            raise
++        if response.status_code in (500, 502, 503, 504) and attempt == 0:
++            log.warning("linkguard route=%s HTTP=%s; retrying once",
++                        path, response.status_code)
++            await asyncio.sleep(0.5)
++            continue
++        return response
++
++
+ async def _cfg():
+     """(base, key) from DB settings, or (None, None) if not configured."""
+     s = await db.get_settings()
+@@ -65,14 +91,13 @@ async def mint(destination: str, ttl_days=None, honeypot: bool = False,
+     if grant_slug:
+         payload["grant_slug"] = grant_slug
+     try:
+-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+-            r = await client.post(f"{base}/api/admin/mint",
+-                                  headers={"x-admin-key": key},
+-                                  json=payload)
+-            r.raise_for_status()
+-            return (r.json() or {}).get("url")
++        r = await _post(f"{base}/api/admin/mint",
++                              headers={"x-admin-key": key},
++                              json=payload)
++        r.raise_for_status()
++        return (r.json() or {}).get("url")
+     except Exception as exc:
+-        log.warning("linkguard mint failed: %s", exc)
++        log.warning("linkguard mint failed: error=%s", type(exc).__name__)
+         return None
+ 
+ 
+@@ -85,19 +110,18 @@ async def mint_return_grant(final_destination: str):
+     if not base:
+         return None
+     try:
+-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+-            r = await client.post(
+-                f"{base}/api/admin/mint2",
+-                headers={"x-admin-key": key},
+-                json={"final_destination": final_destination,
+-                      "ref_hosts": await shortener_hosts()},
+-            )
+-            r.raise_for_status()
+-            d = r.json() or {}
+-            if d.get("finish2_url") and d.get("slug"):
+-                return d
++        r = await _post(
++            f"{base}/api/admin/mint2",
++            headers={"x-admin-key": key},
++            json={"final_destination": final_destination,
++                  "ref_hosts": await shortener_hosts()},
++        )
++        r.raise_for_status()
++        d = r.json() or {}
++        if d.get("finish2_url") and d.get("slug"):
++            return d
+     except Exception as exc:
+-        log.warning("linkguard mint2 failed: %s", exc)
++        log.warning("linkguard mint2 failed: error=%s", type(exc).__name__)
+     return None
+ 
+ 
+@@ -108,13 +132,12 @@ async def push_ref_hosts() -> bool:
+     if not base:
+         return False
+     try:
+-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+-            r = await client.post(f"{base}/api/admin/ref_hosts",
+-                                  headers={"x-admin-key": key},
+-                                  json={"hosts": await shortener_hosts()})
+-            return bool(r.json().get("ok"))
++        r = await _post(f"{base}/api/admin/ref_hosts",
++                              headers={"x-admin-key": key},
++                              json={"hosts": await shortener_hosts()})
++        return bool(r.json().get("ok"))
+     except Exception as exc:
+-        log.warning("linkguard ref_hosts push failed: %s", exc)
++        log.warning("linkguard ref_hosts push failed: error=%s", type(exc).__name__)
+         return False
+ 
+ 
+@@ -123,13 +146,12 @@ async def revoke(slug: str) -> bool:
+     if not base:
+         return False
+     try:
+-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+-            r = await client.post(f"{base}/api/admin/revoke",
+-                                  headers={"x-admin-key": key},
+-                                  json={"slug": slug})
+-            return bool(r.json().get("ok"))
++        r = await _post(f"{base}/api/admin/revoke",
++                              headers={"x-admin-key": key},
++                              json={"slug": slug})
++        return bool(r.json().get("ok"))
+     except Exception as exc:
+-        log.warning("linkguard revoke failed: %s", exc)
++        log.warning("linkguard revoke failed: error=%s", type(exc).__name__)
+         return False
+ 
+ 
+@@ -138,13 +160,12 @@ async def add_decoys(urls) -> bool:
+     if not base or not urls:
+         return False
+     try:
+-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+-            r = await client.post(f"{base}/api/admin/decoys",
+-                                  headers={"x-admin-key": key},
+-                                  json={"urls": list(urls)})
+-            return bool(r.json().get("ok"))
++        r = await _post(f"{base}/api/admin/decoys",
++                              headers={"x-admin-key": key},
++                              json={"urls": list(urls)})
++        return bool(r.json().get("ok"))
+     except Exception as exc:
+-        log.warning("linkguard decoys failed: %s", exc)
++        log.warning("linkguard decoys failed: error=%s", type(exc).__name__)
+         return False
+ 
+ 
+@@ -153,9 +174,8 @@ async def health() -> bool:
+     if not base:
+         return False
+     try:
+-        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
+-            r = await client.get(f"{base}/api/health")
+-            return r.status_code == 200 and (r.json() or {}).get("ok") is True
++        r = await outbound.request("GET", f"{base}/api/health")
++        return r.status_code == 200 and (r.json() or {}).get("ok") is True
+     except Exception:
+         return False
+ 
+@@ -173,16 +193,14 @@ async def _admin_post(path: str, payload=None):
+     if not base:
+         return None
+     try:
+-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+-            r = await client.post(f"{base}{path}",
+-                                  headers={"x-admin-key": key},
+-                                  json=payload or {})
+-            if r.status_code == 200:
+-                return r.json()
+-            log.warning("linkguard admin %s -> HTTP %s: %s", path,
+-                        r.status_code, r.text[:200])
++        r = await _post(f"{base}{path}",
++                              headers={"x-admin-key": key},
++                              json=payload or {})
++        if r.status_code == 200:
++            return r.json()
++        log.warning("linkguard admin %s -> HTTP %s", path, r.status_code)
+     except Exception as exc:
+-        log.warning("linkguard admin %s failed: %s", path, exc)
++        log.warning("linkguard admin %s failed: error=%s", path, type(exc).__name__)
+     return None
+ 
+ 
+diff --git a/main.py b/main.py
+index 73379ab..0951b9e 100644
+--- a/main.py
++++ b/main.py
+@@ -19,6 +19,7 @@ from telegram import Update
+ 
+ import config
+ import db
++import outbound
+ from bot1 import build_bot1, schedule_daily, schedule_broadcast_sweeper
+ from bot2 import build_bot2, schedule_sweeper
+ 
+@@ -26,6 +27,9 @@ logging.basicConfig(
+     level=logging.INFO,
+     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+ )
++# httpx INFO records include full Telegram bot tokens and shortener query keys.
++logging.getLogger("httpx").setLevel(logging.WARNING)
++logging.getLogger("httpcore").setLevel(logging.WARNING)
+ log = logging.getLogger("main")
+ 
+ bot1 = build_bot1()
+@@ -109,7 +113,7 @@ async def lifespan(app: FastAPI):
+     schedule_broadcast_sweeper(bot1)   # v4.0: deletes timed /broadcast copies
+     schedule_sweeper(bot2)
+     await _set_commands()
+-    log.info("Both bots are up.")
++    log.info("Both bots are up. Patch: db-admins-only + resilient-shorteners-v1")
+ 
+     yield
+ 
+@@ -120,7 +124,10 @@ async def lifespan(app: FastAPI):
+         await bot2.stop()
+         await bot2.shutdown()
+     finally:
+-        await db.close()
++        try:
++            await outbound.close()
++        finally:
++            await db.close()
+ 
+ 
+ app = FastAPI(title="Telegram Video Bots", lifespan=lifespan)
+diff --git a/shortener.py b/shortener.py
+index 61d26f1..404952d 100644
+--- a/shortener.py
++++ b/shortener.py
+@@ -11,39 +11,131 @@ Request : GET <base>?api=<KEY>&url=<url-encoded link>&format=text
+ Response: the raw short link as plain text (or JSON when format is omitted).
+ """
+ import logging
++import asyncio
++import uuid
++from contextvars import ContextVar
++from datetime import datetime, timezone
++from email.utils import parsedate_to_datetime
++from urllib.parse import urlsplit
+ 
+ import httpx
+ 
+ import config
+ import db
++import outbound
+ 
+ log = logging.getLogger("shortener")
+ 
++_trace = ContextVar("shortener_request_id", default="standalone")
+ 
+-async def _shorten_with(base: str, key: str, long_url: str):
+-    """Perform the actual API call against one provider. URL or None."""
+-    params = {"api": key, "url": long_url, "format": "text"}
++
++def _warn(message, *args):
++    log.warning("request=%s " + message, _trace.get(), *args)
++
++
++MAX_ATTEMPTS = 2
++MAX_RETRY_DELAY = 8.0
++
++
++def _http_url(value):
++    if not isinstance(value, str):
++        return None
++    value = value.strip().strip('"').strip("'")
+     try:
+-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+-            resp = await client.get(base, params=params)
+-            resp.raise_for_status()
+-            text = (resp.text or "").strip().strip('"')
+-            if text.startswith("http"):
+-                return text
+-            # Some providers ignore format=text and return JSON.
++        parsed = urlsplit(value)
++        if (parsed.scheme in ("http", "https") and parsed.hostname
++                and not parsed.username and not parsed.password
++                and not any(ch.isspace() for ch in value)):
++            return value
++    except ValueError:
++        pass
++    return None
++
++
++def _retry_delay(response, attempt):
++    """Respect Retry-After. A long wait skips this provider, never retries early."""
++    raw = response.headers.get("retry-after")
++    if raw:
++        try:
++            seconds = float(raw)
++        except ValueError:
+             try:
+-                data = resp.json()
+-                if isinstance(data, dict):
+-                    if data.get("status") == "error":
+-                        log.warning("Shortener error: %s", data.get("message"))
+-                        return None
+-                    value = data.get("shortenedUrl") or data.get("shortened_url")
+-                    if value:
+-                        return str(value).strip('"')
+-            except Exception:
+-                pass
+-    except Exception as exc:
+-        log.warning("Shortener request failed: %s", exc)
++                date = parsedate_to_datetime(raw)
++                if date.tzinfo is None:
++                    date = date.replace(tzinfo=timezone.utc)
++                seconds = (date - datetime.now(timezone.utc)).total_seconds()
++            except (ValueError, TypeError, OverflowError):
++                seconds = 0.5 * (attempt + 1)
++        if seconds > MAX_RETRY_DELAY:
++            return None
++        return max(seconds, 0.0)
++    return 0.5 * (attempt + 1)
++
++
++async def _shorten_with(base: str, key: str, long_url: str):
++    """Same URL-or-None API, now with pooled HTTP and one transient retry.
++
++    Diagnostics identify host + exception CLASS, never credentials, the
++    destination, exception text (which can contain the key), or response body.
++    Provider API errors / auth failures do not get pointless retries.
++    """
++    try:
++        host = urlsplit(base).hostname or "invalid-host"
++    except ValueError:
++        host = "invalid-host"
++    params = {"api": key, "url": long_url, "format": "text"}
++    for attempt in range(MAX_ATTEMPTS):
++        try:
++            resp = await outbound.request("GET", base, params=params)
++        except (httpx.TransportError, asyncio.TimeoutError) as exc:
++            _warn("shortener host=%s attempt=%s/%s error=%s",
++                        host, attempt + 1, MAX_ATTEMPTS, type(exc).__name__)
++            if attempt + 1 < MAX_ATTEMPTS:
++                await asyncio.sleep(0.5 * (attempt + 1))
++                continue
++            return None
++        except Exception as exc:
++            _warn("shortener host=%s error=%s (non-retryable)",
++                        host, type(exc).__name__)
++            return None
++
++        status = resp.status_code
++        if status == 429 or status in (408, 500, 502, 503, 504):
++            _warn("shortener host=%s attempt=%s/%s HTTP=%s",
++                        host, attempt + 1, MAX_ATTEMPTS, status)
++            delay = _retry_delay(resp, attempt)
++            if attempt + 1 < MAX_ATTEMPTS and delay is not None:
++                await asyncio.sleep(delay)
++                continue
++            return None
++        if not 200 <= status < 300:
++            _warn("shortener host=%s HTTP=%s (non-retryable)", host, status)
++            return None
++
++        try:
++            data = resp.json()
++        except (ValueError, TypeError):
++            data = None
++        value = None
++        if isinstance(data, dict):
++            if str(data.get("status", "")).lower() in ("error", "failed", "fail"):
++                _warn("shortener host=%s error=ProviderAPIError HTTP=%s", host, status)
++                return None
++            payload = data.get("data") if isinstance(data.get("data"), dict) else data
++            for field in ("shortenedUrl", "shortened_url", "shortUrl", "short_url", "shorturl"):
++                value = _http_url(payload.get(field))
++                if value:
++                    break
++        elif isinstance(data, str):
++            value = _http_url(data)
++        else:
++            value = _http_url(resp.text)
++        if value and value != long_url:
++            return value
++        # Never treat HTTP 200 alone (HTML/challenge/error body) as success.
++        _warn("shortener host=%s error=UnexpectedResponse HTTP=%s content_type=%s",
++                    host, status, resp.headers.get("content-type", "unknown").split(";")[0])
++        return None
+     return None
+ 
+ 
+@@ -52,7 +144,7 @@ async def test_key(base: str, key: str):
+     return await _shorten_with(base, key, "https://example.com/self-test")
+ 
+ 
+-async def shorten(long_url: str, user_id=None, with_status=False):
++async def _shorten_all(long_url: str, user_id=None, with_status=False):
+     """Shorten via the ACTIVE providers WITH FAILOVER (v4.1).
+ 
+     Every active shortener is tried in per-user round-robin order; the first
+@@ -66,14 +158,14 @@ async def shorten(long_url: str, user_id=None, with_status=False):
+     entries = await db.active_shorteners()
+     if not entries:
+         if await db.count_shorteners():
+-            log.warning("All shorteners paused; nothing can serve.")
++            _warn("All shorteners paused; nothing can serve.")
+             result = (None, "down", None, [])
+             return result if with_status else None
+         # Legacy single-key fallback (fresh deploy before migration).
+         settings = await db.get_settings()
+         key = (settings.get("shortener_api_key") or "").strip()
+         if not key:
+-            log.warning("No shortener API key set (DB or env).")
++            _warn("No shortener API key set (DB or env).")
+             result = (None, "down", None, [])
+             return result if with_status else None
+         entries = [{"api_base": (settings.get("shortener_api_base")
+@@ -88,6 +180,17 @@ async def shorten(long_url: str, user_id=None, with_status=False):
+             result = (url, "active", entry.get("site"), failures)
+             return result if with_status else url
+         failures.append(entry.get("site"))
+-    log.warning("ALL shorteners failed for one link: %s", failures)
++    _warn("Link generation failed for this request; providers exhausted=%s (not proof of a global outage)", failures)
+     result = (None, "down", None, failures)
+     return result if with_status else None
++
++
++async def shorten(long_url: str, user_id=None, with_status=False):
++    """Original result contract, with a non-sensitive per-request log ID.
++    Concurrent downloads can now be separated without logging user links.
++    """
++    marker = _trace.set(uuid.uuid4().hex[:12])
++    try:
++        return await _shorten_all(long_url, user_id=user_id, with_status=with_status)
++    finally:
++        _trace.reset(marker)
+diff --git a/outbound.py b/outbound.py
+new file mode 100644
+index 0000000..fa26c3a
+--- /dev/null
++++ b/outbound.py
+@@ -0,0 +1,46 @@
++"""Bounded, pooled HTTP for paid shorteners and LinkGuard (not Telegram).
++
++One client per service event loop; no user links/keys are logged here.
++Call close() during application shutdown.
++"""
++import asyncio
++import httpx
++
++MAX_IN_FLIGHT = 8
++REQUEST_DEADLINE = 45.0
++TIMEOUT = httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=5.0)
++_client = None
++_loop = None
++_slots = None
++
++
++def client():
++    global _client, _loop, _slots
++    loop = asyncio.get_running_loop()
++    # The real service has one loop. The loop check also isolates offline
++    # tests that use separate asyncio.run() calls.
++    if _client is None or _client.is_closed or _loop is not loop:
++        _client = httpx.AsyncClient(
++            timeout=TIMEOUT, follow_redirects=True,
++            limits=httpx.Limits(max_connections=MAX_IN_FLIGHT,
++                               max_keepalive_connections=MAX_IN_FLIGHT,
++                               keepalive_expiry=20.0))
++        _loop = loop
++        _slots = asyncio.Semaphore(MAX_IN_FLIGHT)
++    return _client
++
++
++async def request(method, url, **kwargs):
++    pool = client()
++    # Include queueing in the deadline: an overloaded queue cannot wait forever.
++    async def perform():
++        async with _slots:
++            return await pool.request(method, url, **kwargs)
++    return await asyncio.wait_for(perform(), timeout=REQUEST_DEADLINE)
++
++
++async def close():
++    global _client, _loop, _slots
++    if _client is not None:
++        await _client.aclose()
++    _client = _loop = _slots = None
+diff --git a/test_resilience_admin.py b/test_resilience_admin.py
+new file mode 100644
+index 0000000..d3e96fa
+--- /dev/null
++++ b/test_resilience_admin.py
+@@ -0,0 +1,273 @@
++"""Offline tests for DB-only admin listing and resilient outbound requests.
++No production credentials, Telegram calls, or provider network calls.
++Run: python3 -m unittest test_resilience_admin -v
++"""
++import asyncio
++import logging
++import os
++import unittest
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++import httpx
++from mongomock_motor import AsyncMongoMockClient
++import config
++import db
++import bot1_admin as admin
++import shortener
++import linkguard
++import outbound
++
++class ConfigTests(unittest.TestCase):
++    def test_accepted_separators_and_no_concatenation(self):
++        for value in ('111,222', '111 222', '111\n222', '111;222', '[111,222]', '["111", "222"]'):
++            self.assertEqual(config._int_list(value), [111, 222], value)
++        self.assertEqual(config._int_list('111, junk, 111, 222'), [111,222])
++
++class AdminTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.old_db, self.old_env = db._db, config.ADMIN_IDS
++        self.mongo = AsyncMongoMockClient()
++        db._db = self.mongo['offline_admin_test']
++        config.ADMIN_IDS = [111]
++        self.message = SimpleNamespace(reply_text=AsyncMock())
++        self.update = SimpleNamespace(message=self.message, effective_message=self.message,
++            effective_chat=SimpleNamespace(id=1), effective_user=SimpleNamespace(id=111))
++        self.bot = SimpleNamespace(_post=AsyncMock(return_value={}), get_chat=AsyncMock(
++            return_value=SimpleNamespace(full_name='Resolved Title', username='resolved')))
++        self.context = SimpleNamespace(bot=self.bot, args=[])
++
++    async def asyncTearDown(self):
++        db._db, config.ADMIN_IDS = self.old_db, self.old_env
++        self.mongo.close()
++
++    async def seed(self, uid=222):
++        await db.add_db_admin(uid)
++        await db._db.users.update_one({'user_id':uid}, {'$set':{'name':'A & <B> 😄'}}, upsert=True)
++
++    async def test_env_overlap_hidden_in_database_and_authority_retained(self):
++        await self.seed(111)
++        await self.seed(222)
++        self.assertEqual([r['user_id'] for r in await db.list_admins_full()], [222])
++        self.assertTrue(await db.is_db_admin(111))
++        from utils import is_admin
++        self.assertTrue(await is_admin(111))
++
++    async def test_renderer_defense_even_if_db_helper_returns_env_rows(self):
++        rows = [{'user_id':111,'source':'DB','name':'Hidden'},
++                {'user_id':333,'source':'ENV','name':'Hidden too'},
++                {'user_id':222,'source':'DB','name':'Visible','added_at':0}]
++        with patch.object(db,'list_admins_full',AsyncMock(return_value=rows)):
++            await admin._send_admin_table(self.update,self.context)
++        cells=self.bot._post.call_args.kwargs['data']['rich_message']['blocks'][2]['cells']
++        self.assertEqual(len(cells),2)
++        self.assertEqual(cells[1][1]['text']['url'],'tg://user?id=222')
++        self.assertEqual(cells[1][1]['text']['text'],'Visible')
++
++    async def test_profile_title_and_safe_html_fallback(self):
++        await self.seed()
++        self.bot._post.side_effect=RuntimeError('simulated rich rejection')
++        await admin._send_admin_table(self.update,self.context)
++        text=self.message.reply_text.call_args.args[0]
++        self.assertIn('<a href="tg://user?id=222">A &amp; &lt;B&gt; 😄</a>',text)
++        self.assertIn('DB only',text)
++        self.assertNotIn('111',text)
++        self.assertNotIn('<pre>',text)
++
++    async def test_empty_list_and_permissions(self):
++        await admin.cmd_addadmin(self.update,self.context)
++        self.assertIn('No bot-added admins',self.message.reply_text.call_args.args[0])
++        self.update.effective_user=SimpleNamespace(id=999)
++        await admin.cmd_addadmin(self.update,self.context)
++        self.assertIn('only by admins',self.message.reply_text.call_args.args[0])
++
++    async def test_add_and_remove_unchanged(self):
++        self.context.args=['222']
++        await admin.cmd_addadmin(self.update,self.context)
++        self.assertTrue(await db.is_db_admin(222))
++        await admin.cmd_radmin(self.update,self.context)
++        self.assertFalse(await db.is_db_admin(222))
++        self.context.args=['111']
++        await admin.cmd_radmin(self.update,self.context)
++        self.assertIn('ADMIN_IDS',self.message.reply_text.call_args.args[0])
++
++    async def test_pagination_keeps_all_db_admins(self):
++        for uid in range(1000,1031):
++            await self.seed(uid)
++        await admin._send_admin_table(self.update,self.context)
++        sizes=[len(c.kwargs['data']['rich_message']['blocks'][2]['cells'])-1
++               for c in self.bot._post.call_args_list]
++        self.assertEqual(sizes,[15,15,1])
++
++class NetworkTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await outbound.close()
++        self.fake_key='OFFLINE_SECRET_KEY'
++        self.destination='https://telegram.example/start?token=PRIVATE_DESTINATION'
++
++    async def asyncTearDown(self):
++        await outbound.close()
++
++    async def with_transport(self, handler):
++        outbound._client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
++        outbound._loop=asyncio.get_running_loop()
++        outbound._slots=asyncio.Semaphore(outbound.MAX_IN_FLIGHT)
++
++    async def test_timeout_retried_and_recovers_no_empty_error(self):
++        requests=[]
++        def handler(request):
++            requests.append(request)
++            if len(requests)==1:
++                raise httpx.ReadTimeout('',request=request)
++            return httpx.Response(200,text='https://provider.example/short')
++        await self.with_transport(handler)
++        with patch.object(shortener.asyncio,'sleep',AsyncMock()), self.assertLogs('shortener',level='WARNING') as logs:
++            result=await shortener._shorten_with('https://provider.example/api',self.fake_key,self.destination)
++        self.assertEqual(result,'https://provider.example/short')
++        self.assertEqual(len(requests),2)
++        self.assertIn('ReadTimeout','\n'.join(logs.output))
++        self.assertNotIn(self.fake_key,'\n'.join(logs.output))
++        self.assertNotIn('PRIVATE_DESTINATION','\n'.join(logs.output))
++
++    async def test_read_connect_and_protocol_failures_have_bounded_attempts(self):
++        for error in (httpx.ConnectTimeout,httpx.ReadTimeout,httpx.RemoteProtocolError):
++            count=[]
++            def handler(request):
++                count.append(1)
++                raise error('',request=request)
++            await outbound.close()
++            await self.with_transport(handler)
++            with patch.object(shortener.asyncio,'sleep',AsyncMock()):
++                result=await shortener._shorten_with('https://provider.example/api',self.fake_key,self.destination)
++            self.assertIsNone(result)
++            self.assertEqual(len(count),2)
++
++    async def test_503_retry_recovers(self):
++        calls=[]
++        def handler(request):
++            calls.append(1)
++            return httpx.Response(503 if len(calls)==1 else 200,
++                                  text='busy' if len(calls)==1 else 'https://provider.example/s')
++        await self.with_transport(handler)
++        with patch.object(shortener.asyncio,'sleep',AsyncMock()):
++            self.assertEqual(await shortener._shorten_with('https://provider.example/api','k','https://dest.example'),
++                             'https://provider.example/s')
++        self.assertEqual(len(calls),2)
++
++    async def test_auth_error_not_retried(self):
++        calls=[]
++        def handler(request):
++            calls.append(1); return httpx.Response(401,text='unauthorized')
++        await self.with_transport(handler)
++        self.assertIsNone(await shortener._shorten_with('https://provider.example/api','k','https://dest.example'))
++        self.assertEqual(len(calls),1)
++
++    async def test_rate_limit_retry_after_respected(self):
++        calls=[]
++        def handler(request):
++            calls.append(1)
++            if len(calls)==1:
++                return httpx.Response(429,headers={'Retry-After':'3'})
++            return httpx.Response(200,text='https://provider.example/s')
++        await self.with_transport(handler)
++        with patch.object(shortener.asyncio,'sleep',AsyncMock()) as sleep:
++            self.assertEqual(await shortener._shorten_with('https://provider.example/api','k','https://dest.example'),
++                             'https://provider.example/s')
++            sleep.assert_awaited_once_with(3.0)
++
++    async def test_long_retry_after_skips_without_early_retry(self):
++        calls=[]
++        def handler(request):
++            calls.append(1); return httpx.Response(429,headers={'Retry-After':'120'})
++        await self.with_transport(handler)
++        with patch.object(shortener.asyncio,'sleep',AsyncMock()) as sleep:
++            self.assertIsNone(await shortener._shorten_with('https://provider.example/api','k','https://dest.example'))
++            sleep.assert_not_awaited()
++        self.assertEqual(len(calls),1)
++
++    async def test_text_and_json_response_variants(self):
++        variants=[b'https://provider.example/s', b'"https://provider.example/s"',
++            b'{"status":"success","shortenedUrl":"https://provider.example/s"}',
++            b'{"data":{"short_url":"https://provider.example/s"}}']
++        for payload in variants:
++            await outbound.close()
++            await self.with_transport(lambda request: httpx.Response(200,content=payload))
++            self.assertEqual(await shortener._shorten_with('https://provider.example/api','k','https://dest.example'),
++                             'https://provider.example/s')
++
++    async def test_200_html_errors_and_input_echo_not_success(self):
++        for payload in ('<html>challenge</html>', '{"status":"error","message":"bad key"}',
++                        'https://dest.example', 'https://provider.example/s garbage'):
++            await outbound.close()
++            await self.with_transport(lambda request: httpx.Response(200,text=payload))
++            self.assertIsNone(await shortener._shorten_with('https://provider.example/api','k','https://dest.example'))
++
++    async def test_round_robin_failover_and_result_contract_preserved(self):
++        entries=[{'site':'a','api_base':'https://a.example/api','api_key':'a'},
++                 {'site':'b','api_base':'https://b.example/api','api_key':'b'}]
++        fake=AsyncMock(side_effect=[None,'https://b.example/s'])
++        with patch.object(db,'active_shorteners',AsyncMock(return_value=entries)), \
++             patch.object(db,'bump_rr_cursor',AsyncMock(return_value=0)), \
++             patch.object(shortener,'_shorten_with',fake):
++            self.assertEqual(await shortener.shorten('https://dest.example',with_status=True),
++                             ('https://b.example/s','active','b',['a']))
++        with patch.object(db,'active_shorteners',AsyncMock(return_value=entries)), \
++             patch.object(db,'bump_rr_cursor',AsyncMock(return_value=0)), \
++             patch.object(shortener,'_shorten_with',AsyncMock(return_value=None)):
++            self.assertEqual(await shortener.shorten('https://dest.example',with_status=True),
++                             (None,'down',None,['a','b']))
++
++    async def test_shared_client_reused_and_closed(self):
++        await self.with_transport(lambda request: httpx.Response(200,text='ok'))
++        first=outbound.client()
++        await outbound.request('GET','https://a.example')
++        await outbound.request('GET','https://b.example')
++        self.assertIs(first,outbound.client())
++        await outbound.close()
++        self.assertTrue(first.is_closed)
++        self.assertIsNone(outbound._client)
++
++    async def test_maximum_inflight_is_bounded(self):
++        active=peak=0
++        release=asyncio.Event()
++        async def handler(request):
++            nonlocal active,peak
++            active+=1; peak=max(peak,active)
++            await release.wait()
++            active-=1
++            return httpx.Response(200,text='ok')
++        await self.with_transport(handler)
++        tasks=[asyncio.create_task(outbound.request('GET','https://provider.example')) for _ in range(20)]
++        for _ in range(100):
++            await asyncio.sleep(0)
++            if peak==outbound.MAX_IN_FLIGHT: break
++        self.assertEqual(peak,outbound.MAX_IN_FLIGHT)
++        release.set()
++        await asyncio.gather(*tasks)
++        self.assertEqual(peak,outbound.MAX_IN_FLIGHT)
++
++    async def test_worker_timeout_retried_once(self):
++        calls=[]
++        def handler(request):
++            calls.append(request)
++            if len(calls)==1: raise httpx.ConnectTimeout('',request=request)
++            return httpx.Response(200,json={'slug':'test','finish2_url':'https://worker.example/finish2?s=test'})
++        await self.with_transport(handler)
++        settings={'linkguard_base':'https://worker.example','linkguard_key':'offline'}
++        with patch.object(db,'get_settings',AsyncMock(return_value=settings)), \
++             patch.object(linkguard,'shortener_hosts',AsyncMock(return_value=[])), \
++             patch.object(linkguard.asyncio,'sleep',AsyncMock()):
++            result=await linkguard.mint_return_grant('https://dest.example')
++        self.assertEqual(result['slug'],'test')
++        self.assertEqual(len(calls),2)
++
++    async def test_request_deadline_is_bounded(self):
++        async def handler(request):
++            await asyncio.Event().wait()
++        await self.with_transport(handler)
++        with patch.object(outbound,'REQUEST_DEADLINE',0.01):
++            with self.assertRaises(asyncio.TimeoutError):
++                await outbound.request('GET','https://provider.example')
++
++if __name__=='__main__':
++    unittest.main(verbosity=2)

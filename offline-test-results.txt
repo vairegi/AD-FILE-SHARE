@@ -1,0 +1,28 @@
+rich admin table unavailable; using linked HTML list: simulated rich rejection
+request=standalone shortener host=provider.example error=UnexpectedResponse HTTP=200 content_type=text/plain
+request=standalone shortener host=provider.example error=ProviderAPIError HTTP=200
+request=standalone shortener host=provider.example error=UnexpectedResponse HTTP=200 content_type=text/plain
+request=standalone shortener host=provider.example error=UnexpectedResponse HTTP=200 content_type=text/plain
+request=standalone shortener host=provider.example attempt=1/2 HTTP=503
+request=standalone shortener host=provider.example HTTP=401 (non-retryable)
+request=standalone shortener host=provider.example attempt=1/2 HTTP=429
+request=standalone shortener host=provider.example attempt=1/2 HTTP=429
+request=standalone shortener host=provider.example attempt=1/2 error=ConnectTimeout
+request=standalone shortener host=provider.example attempt=2/2 error=ConnectTimeout
+request=standalone shortener host=provider.example attempt=1/2 error=ReadTimeout
+request=standalone shortener host=provider.example attempt=2/2 error=ReadTimeout
+request=standalone shortener host=provider.example attempt=1/2 error=RemoteProtocolError
+request=standalone shortener host=provider.example attempt=2/2 error=RemoteProtocolError
+request=ab0360137a1a Link generation failed for this request; providers exhausted=['a', 'b'] (not proof of a global outage)
+linkguard route=/api/admin/mint2 attempt=1/2 error=ConnectTimeout
+linkguard route=/api/admin/mint HTTP=500; retrying once
+linkguard mint failed: error=HTTPStatusError
+shortener_hosts failed: 'Cursor' object has no attribute 'to_list'
+shortener_hosts failed: 'Cursor' object has no attribute 'to_list'
+linkguard route=/api/admin/mint2 HTTP=500; retrying once
+linkguard mint2 failed: error=HTTPStatusError
+shortener_hosts failed: 'Cursor' object has no attribute 'to_list'
+----------------------------------------------------------------------
+Ran 56 tests in 1.087s
+
+OK

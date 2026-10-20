@@ -1802,7 +1802,9 @@ async def _send_admin_table(update, context):
     Links are outside <pre>/<code> in the fallback so Telegram can make
     names clickable. Access checks and ENV-admin privileges are unchanged.
     """
-    rows = await db.list_admins_full()
+    env_ids = set(config._int_list(",".join(map(str, config.ADMIN_IDS or []))))
+    rows = [row for row in await db.list_admins_full()
+            if row.get("source") == "DB" and int(row["user_id"]) not in env_ids]
     if not rows:
         await update.message.reply_text(
             "📋 No bot-added admins.\nAdd one with /addadmin <user_id>.")
@@ -1844,7 +1846,7 @@ async def _send_admin_table(update, context):
                 {"text": f"/radmin {uid}"},
             ])
         payload = {"blocks": [
-            {"type": "heading", "text": "📋 Bot-added admins", "size": 3},
+            {"type": "heading", "text": "📋 Bot-added admins · DB only", "size": 3},
             {"type": "paragraph",
              "text": f"{len(rows)} total · showing {offset + 1}–{offset + len(page)}. Tap a name to open their profile."},
             {"type": "table", "cells": cells, "is_bordered": True,
@@ -1858,7 +1860,7 @@ async def _send_admin_table(update, context):
             log.warning("rich admin table unavailable; using linked HTML list: %s", exc)
 
         # Keep escaped profile titles intact; never truncate an HTML entity.
-        lines = [f"📋 <b>Bot-added admins ({len(rows)})</b>"]
+        lines = [f"📋 <b>Bot-added admins · DB only ({len(rows)})</b>"]
         for i, row in enumerate(page, offset + 1):
             uid = int(row["user_id"])
             lines.extend([

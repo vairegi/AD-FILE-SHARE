@@ -1,6 +1,7 @@
 """Central configuration. Everything is read from environment variables —
 no secret is ever hardcoded in the source."""
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -12,15 +13,17 @@ def _clean_username(value: str) -> str:
 
 
 def _int_list(raw: str):
-    """Parse '111,222, 333' -> [111, 222, 333], ignoring junk."""
+    """Accept comma/space/newline/semicolon lists, optionally bracketed/quoted.
+    Never turn '111 222' into the unrelated account 111222.
+    """
     out = []
-    for part in (raw or "").replace(" ", "").split(","):
-        if not part:
+    for part in re.split(r"[,;\s]+", str(raw or "").strip().strip("[]()")):
+        part = part.strip("\"'")
+        if not re.fullmatch(r"[+-]?\d+", part):
             continue
-        try:
-            out.append(int(part))
-        except ValueError:
-            pass
+        uid = int(part)
+        if uid not in out:
+            out.append(uid)
     return out
 
 

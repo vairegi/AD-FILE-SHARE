@@ -19,6 +19,7 @@ from telegram import Update
 
 import config
 import db
+import outbound
 from bot1 import build_bot1, schedule_daily, schedule_broadcast_sweeper
 from bot2 import build_bot2, schedule_sweeper
 
@@ -26,6 +27,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+# httpx INFO records include full Telegram bot tokens and shortener query keys.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("main")
 
 bot1 = build_bot1()
@@ -109,7 +113,7 @@ async def lifespan(app: FastAPI):
     schedule_broadcast_sweeper(bot1)   # v4.0: deletes timed /broadcast copies
     schedule_sweeper(bot2)
     await _set_commands()
-    log.info("Both bots are up.")
+    log.info("Both bots are up. Patch: db-admins-only + resilient-shorteners-v1")
 
     yield
 
@@ -120,7 +124,10 @@ async def lifespan(app: FastAPI):
         await bot2.stop()
         await bot2.shutdown()
     finally:
-        await db.close()
+        try:
+            await outbound.close()
+        finally:
+            await db.close()
 
 
 app = FastAPI(title="Telegram Video Bots", lifespan=lifespan)

@@ -289,16 +289,17 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
         # configured): hand the file over directly, NEVER ban the user for
         # our outage, and alert the admins which provider(s) failed.
         await db.mark_token_used(token)
-        log.warning("shorteners down %s — direct delivery to user %s",
+        log.warning("link generation attempts exhausted %s — direct delivery to user %s",
                     failures, user_id)
         for aid in await db.list_admin_ids():
             try:
                 await bot.send_message(
                     aid,
-                    "⚠️ Shortener outage: no provider could shorten a link "
+                    "⚠️ Link generation failed after provider attempts "
                     f"(failed: {', '.join(failures) or 'none active'}).\n"
                     f"User {user_id} got the file directly — no verification, "
-                    "no ban. Check the /shortenerapi dashboard.")
+                    "no ban. This does not prove a provider-wide outage. "
+                    "Check Render logs for host + error type or HTTP status.")
             except Exception as exc:
                 log.warning("admin outage alert to %s failed: %s", aid, exc)
         await deliver_now(bot, chat_id, user_id, item)

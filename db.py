@@ -836,8 +836,8 @@ async def list_admins_full():
     even if somebody previously promoted the same ID using /addadmin.
     """
     out, seen = [], set()
-    env_ids = {int(uid) for uid in (config.ADMIN_IDS or [])}
-    async for row in _db.admins.find({}).sort("at", 1):
+    env_ids = set(config._int_list(",".join(map(str, config.ADMIN_IDS or []))))
+    async for row in _db.admins.find({"user_id": {"$nin": list(env_ids)}}).sort("at", 1):
         uid = int(row["user_id"])
         if uid in env_ids or uid in seen:
             continue

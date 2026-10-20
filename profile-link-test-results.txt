@@ -1,0 +1,13 @@
+rich verified table failed (rich rejected); text fallback
+PASS - rich path sent header + table(s)
+PASS - rich table has exactly 2 user rows
+PASS - every Name cell is a text_link to tg://user?id=
+PASS - normal row label is profile TITLE 'Ananya Singh' (not @username/id)
+PASS - legacy row backfilled from users collection -> title 'Ravi Kumar'
+PASS - fallback emits HTML pages
+PASS - fallback name 1 is an HTML profile link with the TITLE
+PASS - fallback name 2 (legacy) is an HTML profile link with backfilled TITLE
+PASS - fallback shows no bare '880001' outside its link
+PASS - empty day -> 📭 message, no crash
+
+10/10 checks passed
