@@ -830,28 +830,26 @@ async def list_admin_ids():
 
 # ── v4.9.10: extended admin listing + revocation ─────────────
 async def list_admins_full():
-    """Every admin (ENV + DB-promoted) with display info + source flag and
-    timestamp. ENV rows come first so the table can mark them non-removable."""
-    out = []
-    for uid in (config.ADMIN_IDS or []):
-        u = await get_user(int(uid))
-        out.append({
-            "user_id": int(uid), "source": "ENV",
-            "username": (u or {}).get("username"),
-            "name": ((u or {}).get("name")
-                     or (u or {}).get("first_name")
-                     or f"id:{uid}"),
-            "added_at": None,
-        })
+    """MongoDB-promoted admins only; ENV IDs stay authorized but hidden.
+
+    Exclude overlapping IDs too: an ENV admin must not appear in this list
+    even if somebody previously promoted the same ID using /addadmin.
+    """
+    out, seen = [], set()
+    env_ids = {int(uid) for uid in (config.ADMIN_IDS or [])}
     async for row in _db.admins.find({}).sort("at", 1):
         uid = int(row["user_id"])
-        u = await get_user(uid)
+        if uid in env_ids or uid in seen:
+            continue
+        seen.add(uid)
+        u = await get_user(uid) or {}
+        full_name = " ".join(str(u.get(k) or "").strip()
+                             for k in ("first_name", "last_name")).strip()
+        name = u.get("full_name") or u.get("name") or full_name
         out.append({
             "user_id": uid, "source": "DB",
-            "username": (u or {}).get("username"),
-            "name": ((u or {}).get("name")
-                     or (u or {}).get("first_name")
-                     or f"id:{uid}"),
+            "username": u.get("username") or row.get("username"),
+            "name": name or row.get("name") or row.get("first_name"),
             "added_at": float(row.get("at") or 0.0),
         })
     return out

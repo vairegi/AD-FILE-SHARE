@@ -1,0 +1,13 @@
+test_add_remove_and_env_authority_unchanged (__main__.AdminListTests.test_add_remove_and_env_authority_unchanged) ... ok
+test_empty_list (__main__.AdminListTests.test_empty_list) ... ok
+test_env_and_overlap_hidden (__main__.AdminListTests.test_env_and_overlap_hidden) ... ok
+test_html_fallback_escaped_clickable_title (__main__.AdminListTests.test_html_fallback_escaped_clickable_title) ... ok
+test_nonadmin_cannot_list (__main__.AdminListTests.test_nonadmin_cannot_list) ... ok
+test_pagination_preserves_all_admins (__main__.AdminListTests.test_pagination_preserves_all_admins) ... ok
+test_profile_title_in_rich_table (__main__.AdminListTests.test_profile_title_in_rich_table) ... ok
+test_title_resolution_and_numeric_fallback (__main__.AdminListTests.test_title_resolution_and_numeric_fallback) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.028s
+
+OK

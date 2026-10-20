@@ -1777,9 +1777,9 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v4.9.10:
-       /addadmin           -> list admins as a tap-to-copy monospace table
+       /addadmin           -> list MongoDB-added admins with clickable profile titles
        /addadmin <user_id> -> promote one admin (legacy behaviour)
-    Owner-only guard: both branches are admin-only via @admin_only, which
+    Both branches are admin-only via @admin_only, which
     honours both env ADMIN_IDS and DB-promoted admins."""
     args = context.args or []
     if not args:
@@ -1797,34 +1797,77 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_admin_table(update, context):
-    """Render the admin list as a fixed-width HTML/monospace block. The
-    action cell carries the unban-equivalent (`<code>/radmin <id></code>`)
-    for DB-promoted rows; ENV rows show `(env)` so admins can't revoke them
-    by accident (env-only removal happens by editing ADMIN_IDS)."""
+    """MongoDB-only admins with clickable titles, paged rich table + HTML fallback.
+
+    Links are outside <pre>/<code> in the fallback so Telegram can make
+    names clickable. Access checks and ENV-admin privileges are unchanged.
+    """
     rows = await db.list_admins_full()
-    body = ["📋 <b>Bot 1 admins</b>",
-            f"<i>{len(rows)} total · "
-            f"{sum(1 for r in rows if r['source'] == 'ENV')} ENV · "
-            f"{sum(1 for r in rows if r['source'] == 'DB')} DB</i>",
-            "<pre>",
-            f"{'#':<3} {'User':<22} {'Source':<6} {'Added':<22} {'Action':<26}",
-            f"{'-'*3} {'-'*22} {'-'*6} {'-'*22} {'-'*26}"]
-    for i, a in enumerate(rows, 1):
-        uname = f"@{a['username']}" if a.get("username") else (a.get("name") or f"id:{a['user_id']}")
-        added = "—" if not a.get("added_at") else _fmt_ist_ts(a["added_at"])
-        if a["source"] == "DB":
-            action = f"/radmin {a['user_id']}"
-            action_cell = f"<code>/radmin {a['user_id']}</code>"
-        else:
-            action = "(env — edit ADMIN_IDS)"
-            action_cell = "<i>(env)</i>"
-        body.append(f"{i:<3} {_h(uname)[:22]:<22} {a['source']:<6} "
-                    f"{_h(added)[:22]:<22} {action_cell}")
-    body.append("</pre>")
-    body.append("\n<i>Tap the rightmost cell to copy the /radmin command. "
-                "ENV-listed admins persist until removed from the env.</i>")
-    await update.message.reply_text("\n".join(body), parse_mode="HTML",
-                                    disable_web_page_preview=True)
+    if not rows:
+        await update.message.reply_text(
+            "📋 No bot-added admins.\nAdd one with /addadmin <user_id>.")
+        return
+
+    # The list is small and admin-only. Query Telegram only for titles not
+    # already in MongoDB; unresolved users still have a numeric profile link.
+    for row in rows:
+        uid = int(row["user_id"])
+        name = row.get("name")
+        if not name or name == f"id:{uid}":
+            try:
+                chat = await context.bot.get_chat(uid)
+                name = (getattr(chat, "full_name", None)
+                        or " ".join(filter(None, [getattr(chat, "first_name", None),
+                                                  getattr(chat, "last_name", None)]))
+                        or getattr(chat, "title", None))
+                row["username"] = getattr(chat, "username", None) or row.get("username")
+            except Exception:
+                pass
+        row["title"] = str(name or ("@" + str(row["username"]) if row.get("username")
+                                    else f"User {uid}"))[:80]
+
+    page_size = 15
+    for offset in range(0, len(rows), page_size):
+        page = rows[offset:offset + page_size]
+        header = [{"text": text, "is_header": True}
+                  for text in ("#", "Admin", "User ID", "Added", "Remove")]
+        cells = [header]
+        for i, row in enumerate(page, offset + 1):
+            uid = int(row["user_id"])
+            added = _fmt_ist_ts(row["added_at"]) if row.get("added_at") else "—"
+            cells.append([
+                {"text": str(i)},
+                {"text": {"type": "url", "text": row["title"],
+                          "url": f"tg://user?id={uid}"}},
+                {"text": str(uid)},
+                {"text": added},
+                {"text": f"/radmin {uid}"},
+            ])
+        payload = {"blocks": [
+            {"type": "heading", "text": "📋 Bot-added admins", "size": 3},
+            {"type": "paragraph",
+             "text": f"{len(rows)} total · showing {offset + 1}–{offset + len(page)}. Tap a name to open their profile."},
+            {"type": "table", "cells": cells, "is_bordered": True,
+             "is_striped": True, "is_compact": True},
+        ]}
+        try:
+            await context.bot._post("sendRichMessage", data={
+                "chat_id": update.effective_chat.id, "rich_message": payload})
+            continue
+        except Exception as exc:
+            log.warning("rich admin table unavailable; using linked HTML list: %s", exc)
+
+        # Keep escaped profile titles intact; never truncate an HTML entity.
+        lines = [f"📋 <b>Bot-added admins ({len(rows)})</b>"]
+        for i, row in enumerate(page, offset + 1):
+            uid = int(row["user_id"])
+            lines.extend([
+                f'{i}. <a href="tg://user?id={uid}">{_h(row["title"])}</a>',
+                f'ID: <code>{uid}</code> · Remove: <code>/radmin {uid}</code>',
+                "",
+            ])
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+                                        disable_web_page_preview=True)
 
 
 @admin_only
