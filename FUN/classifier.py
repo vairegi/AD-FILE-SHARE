@@ -87,6 +87,7 @@ def classify(posts: List[Dict[str, Any]], channel_id: int,
                 "cover": {
                     "media_type": mtype,
                     "message_id": first.get("message_id"),
+                    "grouped_id": str(first["grouped_id"]) if first.get("grouped_id") else None,
                     "caption": caption,
                     "album_message_ids": [u.get("message_id") for u in unit],
                     "duration": first.get("duration"),

@@ -18,6 +18,9 @@ if (Path(__file__).parent / "handlers" / "__init__.py").exists():
 import handlers
 import runtime
 import userbot_setup
+import live_index
+
+WEBHOOK_UPDATES = ["message", "callback_query", "channel_post"]
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -42,6 +45,7 @@ def build_bot():
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,
+        "index_status": handlers.cmd_index_status,
         "setup_userbot": handlers.cmd_setup_userbot, "cancel": handlers.cmd_cancel, "userbot_status": handlers.cmd_userbot_status,
         "remove_userbot": handlers.cmd_remove_userbot, "botstatus": handlers.cmd_botstatus,
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,
@@ -64,6 +68,7 @@ async def lifespan(app):
     if not config.WEBHOOK_SECRET or config.WEBHOOK_SECRET == "fun_secret":
         raise RuntimeError("Set WEBHOOK_SECRET to a unique random value in Render.")
     await db.connect()
+    await live_index.ensure_indexes()
     app_bot = build_bot()
     await app_bot.initialize()
     await app_bot.start()
@@ -71,7 +76,8 @@ async def lifespan(app):
     config.BOT_USERNAME = app_bot.bot.username
     if config.RENDER_EXTERNAL_URL:
         await app_bot.bot.set_webhook(config.RENDER_EXTERNAL_URL + "/webhook",
-            secret_token=config.WEBHOOK_SECRET, allowed_updates=["message", "callback_query"])
+            secret_token=config.WEBHOOK_SECRET, allowed_updates=WEBHOOK_UPDATES,
+            drop_pending_updates=False)
     await app_bot.bot.set_my_commands([
         BotCommand("start", "Open the cute hub"), BotCommand("checkin", "Daily tokens"), BotCommand("help", "How it works"),
         BotCommand("admin", "Owner setup and controls")])
@@ -90,6 +96,7 @@ async def lifespan(app):
         await runtime.stop_jobs()
         await app_bot.stop()
         await app_bot.shutdown()
+        app_bot = None
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -98,7 +105,8 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"ok": True, "service": "fun-bot3", "version": "durable-history-profile-v2"}
+    return {"ok": True, "service": "fun-bot3", "version": "channel-post-queue-v1",
+            "live_index": live_index.snapshot()}
 
 
 @app.post("/webhook")
@@ -113,6 +121,16 @@ async def webhook(request: Request):
         update = Update.de_json(data, app_bot.bot)
     except Exception:
         return Response(status_code=400)
+    if update.channel_post is not None:
+        try:
+            # Persist metadata before acknowledging Telegram. Bypasses long
+            # private deliveries; no video downloads or scans in this request.
+            await asyncio.wait_for(live_index.enqueue(update.channel_post), timeout=8)
+        except Exception as exc:
+            log.warning("Channel update not acknowledged error=%s; Telegram may retry",
+                        type(exc).__name__)
+            return Response(status_code=503)
+        return Response(status_code=200)
     # Application update_queue serializes updates without making Telegram wait
     # for a scan or multi-file delivery. Explicit /scan runs separately too.
     await app_bot.update_queue.put(update)

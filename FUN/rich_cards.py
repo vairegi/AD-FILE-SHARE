@@ -29,6 +29,10 @@ def _hosted_url(cover):
 
 async def _cached_photo(cover):
     """Returns (source, key): file_id string if already on Telegram, else bytes."""
+    # This is a PHOTO file_id received by Bot 3 itself, never another bot's
+    # ID or a video thumbnail ID (thumbnails cannot be resent as photos).
+    if cover.get("telegram_file_id"):
+        return cover["telegram_file_id"], None
     for key in cover.get("asset_keys") or []:
         asset = await db.col("cover_assets").find_one(
             {"_id": key, "data": {"$exists": True}},

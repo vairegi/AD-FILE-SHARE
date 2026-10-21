@@ -21,6 +21,7 @@ _event_client = None
 _event_callback = None
 POLL_SECONDS = 30
 EVENT_DEBOUNCE_SECONDS = 2
+_history_paused = False
 
 
 def spawn(coro):
@@ -68,9 +69,16 @@ async def _on_source_event(event):
 
 
 async def _debounced_scan(cid):
+    started = db.now_ts()
     try:
         await asyncio.sleep(EVENT_DEBOUNCE_SECONDS)
         if userbot and await db.category_for_channel(cid):
+            # Prefer the metadata queue for a live burst. The 30-second poll
+            # remains an independent history backstop for missed webhooks.
+            pending = await db.col('source_jobs').find_one({'_id': int(cid)}, {'_id': 1})
+            recent = await db.col('live_scan_state').find_one({'_id': int(cid)}) or {}
+            if pending or recent.get('last_indexed_at', 0) >= started:
+                return
             schedule_scan(cid)
     finally:
         _debounces.pop(cid, None)
@@ -234,8 +242,17 @@ async def _ensure_userbot():
 
 async def poll_once():
     """One failing/missing channel cannot starve all later mappings."""
+    global _history_paused
     if not await _ensure_userbot():
+        if not _history_paused:
+            log.warning('Historical catch-up paused: no saved/connected userbot. '
+                        'New channel posts use the independent durable queue; '
+                        'owner: /setup_userbot then /userbot_status for missed history.')
+        _history_paused = True
         return
+    if _history_paused:
+        log.info('Historical catch-up reader restored')
+    _history_paused = False
     mappings = await db.list_channel_mappings()
     for mapping in mappings:
         cid = int(mapping['channel_id'])
@@ -270,11 +287,16 @@ async def scan_loop():
 def start_jobs(telegram_bot):
     global bot
     bot = telegram_bot
-    _background.extend([spawn(deletion_loop()), spawn(scan_loop())])
+    import live_index
+    _background.extend([spawn(deletion_loop()), spawn(scan_loop()),
+                        spawn(live_index.loop(telegram_bot))])
 
 
 async def stop_jobs():
-    global _cover_task
+    global _cover_task, _history_paused
+    _history_paused = False
+    import live_index
+    live_index._last['state'] = 'stopped'
     for task in list(_tasks):
         task.cancel()
     await asyncio.gather(*list(_tasks), return_exceptions=True)

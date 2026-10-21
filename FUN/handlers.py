@@ -946,7 +946,7 @@ async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /addchannel <id> <category>")
         return
     await db.upsert_channel_mapping(int(cid), cat)
-    await update.message.reply_text(f"✅ Channel {cid} → category {cat}\nNext: /scan {cid}\nThe userbot account must be a member; add Bot 3 to the source channel so it can copy files.")
+    await update.message.reply_text(f"✅ Channel {cid} → category {cat}\nNew posts queue automatically while Bot 3 is an admin.\nFor older history: /scan {cid} (connected userbot required).\nQueue status: /index_status")
 
 
 async def cmd_removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1103,6 +1103,13 @@ async def cmd_botstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from ui import bot_username
     name = await bot_username(context.bot)
     await update.message.reply_text(f"🎀 Bot username: @{name}\nReferral links use this identity automatically.\nUse /admin for setup instructions.")
+
+
+async def cmd_index_status(update, context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    import live_index
+    await update.message.reply_text(await live_index.status_text())
 
 
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):

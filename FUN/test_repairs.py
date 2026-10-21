@@ -582,7 +582,7 @@ async def test_starting_background_jobs_and_shutdown(monkeypatch):
     monkeypatch.setattr(services,"run_deletion_sweeper",sweep)
     runtime.start_jobs(Bot())
     await asyncio.sleep(0.01)
-    assert called and len(runtime._background)==2
+    assert called and len(runtime._background)==3  # cleanup, history, durable channel-post queue
     await runtime.stop_jobs()
     assert not runtime._tasks and not runtime._background
 

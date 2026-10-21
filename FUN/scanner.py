@@ -46,14 +46,30 @@ def _post_from_message(m):
             "date_ts": m.date.timestamp() if getattr(m, "date", None) else 0}
 
 
+async def existing_cover(doc):
+    """Keep an existing album's stable ID when an earlier member arrives late."""
+    exact = await db.get_collection(doc['collection_id'])
+    if exact:
+        return exact
+    gid = doc['cover'].get('grouped_id')
+    if gid:
+        return await db.col('collections').find_one({
+            'channel_id': doc['channel_id'], 'cover.grouped_id': str(gid)})
+    return None
+
+
 async def scan_channel(client, channel_id: int, category: str,
                        limit: Optional[int] = None, full=False,
                        source=None, prepare_covers=True):
     async with channel_lock(channel_id):
         state = await db.col("scan_state").find_one({"_id": int(channel_id)}) or {}
         start = 0 if full else int(state.get("last_cover_id") or 0)
-        # Migrate a channel previously indexed by v1 without a last-cover cursor.
-        if not full and not start:
+        # A live-only index is not proof that older history was scanned. Keep
+        # legacy migration, but start at zero for the first historical catch-up
+        # after Bot API ingestion (live_scan_state never advances scan_state).
+        live_only = not state and await db.col("collections").find_one(
+            {"channel_id": int(channel_id), "ingest_source": "bot_api"}, {"_id": 1})
+        if not full and not start and not live_only:
             last = await db.col("collections").find_one(
                 {"channel_id": int(channel_id)}, sort=[("posted_at", -1)])
             if last:
@@ -70,13 +86,16 @@ async def scan_channel(client, channel_id: int, category: str,
             result = classify(group, channel_id, category)
             if result["collections"]:
                 doc = result["collections"][0]
-                current_id = doc["collection_id"]
-                existing = await db.get_collection(current_id)
+                existing = await existing_cover(doc)
+                current_id = existing['collection_id'] if existing else doc['collection_id']
                 if existing:
                     # Preserve all file links, counters and owner overrides.
                     current_files = {f["message_id"] for f in existing.get("files", [])}
                     await db.col("collections").update_one({"collection_id": current_id},
-                        {"$set": {"category": category, "title": doc["title"]}})
+                        {"$set": {"category": category, "title": doc["title"],
+                                  "cover.grouped_id": doc['cover'].get('grouped_id')},
+                         "$min": {"cover.message_id": doc['cover']['message_id']},
+                         "$addToSet": {"cover.album_message_ids": {"$each": doc['cover']['album_message_ids']}}})
                 else:
                     await db.upsert_collection(doc)
                     current_files = set()
