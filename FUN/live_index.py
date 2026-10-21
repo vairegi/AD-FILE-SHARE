@@ -38,10 +38,11 @@ def post_metadata(message):
         kind, media = 'photo', message.photo[-1]
     elif message.video:
         kind, media = 'video', message.video
-    elif message.document:
-        kind, media = 'document', message.document
     elif message.animation:
         kind, media = 'animation', message.animation
+    elif message.document:
+        media = message.document
+        kind = 'document_video' if str(media.mime_type or '').lower().startswith('video/') else 'document'
     elif message.audio:
         kind, media = 'audio', message.audio
     thumb = getattr(media, 'thumbnail', None)
@@ -102,7 +103,9 @@ async def _process_unit(cid, category, unit, covers_to_prepare):
         # Do not overwrite owner price/status/counters, cached hosts, or old files.
         fields = {'category': category, 'title': doc['title'],
                   'cover.caption': doc['cover']['caption'],
-                  'cover.grouped_id': doc['cover'].get('grouped_id')}
+                  'cover.grouped_id': doc['cover'].get('grouped_id'),
+                  **{f'cover.{k}': doc['cover'][k] for k in
+                     ('kind', 'source_chat_id', 'source_message_id')}}
         first = unit[0]
         if first.get('photo_file_id'):
             fields['cover.telegram_file_id'] = first['photo_file_id']

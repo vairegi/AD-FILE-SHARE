@@ -49,6 +49,8 @@ def _post_from_message(m):
     duration = None
     if getattr(m, "photo", None):
         media_type = "photo"
+    elif getattr(m, "gif", None):
+        media_type = "animation"
     elif getattr(m, "video", None):
         media_type = "video"
         # Telethon Document attributes carry the duration, not always .video.duration.
@@ -57,7 +59,7 @@ def _post_from_message(m):
                 duration = attr.duration
                 break
     elif getattr(m, "document", None):
-        media_type = "document"
+        media_type = "document_video" if str(getattr(m.document, "mime_type", "")).lower().startswith("video/") else "document"
     if not media_type:
         return None
     return {"message_id": m.id, "grouped_id": getattr(m, "grouped_id", None),
@@ -133,7 +135,10 @@ async def scan_channel(client, channel_id: int, category: str,
                     current_files = {f["message_id"] for f in existing.get("files", [])}
                     await db.col("collections").update_one({"collection_id": current_id},
                         {"$set": {"category": category, "title": doc["title"],
-                                  "cover.grouped_id": doc['cover'].get('grouped_id')},
+                                  "cover.grouped_id": doc['cover'].get('grouped_id'),
+                                  "cover.caption": doc['cover']['caption'],
+                                  **{f'cover.{k}': doc['cover'][k] for k in
+                                     ('kind', 'source_chat_id', 'source_message_id')}},
                          "$min": {"cover.message_id": doc['cover']['message_id']},
                          "$addToSet": {"cover.album_message_ids": {"$each": doc['cover']['album_message_ids']}}})
                 else:

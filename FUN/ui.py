@@ -53,13 +53,13 @@ async def referral_links(bot, user_id):
     return link, share
 
 
-async def edit_card(q, text, kb):
+async def _edit_card(q, text, kb):
     """Keep native photo fallback navigable as well as text/rich cards."""
     from telegram.error import BadRequest
     import html as html_module
     message=getattr(q,"message",None)
     plain=html_module.unescape(re.sub(r"<[^>]*>","",text))
-    photo=bool(getattr(message,"photo",None))
+    photo=any(bool(getattr(message, k, None)) for k in ("photo", "video", "animation", "document"))
     if photo and len(plain.encode("utf-16-le"))//2 <= 1000:
         try:
             return await q.edit_message_caption(caption=text,reply_markup=kb,parse_mode="HTML")
@@ -85,3 +85,14 @@ async def edit_card(q, text, kb):
 
 def h(value):
     return html.escape(str(value), quote=True)
+
+
+async def edit_card(q, text, kb):
+    result = await _edit_card(q, text, kb)
+    message = getattr(q, 'message', None)
+    chat = getattr(message, 'chat', None)
+    if chat is not None and callable(getattr(q, 'get_bot', None)):
+        import cover_sources
+        await cover_sources.clear_companion(q.get_bot(), chat.id,
+                                            getattr(message, 'message_id', None))
+    return result

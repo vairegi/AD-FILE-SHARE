@@ -46,6 +46,7 @@ def build_bot():
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,
         "index_status": handlers.cmd_index_status, "scan_status": handlers.cmd_scan_status,
+        "repair_video_covers": handlers.cmd_repair_video_covers,
         "setup_userbot": handlers.cmd_setup_userbot, "cancel": handlers.cmd_cancel, "userbot_status": handlers.cmd_userbot_status,
         "remove_userbot": handlers.cmd_remove_userbot, "botstatus": handlers.cmd_botstatus,
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,

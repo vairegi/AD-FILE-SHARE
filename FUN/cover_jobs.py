@@ -12,7 +12,10 @@ import runtime
 
 log = logging.getLogger('fun.cover_jobs')
 _task = None
-QUERY = {'$or': [{'cover.url_status': {'$ne': 'ok'}}, {'cover.url': None}, {'cover.url': ''}]}
+QUERY = {'$and': [
+    {'cover.kind': {'$nin': ['video', 'animation', 'document_video']}},
+    {'cover.media_type': {'$nin': ['video', 'animation', 'document_video']}},
+    {'$or': [{'cover.url_status': {'$ne': 'ok'}}, {'cover.url': None}, {'cover.url': ''}]}]}
 RATE_WAIT_SECONDS = 180
 MAX_RATE_RETRIES = 2
 
@@ -125,7 +128,10 @@ async def statistics():
               'Telegraph links ready': await col.count_documents({'cover.url_status': 'ok', 'cover.url': {'$regex': r'^https://(telegra\.ph|graph\.org)/file/'}}),
               'Catbox links ready': await col.count_documents({'cover.url_status': 'ok', 'cover.url': {'$regex': r'^https://files\.catbox\.moe/'}}),
               'Litterbox links ready': await col.count_documents({'cover.url_status': 'ok', 'cover.url': {'$regex': r'^https://litter\.catbox\.moe/'}}),
-              'Feed mode': 'in-place direct-image link preview; cached-photo fallback if no URL',
+              'Native video covers': await col.count_documents({'$or': [
+                  {'cover.kind': {'$in': ['video', 'animation', 'document_video']}},
+                  {'cover.media_type': {'$in': ['video', 'animation', 'document_video']}}]}),
+              'Feed mode': 'in-place photo link previews; Telegram copies for video covers',
               'Pending': await col.count_documents({'cover.url_status': 'pending'}),
               'No status yet': await col.count_documents({'cover.url_status': {'$exists': False}}),
               'Mirror upload failed': await col.count_documents({'cover.url_status': 'failed'}),

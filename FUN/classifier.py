@@ -15,9 +15,10 @@ Owner-confirmed rules (from samples):
   * Covers themselves are EXCLUDED from delivered files.
 """
 from typing import List, Dict, Any, Optional
+from cover_sources import media_kind, source_fields
 
 COVER_MIN_CAPTION_LINES = 3
-MEDIA_TYPES = ("photo", "video", "document", "animation", "audio")
+MEDIA_TYPES = ("photo", "video", "document", "animation", "audio", "document_video")
 
 
 def nonempty_caption_lines(caption: Optional[str]) -> int:
@@ -27,7 +28,7 @@ def nonempty_caption_lines(caption: Optional[str]) -> int:
 
 
 def is_cover(media_type: Optional[str], caption: Optional[str]) -> bool:
-    return media_type in ("photo", "video") and \
+    return media_type in ("photo", "video", "animation", "document_video") and \
         nonempty_caption_lines(caption) >= COVER_MIN_CAPTION_LINES
 
 
@@ -60,7 +61,7 @@ def _unit_caption(unit: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def _unit_media_type(unit: List[Dict[str, Any]]) -> Optional[str]:
-    return unit[0].get("media_type")
+    return media_kind(unit[0])
 
 
 def classify(posts: List[Dict[str, Any]], channel_id: int,
@@ -85,6 +86,7 @@ def classify(posts: List[Dict[str, Any]], channel_id: int,
                 "category": category,
                 "title": (caption or "").strip().splitlines()[0][:120],
                 "cover": {
+                    **source_fields(unit, channel_id),
                     "media_type": mtype,
                     "message_id": first.get("message_id"),
                     "grouped_id": str(first["grouped_id"]) if first.get("grouped_id") else None,

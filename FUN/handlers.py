@@ -788,6 +788,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /telegraph_token — legacy token help/reset\n"
         "• /retry_covers — prepare pending/missing/failed covers\n"
         "• /cover_status — hosted/local preview counts and progress\n"
+        "• /repair_video_covers — backfill source IDs without a Telegram scan\n"
         "• /test_hosts — probe every cover-upload host with one image\n"
         "• /warm_covers — pre-warm link previews for instant display\n"
         f"• /select_host <host|auto> — preferred host (currently: {preferred})\n"
@@ -1123,6 +1124,17 @@ async def cmd_botstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from ui import bot_username
     name = await bot_username(context.bot)
     await update.message.reply_text(f"🎀 Bot username: @{name}\nReferral links use this identity automatically.\nUse /admin for setup instructions.")
+
+
+async def cmd_repair_video_covers(update, context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    import cover_sources
+    result = await cover_sources.backfill()
+    await update.message.reply_text(
+        f"✅ Cover source metadata repaired: {result['updated']}/{result['checked']} rows updated; "
+        f"{result['unresolved']} unresolved. No Telegram history scan was performed. "
+        "Existing indexed video covers also resolve automatically when opened.")
 
 
 async def cmd_index_status(update, context):

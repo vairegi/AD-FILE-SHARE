@@ -115,6 +115,11 @@ async def download_image(userbot, channel_id, mid):
 
 
 async def _prepare(collection, http, fetch_bytes, force=False):
+    import cover_sources
+    if cover_sources.is_native(collection):
+        await cover_sources.persist(collection)
+        _, chat, mid = cover_sources.resolve(collection)
+        return {"hosted": False, "ready": bool(chat and mid), "native": True}
     cover = collection.get("cover") or {}
     if cover.get("url_status") == "ok" and cover.get("url"):
         return {"hosted": True, "ready": True, "cached": True}
@@ -214,5 +219,8 @@ async def preview_items(collection):
 
 async def needs_preparation_count():
     return await db.col("collections").count_documents(
-        {"$or": [{"cover.url_status": {"$ne": "ok"}},
-                 {"cover.url": None}, {"cover.url": ""}]})
+        {"$and": [
+            {"cover.kind": {"$nin": ["video", "animation", "document_video"]}},
+            {"cover.media_type": {"$nin": ["video", "animation", "document_video"]}},
+            {"$or": [{"cover.url_status": {"$ne": "ok"}},
+                     {"cover.url": None}, {"cover.url": ""}]}]})
