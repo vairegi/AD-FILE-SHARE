@@ -18,6 +18,7 @@ import config
 import db
 import runtime
 import userbot_setup
+import session_health
 from locks import user_lock
 
 _pending = {}
@@ -54,7 +55,7 @@ async def save_credentials(credentials):
         "format": "mongo-uri-hkdf-v1", "salt": base64.urlsafe_b64encode(salt).decode(),
         "ciphertext": _cipher(salt).encrypt(data).decode()},
         "userbot_credentials": None, "userbot_session": None,
-        "userbot_setup_waiting": None})
+        "userbot_setup_waiting": None, 'userbot_health': None})
     await db.col("setup_tokens").delete_many({})
 
 
@@ -134,7 +135,10 @@ async def consume(update, context):
                 return True
             state["api_hash"] = text
             state["step"] = "session"
-            await update.message.reply_text("🎀 <b>Step 3/3:</b> Send your existing <b>Telethon StringSession</b> from your laptop script.\n\nNot your bot token, login code or password.", parse_mode="HTML")
+            await update.message.reply_text("🎀 <b>Step 3/3:</b> Send your dedicated <b>Telethon StringSession</b> from your laptop script.\n\n"
+                "Exit that script before importing. Never run this same session in another service or worker. "
+                "If Telegram reported AuthKeyDuplicatedError, generate a NEW session; the old key is invalid.\n\n"
+                "Not your bot token, login code or password.", parse_mode="HTML")
             return True
         client = None
         try:
@@ -148,6 +152,7 @@ async def consume(update, context):
                 raise ValueError("This must be a Telegram user-account StringSession, not a bot session.")
             await save_credentials(credentials)
             await runtime.replace_userbot(client)
+            await db.update_settings({'userbot_health': None})
             client = None  # runtime now owns disconnect/shutdown responsibility
             _pending.pop(uid, None)
             await update.message.reply_text(
@@ -170,8 +175,11 @@ async def consume(update, context):
             reason = str(exc) if str(exc) in safe else "Connection settings could not be validated. Check your API credentials and session."
             from ui import h
             await update.message.reply_text("⚠️ " + h(reason) + "\nSend the correct StringSession to retry, or /cancel.", parse_mode="HTML")
-        except Exception:
+        except Exception as exc:
             # RPC/network errors can contain sensitive arguments: do not echo/log them.
+            if session_health.fatal(exc):
+                await update.message.reply_text(session_health.recovery(type(exc).__name__))
+                return True
             await update.message.reply_text(
                 "⚠️ Connection failed. Your existing saved userbot was not replaced unless the new credentials were already saved. "
                 "Check your API ID/hash and account session. Use /setup_userbot to restart, "
@@ -198,16 +206,29 @@ async def status(update, context):
         try:
             import asyncio
             authorized = bool(await asyncio.wait_for(client.is_user_authorized(), timeout=10))
-        except Exception:
+            # Telethon caches is_user_authorized(). Probe a real RPC as well.
+            if authorized and callable(getattr(client, 'get_me', None)):
+                authorized = bool(await asyncio.wait_for(client.get_me(), timeout=10))
+        except Exception as exc:
             authorized = False
+            if session_health.fatal(exc):
+                await runtime.pause_userbot(exc, client)
+                saved = await db.get_settings()
     stored = bool(saved.get("userbot_chat_credentials") or saved.get("userbot_credentials") or saved.get("userbot_session"))
     _purge()
     state = _pending.get(update.effective_user.id)
+    health = saved.get('userbot_health') or {}
+    if health.get('state') == 'reauth_required':
+        authorized = False
+    diagnosis = ('\n⚠️ Historical reader paused: ' + health.get('error_type', 'authorization rejected') +
+                 '\nA NEW dedicated StringSession is required. Stop other copies first.\n') if health.get('state') == 'reauth_required' else ''
     await update.message.reply_text(
         "🎀 <b>Userbot Status</b>\n"
         f"Connected: <code>{'yes' if connected and authorized else 'no'}</code>\n"
         f"Session stored: <code>{'yes' if stored else 'no'}</code>\n"
-        f"Setup in progress: <code>{state['step'] if state else 'no'}</code>\n\n"
+        f"Setup in progress: <code>{state['step'] if state else 'no'}</code>\n"
+        f"{diagnosis}\n"
+        "New posts use the independent bot-only queue. Use /scan_status for catch-up progress.\n"
         "Use /setup_userbot to add/reconnect, or /remove_userbot to remove.\n"
         "No API_ID, API_HASH or SESSION_ENCRYPTION_KEY environment variables are required.", parse_mode="HTML")
 
@@ -221,5 +242,6 @@ async def remove(update, context):
         await userbot_setup.remove_session()
         await update.message.reply_text(
             "✅ Userbot disconnected and saved credentials removed, Senpai~!\n"
-            "Use /setup_userbot to add it again. To revoke the account session itself, "
+            "New channel posts continue through the bot-only queue while this bot remains an admin in mapped channels. "
+            "Historical scans stop. Use /setup_userbot to add it again. To revoke the account session itself, "
             "open Telegram Settings → Devices.")

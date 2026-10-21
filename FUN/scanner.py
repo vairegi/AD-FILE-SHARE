@@ -2,13 +2,33 @@
 Incremental scans re-read the last cover so appended files stay attached.
 No source messages, purchases, bookmarks or owner price overrides are deleted.
 """
+import asyncio
 import logging
+import time
 from typing import Optional
 import db
 from classifier import classify
 from locks import channel_lock
 import covers
 log = logging.getLogger("fun.scanner")
+READ_TIMEOUT_SECONDS = 45
+CHECKPOINT_SECONDS = 5
+CHECKPOINT_UNITS = 50
+
+
+async def _timed_messages(client, source, **kwargs):
+    iterator = client.iter_messages(source, **kwargs).__aiter__()
+    try:
+        while True:
+            try:
+                message = await asyncio.wait_for(anext(iterator), timeout=READ_TIMEOUT_SECONDS)
+            except StopAsyncIteration:
+                return
+            yield message
+    finally:
+        close = getattr(iterator, 'aclose', None)
+        if callable(close):
+            await close()
 
 
 async def _download_bytes(client, channel_id, message_id):
@@ -60,14 +80,15 @@ async def existing_cover(doc):
 
 async def scan_channel(client, channel_id: int, category: str,
                        limit: Optional[int] = None, full=False,
-                       source=None, prepare_covers=True):
+                       source=None, prepare_covers=True, end_id=None):
     async with channel_lock(channel_id):
         state = await db.col("scan_state").find_one({"_id": int(channel_id)}) or {}
         start = 0 if full else int(state.get("last_cover_id") or 0)
         # A live-only index is not proof that older history was scanned. Keep
         # legacy migration, but start at zero for the first historical catch-up
         # after Bot API ingestion (live_scan_state never advances scan_state).
-        live_only = not state and await db.col("collections").find_one(
+        has_checkpoint = bool(state.get('last_cover_id') or state.get('cursor') or state.get('last_scan_at'))
+        live_only = not has_checkpoint and await db.col("collections").find_one(
             {"channel_id": int(channel_id), "ingest_source": "bot_api"}, {"_id": 1})
         if not full and not start and not live_only:
             last = await db.col("collections").find_one(
@@ -80,6 +101,25 @@ async def scan_channel(client, channel_id: int, category: str,
         unit, group_key = [], None
         last_seen = int(state.get("cursor") or 0)
         last_cover = start
+        checkpoint_at, checkpoint_units, committed = 0.0, 0, int(state.get('cursor') or 0)
+        await db.col('scan_state').update_one({'_id': int(channel_id)}, {'$set': {
+            'scan_status': 'running', 'started_at': db.now_ts(), 'category': category,
+            'progress_posts': 0, 'progress_message_id': committed,
+            'last_error_type': None, 'target_message_id': end_id}}, upsert=True)
+
+        async def checkpoint(group):
+            nonlocal checkpoint_at, checkpoint_units, committed
+            committed = max(committed, max(int(p['message_id']) for p in group))
+            checkpoint_units += 1
+            if checkpoint_units < CHECKPOINT_UNITS and time.monotonic() - checkpoint_at < CHECKPOINT_SECONDS:
+                return
+            await db.col('scan_state').update_one({'_id': int(channel_id)}, {'$set': {
+                'cursor': committed, 'last_cover_id': last_cover,
+                'progress_message_id': committed, 'progress_posts': scanned,
+                'progress_at': db.now_ts(), 'scan_status': 'running'}}, upsert=True)
+            log.info('Scan progress channel=%s media_seen=%s committed_message=%s last_cover=%s',
+                     channel_id, scanned, committed, last_cover)
+            checkpoint_at, checkpoint_units = time.monotonic(), 0
 
         async def process(group):
             nonlocal current_id, current_files, last_cover, pending_count
@@ -107,7 +147,8 @@ async def scan_channel(client, channel_id: int, category: str,
                     new = [f for f in files if f["message_id"] not in current_files]
                     if new:
                         await db.col("collections").update_one({"collection_id": current_id},
-                            {"$push": {"files": {"$each": new}}, "$inc": {"file_count": len(new)}})
+                            {"$push": {"files": {"$each": new, "$sort": {"message_id": 1}}},
+                             "$inc": {"file_count": len(new)}})
                         current_files.update(f["message_id"] for f in new)
                         touched.add(current_id)
                 else:
@@ -117,9 +158,15 @@ async def scan_channel(client, channel_id: int, category: str,
                             {"$set": {"channel_id": int(channel_id), "file": f,
                                       "reason": "media before first identifiable cover"}}, upsert=True)
                         pending_count += 1
+            await checkpoint(group)
 
-        async for message in client.iter_messages(source if source is not None else int(channel_id),
-                min_id=max(0, start - 1), limit=limit, reverse=True):
+        iterator_options = {'min_id': max(0, start - 1), 'limit': limit, 'reverse': True}
+        if end_id is not None:
+            iterator_options['max_id'] = int(end_id) + 1
+        async for message in _timed_messages(client, source if source is not None else int(channel_id),
+                                            **iterator_options):
+            if end_id is not None and message.id > int(end_id):
+                break
             last_seen = max(last_seen, message.id)
             post = _post_from_message(message)
             if not post:
@@ -136,7 +183,9 @@ async def scan_channel(client, channel_id: int, category: str,
         await db.col("scan_state").update_one({"_id": int(channel_id)}, {"$set": {
             "cursor": last_seen, "last_cover_id": last_cover, "last_scan_at": db.now_ts(),
             "category": category, "posts_scanned": scanned,
-            "last_error_type": None}}, upsert=True)
+            "last_error_type": None, 'scan_status': 'complete', 'finished_at': db.now_ts(),
+            'progress_posts': scanned, 'progress_message_id': last_seen,
+            'progress_at': db.now_ts()}}, upsert=True)
         # Host covers for every touched collection (downloads + telegra.ph/graph.org
         # upload happen at scan time; results are cached in MongoDB).
         covers_ok = 0

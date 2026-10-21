@@ -11,6 +11,7 @@ from typing import Optional
 from cryptography.fernet import Fernet, InvalidToken
 import config
 import db
+import session_health
 
 KEY_HELP = ("⚠️ SESSION_ENCRYPTION_KEY is invalid. It must be a Fernet key, not "
     "your API hash or a password. Generate one on your trusted computer with:\n"
@@ -102,13 +103,15 @@ async def connect_credentials(credentials, client_factory=None):
             raise ValueError("This session is not authorized or has been revoked. Create a new StringSession on your trusted computer.")
         return client
     except BaseException:
-        await client.disconnect()
+        await session_health.safe_disconnect(client)
         raise
 
 
 async def build_client():
     # New chat-import credentials need no API_ID/API_HASH/SESSION_ENCRYPTION_KEY.
     settings = await db.get_settings()
+    if (settings.get('userbot_health') or {}).get('state') == 'reauth_required':
+        return None
     if not settings.get("userbot_chat_credentials") and configuration_error():
         return None  # old format can be replaced through /setup_userbot
     credentials = await load_credentials()
@@ -119,7 +122,7 @@ async def build_client():
 
 async def remove_session():
     await db.update_settings({"userbot_chat_credentials": None, "userbot_session": None, "userbot_credentials": None,
-                               "userbot_setup_waiting": None})
+                               "userbot_setup_waiting": None, 'userbot_health': None})
     await db.col("setup_tokens").delete_many({})
 
 
@@ -160,9 +163,10 @@ async def import_credentials(token, api_id, api_hash, session, client_factory=No
         raise ValueError("Setup link was already used. Generate a new link.")
     try:
         await db.update_settings({"userbot_credentials": encrypt_session(json.dumps(credentials)),
+                                  "userbot_chat_credentials": None, 'userbot_health': None,
                                   "userbot_session": None, "userbot_setup_waiting": None})
     except BaseException:
-        await client.disconnect()
+        await session_health.safe_disconnect(client)
         raise
     return client
 

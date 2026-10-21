@@ -45,7 +45,7 @@ def build_bot():
         "check_in": handlers.cmd_checkin, "admin": handlers.cmd_admin,
         "addchannel": handlers.cmd_addchannel, "removechannel": handlers.cmd_removechannel,
         "channels": handlers.cmd_channels, "scan": handlers.cmd_scan,
-        "index_status": handlers.cmd_index_status,
+        "index_status": handlers.cmd_index_status, "scan_status": handlers.cmd_scan_status,
         "setup_userbot": handlers.cmd_setup_userbot, "cancel": handlers.cmd_cancel, "userbot_status": handlers.cmd_userbot_status,
         "remove_userbot": handlers.cmd_remove_userbot, "botstatus": handlers.cmd_botstatus,
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,
@@ -82,9 +82,7 @@ async def lifespan(app):
         BotCommand("start", "Open the cute hub"), BotCommand("checkin", "Daily tokens"), BotCommand("help", "How it works"),
         BotCommand("admin", "Owner setup and controls")])
     try:
-        client = await userbot_setup.build_client()
-        if client:
-            await runtime.replace_userbot(client)
+        await runtime._ensure_userbot()
     except Exception:
         log.warning("Userbot not connected. Owner: use /setup_userbot or /userbot_status.")
     import broadcast
@@ -174,6 +172,7 @@ async def setup_submit(request: Request):
             client = await userbot_setup.import_credentials(token, payload.get("api_id"),
                 payload.get("api_hash", ""), payload.get("session", ""))
             await runtime.replace_userbot(client)
+            await db.update_settings({'userbot_health': None})
         return JSONResponse({"message": "✅ Session validated, encrypted and connected. Return to Telegram: /addchannel then /scan."}, headers=SECURITY_HEADERS)
     except ValueError as exc:
         return JSONResponse({"message": str(exc)}, status_code=400, headers=SECURITY_HEADERS)

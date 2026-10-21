@@ -1061,14 +1061,34 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎀 Map it first: /addchannel -1001234567890 category")
         return
     import runtime
+    import session_health
+    if await session_health.blocked():
+        await update.message.reply_text(await session_health.stored_recovery())
+        return
     if not runtime.userbot:
         await update.message.reply_text("🎀 Userbot isn't connected. Run /setup_userbot then /userbot_status.")
         return
     if runtime.scan_busy(cid):
-        await update.message.reply_text("⏳ This channel is already being scanned.")
+        await update.message.reply_text("⏳ This channel is already being scanned.\n" + await runtime.scan_status_text(cid))
         return
     runtime.schedule_scan(cid, update.message.reply_text, full="full" in (context.args or []))
     await update.message.reply_text("🎀 Scan started in the background, Senpai~! I'll report the result here.")
+
+
+async def cmd_scan_status(update, context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    import runtime
+    try:
+        ids = [int(context.args[0])] if context.args else [
+            int(m['channel_id']) for m in await db.list_channel_mappings()][:10]
+    except (ValueError, IndexError):
+        await update.message.reply_text('Usage: /scan_status [channel_id]')
+        return
+    if not ids:
+        await update.message.reply_text('No mapped channels. Use /channels.')
+    for cid in ids:
+        await update.message.reply_text(await runtime.scan_status_text(cid))
 
 
 async def cmd_setup_userbot(update, context):

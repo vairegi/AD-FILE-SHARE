@@ -5,6 +5,7 @@ import asyncio
 import logging
 import config
 import db
+import session_health
 
 log = logging.getLogger('fun.runtime')
 userbot = None
@@ -22,6 +23,7 @@ _event_callback = None
 POLL_SECONDS = 30
 EVENT_DEBOUNCE_SECONDS = 2
 _history_paused = False
+SCAN_BUDGET_SECONDS = 180
 
 
 def spawn(coro):
@@ -90,14 +92,20 @@ async def replace_userbot(client):
     if old is client:
         return
     _unbind_events()
-    for task in list(_scans.values()):
-        if not task.done():
-            await asyncio.gather(task, return_exceptions=True)
+    pending = [task for task in list(_scans.values())
+               if task is not asyncio.current_task() and not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     userbot = client
     _entity_cache.clear()
     _bind_events(client)
     if old and old is not client:
-        await old.disconnect()
+        for key, queued_client in list(_cover_pending.items()):
+            if queued_client is old:
+                _cover_pending.pop(key, None)
+        await session_health.safe_disconnect(old)
 
 
 async def disconnect_userbot():
@@ -168,9 +176,29 @@ async def _cover_loop():
         _cover_task = None
 
 
+async def pause_userbot(exc, client=None):
+    """Stop retrying invalid auth, without touching the bot-only metadata queue."""
+    if client is not None and userbot is not client:
+        return  # stale failure from a client the owner already replaced
+    previous = await session_health.blocked()
+    log.warning('Historical reader paused error=%s; new channel-post queue remains independent',
+                type(exc).__name__)
+    await db.update_settings({'userbot_health': {
+        'state': 'reauth_required', 'error_type': type(exc).__name__, 'at': db.now_ts()}})
+    await replace_userbot(None)
+    if not previous and bot is not None and config.OWNER_ID:
+        try:
+            await asyncio.wait_for(bot.send_message(
+                config.OWNER_ID, session_health.recovery(type(exc).__name__)), timeout=5)
+        except Exception:
+            pass
+
+
 async def _scan(cid, reply=None, full=False):
+    passes = 0
     try:
         while True:
+            passes += 1
             _rescan_requested.discard(int(cid))
             client = userbot
             if not client:
@@ -179,9 +207,19 @@ async def _scan(cid, reply=None, full=False):
             if not category:
                 raise ValueError('Channel is not mapped. Use /addchannel first.')
             import scanner
-            source = await resolve_channel(client, cid)
-            result = await scanner.scan_channel(client, cid, category, full=full,
-                                                source=source, prepare_covers=False)
+            await db.col('scan_state').update_one({'_id': int(cid)}, {'$set': {
+                'scan_status': 'waiting_for_channel', 'started_at': db.now_ts()}}, upsert=True)
+            async def bounded_pass():
+                source = await resolve_channel(client, cid)
+                end_id = None
+                if callable(getattr(client, 'get_messages', None)):
+                    latest = await asyncio.wait_for(client.get_messages(source, limit=1), timeout=30)
+                    if latest:
+                        end_id = latest[0].id
+                return await scanner.scan_channel(client, cid, category, full=full,
+                                                  source=source, prepare_covers=False, end_id=end_id)
+            # Includes source resolution, shared-lock waiting and metadata reads.
+            result = await asyncio.wait_for(bounded_pass(), timeout=SCAN_BUDGET_SECONDS)
             _queue_covers(client, result.get('cover_collection_ids', []))
             log.info('Source indexed channel=%s media=%s collections_updated=%s',
                      cid, result['posts_scanned'], result['collections'])
@@ -190,16 +228,37 @@ async def _scan(cid, reply=None, full=False):
                             f"{result['collections']} collections updated; {result['pending_files']} orphan files. "
                             'Covers prepare separately. Reopen Categories to refresh its count.')
                 reply = None
-            if int(cid) not in _rescan_requested:
+            if int(cid) not in _rescan_requested or passes >= 2:
                 return result
             full = False
+    except asyncio.CancelledError:
+        await db.col('scan_state').update_one({'_id': int(cid)}, {'$set': {
+            'scan_status': 'stopped', 'finished_at': db.now_ts()}}, upsert=True)
+        if reply:
+            try:
+                await asyncio.wait_for(reply('⏹ Scan stopped for userbot removal/replacement or service shutdown. '
+                    'Saved progress and purchases are preserved; new channel-post indexing is independent.'), timeout=3)
+            except Exception:
+                pass
+        raise
     except Exception as exc:
         log.error('Channel scan failed channel=%s error=%s (no credentials logged)',
                   cid, type(exc).__name__)
         await db.col('scan_state').update_one({'_id': int(cid)}, {'$set': {
-            'last_error_type': type(exc).__name__, 'last_error_at': db.now_ts()}}, upsert=True)
+            'last_error_type': type(exc).__name__, 'last_error_at': db.now_ts(),
+            'scan_status': 'failed', 'finished_at': db.now_ts()}}, upsert=True)
+        if session_health.fatal(exc):
+            await pause_userbot(exc, locals().get('client'))
         if reply:
-            await reply('⚠️ Scan failed. Use /userbot_status and /channels; check the source access and logged error type. No purchases were removed.')
+            if session_health.fatal(exc):
+                await reply(session_health.recovery(type(exc).__name__))
+            elif isinstance(exc, TimeoutError):
+                await reply('⏳ Scan timed out and released the channel lock. Saved progress is preserved. '
+                            'Use /scan_status, then /scan again to resume. Check userbot/source access. '
+                            'New channel-post indexing continues; no purchases were removed.')
+            else:
+                await reply('⚠️ Scan failed (' + type(exc).__name__ + '). Use /userbot_status and /channels; '
+                            'check the source access. Saved progress and purchases are preserved.')
     finally:
         _scans.pop(int(cid), None)
         _rescan_requested.discard(int(cid))
@@ -215,6 +274,27 @@ def schedule_scan(cid, reply=None, full=False):
     return task
 
 
+async def scan_status_text(cid):
+    cid = int(cid)
+    state = await db.col('scan_state').find_one({'_id': cid}) or {}
+    active = scan_busy(cid)
+    status = state.get('scan_status', 'not started')
+    if not active and status in ('running', 'waiting_for_channel'):
+        status = 'interrupted — resume with /scan'
+    elapsed = max(0, int(db.now_ts() - state.get('started_at', db.now_ts())))
+    health = await session_health.blocked()
+    reason = health.get('error_type') if health else state.get('last_error_type')
+    return (f"🎀 Historical scan · {cid}\nState: {status}\n"
+            f"Active worker: {'yes' if active else 'no'}\n"
+            f"Elapsed since this pass started: {elapsed}s\n"
+            f"Saved cursor: {state.get('cursor', 0)}\n"
+            f"Target at pass start: {state.get('target_message_id') or 'not captured'}\n"
+            f"Last progress message: {state.get('progress_message_id', 0)}\n"
+            f"Media seen this pass: {state.get('progress_posts', 0)}\n"
+            f"Error: {reason or 'none'}\n"
+            "Use /scan to resume from the saved cover boundary; /index_status checks the independent new-post queue.")
+
+
 async def deletion_loop():
     import services
     while True:
@@ -226,18 +306,30 @@ async def deletion_loop():
 
 
 async def _ensure_userbot():
-    if userbot is None:
-        import userbot_setup
-        client = await userbot_setup.build_client()
-        if client is None:
+    # Startup, polling and an owner command must not construct multiple clients
+    # concurrently in this process. This is not a cross-service/session lease.
+    from locks import user_lock
+    async with user_lock(-19990003):
+        if await session_health.blocked():
             return False
-        await replace_userbot(client)
-    check = getattr(userbot, 'is_connected', None)
-    if callable(check) and not check():
-        await asyncio.wait_for(userbot.connect(), timeout=30)
-        if not await asyncio.wait_for(userbot.is_user_authorized(), timeout=15):
-            raise ValueError('User session is no longer authorized')
-    return True
+        try:
+            if userbot is None:
+                import userbot_setup
+                client = await userbot_setup.build_client()
+                if client is None:
+                    return False
+                await replace_userbot(client)
+            check = getattr(userbot, 'is_connected', None)
+            if callable(check) and not check():
+                await asyncio.wait_for(userbot.connect(), timeout=30)
+                if not await asyncio.wait_for(userbot.is_user_authorized(), timeout=15):
+                    raise ValueError('User session is no longer authorized')
+            return True
+        except Exception as exc:
+            if session_health.fatal(exc):
+                await pause_userbot(exc)
+                return False
+            raise
 
 
 async def poll_once():
@@ -265,14 +357,20 @@ async def poll_once():
                 existing = await db.col('collections').find_one({'channel_id': cid}, {'_id': 1})
                 if not existing:
                     continue
-            source = await resolve_channel(userbot, cid)
-            latest = await asyncio.wait_for(userbot.get_messages(source, limit=1), timeout=30)
+            client = userbot
+            if client is None:
+                break
+            source = await resolve_channel(client, cid)
+            latest = await asyncio.wait_for(client.get_messages(source, limit=1), timeout=30)
             if latest and (not state.get('cursor') or latest[0].id > int(state.get('cursor', 0))):
                 schedule_scan(cid)
         except Exception as exc:
             log.warning('Auto-scan check failed channel=%s error=%s; continuing other channels',
                         cid, type(exc).__name__)
             _entity_cache.pop((id(userbot), cid), None)
+            if session_health.fatal(exc):
+                await pause_userbot(exc, client)
+                break
 
 
 async def scan_loop():
