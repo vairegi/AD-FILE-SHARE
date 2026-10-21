@@ -98,7 +98,7 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"ok": True, "service": "fun-bot3", "version": "random-history-broadcast-v1"}
+    return {"ok": True, "service": "fun-bot3", "version": "durable-history-profile-v2"}
 
 
 @app.post("/webhook")

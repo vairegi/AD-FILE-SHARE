@@ -238,17 +238,17 @@ async def _show_earn(q):
 async def _show_profile(q):
     uid = q.from_user.id
     doc = await db.get_user(uid) or {}
-    txs = await db.list_transactions(uid, 500)
-    earned = sum(t["amount"] for t in txs if t["amount"] > 0)
-    spent = -sum(t["amount"] for t in txs if t["amount"] < 0)
+    earned, spent = await db.transaction_totals(uid)
+    unlocked_count = await db.count_unlocks(uid)
+    saved_count = await db.count_bookmarks(uid)
     refs = await db.referral_stats(uid)
     await _edit(q, persona.profile(
-        uid, int(doc.get("tokens", 0)), await _streak(uid), await db.count_unlocks(uid),
-        await db.count_bookmarks(uid), earned, spent,
+        uid, int(doc.get("tokens", 0)), await _streak(uid), unlocked_count,
+        saved_count, earned, spent,
         await db.col("task_runs").count_documents({"user_id": uid}), refs["friends"]),
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔓 Unlocked Posts", callback_data="library:unlocks:0"),
-             InlineKeyboardButton("⭐ Saved Posts", callback_data="library:bookmarks:0")],
+            [InlineKeyboardButton(f"(⌕) Unlocked Posts ({unlocked_count})", callback_data="library:unlocks:0"),
+             InlineKeyboardButton(f"⭐ Saved Posts ({saved_count})", callback_data="library:bookmarks:0")],
             [InlineKeyboardButton("👛 Earn Tokens", callback_data="earn"),
              InlineKeyboardButton("🎁 Refer Friends", callback_data="ref")],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="home")]]))
@@ -302,6 +302,7 @@ async def _show_library(q, kind, index):
     import rich_cards
     await rich_cards.show_cover_card(q.get_bot(), uid, await _feed_text(uid, c),
         InlineKeyboardMarkup(rows), c, "link", edit_message_id=getattr(q.message, "message_id", None))
+    await feed_sessions.remember_view(uid, c)
 
 
 # ── feed (collage/slideshow browser) ─────────────────────────────
@@ -319,7 +320,7 @@ async def _show_feed(q, category, idx):
 async def _show_random_step(q, session_id, direction):
     result = await feed_sessions.navigate(q.from_user.id, session_id, direction)
     if result is None:
-        await _edit(q, "This browsing session is no longer available. Tap Start Watching to begin a new shuffle.",
+        await _edit(q, "This browsing card is no longer current. Tap Start Watching to continue; your stored viewing history is kept.",
                     _home_kb())
         return
     state, c, total = result
@@ -379,8 +380,8 @@ async def _feed_text(uid, c):
 def _feed_kb(cid, category, idx, total, unlocked, session=None):
     if session:
         sid = session['session_id']
-        previous = f"watch:prev:{sid}" if session['position'] > 0 else "noop"
-        following = f"watch:next:{sid}" if total > 1 or session['position'] + 1 < len(session['history']) else "noop"
+        previous = f"watch:prev:{sid}" if session.get("has_previous", session['position'] > 0) else "noop"
+        following = f"watch:next:{sid}" if total > 1 or session.get("has_forward", session['position'] + 1 < len(session['history'])) else "noop"
     else:
         previous = f"feed:{category}:{idx - 1}" if idx > 0 else "noop"
         following = f"feed:{category}:{idx + 1}" if idx < total - 1 else "noop"
@@ -390,8 +391,6 @@ def _feed_kb(cid, category, idx, total, unlocked, session=None):
                              callback_data=(f"restream:{cid}" if unlocked else f"unlock:{cid}")),
         InlineKeyboardButton("Next", callback_data=following),
     ]]
-    if session:
-        rows.append([InlineKeyboardButton("🔀 New Shuffle", callback_data=f"feed:{category}:0")])
     rows.append([InlineKeyboardButton("🗂 Categories", callback_data="cats"),
                  InlineKeyboardButton("🏠 Main Menu", callback_data="home")])
     return InlineKeyboardMarkup(rows)

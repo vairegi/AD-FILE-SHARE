@@ -44,6 +44,8 @@ async def connect():
     await _db.deliveries.create_index("auto_delete_at")
     await _db.cover_assets.create_index("public_token", unique=True, sparse=True)
     await _db.feed_sessions.create_index("expires_on", expireAfterSeconds=0)
+    # The durable trail has no TTL and is read in bounded pages.
+    await _db.feed_history.create_index([("user_id", 1), ("seq", 1)], unique=True)
     await _db.broadcast_inputs.create_index("expires_on", expireAfterSeconds=0)
     await _db.broadcast_jobs.create_index([("owner_id", 1), ("created_at", -1)])
     return _db
@@ -323,3 +325,15 @@ async def list_channel_mappings() -> List[dict]:
 async def category_for_channel(channel_id: int) -> Optional[str]:
     d = await col("channel_map").find_one({"channel_id": int(channel_id)})
     return d.get("category") if d else None
+
+
+async def transaction_totals(user_id: int):
+    """Lifetime profile totals, not merely the last 500 transaction rows."""
+    rows = await col("transactions").aggregate([
+        {"$match": {"user_id": int(user_id)}},
+        {"$group": {"_id": None,
+            "earned": {"$sum": {"$cond": [{"$gt": ["$amount", 0]}, "$amount", 0]}},
+            "spent": {"$sum": {"$cond": [{"$lt": ["$amount", 0]}, {"$multiply": ["$amount", -1]}, 0]}}
+        }}
+    ]).to_list(length=1)
+    return (int(rows[0]["earned"]), int(rows[0]["spent"])) if rows else (0, 0)
