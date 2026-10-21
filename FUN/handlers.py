@@ -18,6 +18,8 @@ import config
 import db
 import persona
 import pricing
+import feed_sessions
+import broadcast
 import covers
 
 # ── small helpers ───────────────────────────────────────────────
@@ -148,6 +150,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_help(q)
         elif data == "ref":
             await _show_referral(q)
+        elif data.startswith("bc:"):
+            await broadcast.callback(update, context)
+        elif data.startswith("watch:"):
+            _, direction, session_id = data.split(":")
+            await _show_random_step(q, session_id, direction)
         elif data.startswith("feed:"):
             _, cat, idx = data.split(":")
             await _show_feed(q, cat, int(idx))
@@ -289,6 +296,7 @@ async def _show_library(q, kind, index):
     unlocked = await db.is_unlocked(uid, c["collection_id"])
     keyboard = _feed_kb(c["collection_id"], "all", 0, 1, unlocked)
     rows = list(keyboard.inline_keyboard)
+    rows[0] = [rows[0][1]]  # retain Unlock/Re-Stream, drop duplicate disabled navigation
     rows.insert(0, [InlineKeyboardButton("Previous", callback_data=f"library:{kind}:{index-1}" if index else "noop"),
                    InlineKeyboardButton("Next", callback_data=f"library:{kind}:{index+1}" if index+1<len(collections) else "noop")])
     import rich_cards
@@ -298,23 +306,30 @@ async def _show_library(q, kind, index):
 
 # ── feed (collage/slideshow browser) ─────────────────────────────
 async def _show_feed(q, category, idx):
-    cat = None if category in ("all", "") else category
-    total = await db.count_collections(cat)
-    if total == 0:
+    # Legacy feed callbacks remain valid; opening a shelf starts a shuffle.
+    result = await feed_sessions.start(q.from_user.id, category)
+    if result is None:
         await _edit(q, persona.feed_empty(), _nav_row("cats"))
         return
-    idx = max(0, min(idx, total - 1))
-    cols = await db.list_collections(cat, skip=idx, limit=1)
-    if not cols:
-        await _edit(q, persona.feed_empty(), _nav_row("cats"))
+    state, c, total = result
+    await _render_feed_card(q, c, state['category'], state['position'], total,
+                            session=state)
+
+
+async def _show_random_step(q, session_id, direction):
+    result = await feed_sessions.navigate(q.from_user.id, session_id, direction)
+    if result is None:
+        await _edit(q, "This browsing session is no longer available. Tap Start Watching to begin a new shuffle.",
+                    _home_kb())
         return
-    c = cols[0]
-    await _render_feed_card(q, c, category, idx, total, context=q.get_bot() if hasattr(q, "get_bot") else getattr(q, "bot", None))
+    state, c, total = result
+    await _render_feed_card(q, c, state['category'], state['position'], total,
+                            session=state)
 
 
 async def _send_feed_card(update, context, collection_id):
     c = await db.get_collection(collection_id)
-    if not c:
+    if not c or c.get("status", "active") != "active":
         await update.message.reply_text(persona.feed_empty(),
                                         reply_markup=_home_kb(), parse_mode="HTML")
         return
@@ -324,20 +339,22 @@ async def _send_feed_card(update, context, collection_id):
                        "message": update.message,
                        "edit_message_text": lambda *a, **k: None,
                        "answer": lambda *a, **k: None})()
+    opened = await feed_sessions.start(update.effective_user.id, cat, seed=c["collection_id"])
+    state = opened[0] if opened else None
     text = await _feed_text(update.effective_user.id, c)
     kb = _feed_kb(c["collection_id"], cat, 0, total,
-                  await db.is_unlocked(update.effective_user.id, c["collection_id"]))
+                  await db.is_unlocked(update.effective_user.id, c["collection_id"]), session=state)
     import rich_cards
     await rich_cards.show_cover_card(context.bot, update.effective_user.id, text, kb,
                                      c, "link", collection_id=c["collection_id"])
 
 
-async def _render_feed_card(q, c, category, idx, total, context=None):
+async def _render_feed_card(q, c, category, idx, total, context=None, session=None):
     uid = q.from_user.id
     unlocked = await db.is_unlocked(uid, c["collection_id"])
     await db.bump_collection(c["collection_id"], "views")
     text = await _feed_text(uid, c)
-    kb = _feed_kb(c["collection_id"], category, idx, total, unlocked)
+    kb = _feed_kb(c["collection_id"], category, idx, total, unlocked, session=session)
     bot = context or (q.get_bot() if hasattr(q, "get_bot") else getattr(q, "bot", None))
     if bot:
         import rich_cards
@@ -359,18 +376,24 @@ async def _feed_text(uid, c):
         await db.is_unlocked(uid, c["collection_id"]))
 
 
-def _feed_kb(cid, category, idx, total, unlocked):
+def _feed_kb(cid, category, idx, total, unlocked, session=None):
+    if session:
+        sid = session['session_id']
+        previous = f"watch:prev:{sid}" if session['position'] > 0 else "noop"
+        following = f"watch:next:{sid}" if total > 1 or session['position'] + 1 < len(session['history']) else "noop"
+    else:
+        previous = f"feed:{category}:{idx - 1}" if idx > 0 else "noop"
+        following = f"feed:{category}:{idx + 1}" if idx < total - 1 else "noop"
     rows = [[
-        InlineKeyboardButton("Previous",
-                             callback_data=f"feed:{category}:{idx - 1}" if idx > 0 else "noop"),
+        InlineKeyboardButton("Previous", callback_data=previous),
         InlineKeyboardButton("Re-Stream" if unlocked else "Unlock",
-                             callback_data=(f"restream:{cid}" if unlocked
-                                            else f"unlock:{cid}")),
-        InlineKeyboardButton("Next",
-                             callback_data=f"feed:{category}:{idx + 1}" if idx < total - 1 else "noop"),
-    ], [
-        InlineKeyboardButton("🗂 Categories", callback_data="cats"),
-        InlineKeyboardButton("🏠 Main Menu", callback_data="home")]]
+                             callback_data=(f"restream:{cid}" if unlocked else f"unlock:{cid}")),
+        InlineKeyboardButton("Next", callback_data=following),
+    ]]
+    if session:
+        rows.append([InlineKeyboardButton("🔀 New Shuffle", callback_data=f"feed:{category}:0")])
+    rows.append([InlineKeyboardButton("🗂 Categories", callback_data="cats"),
+                 InlineKeyboardButton("🏠 Main Menu", callback_data="home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -429,7 +452,7 @@ async def _serialized_unlock(update, context, q, cid, restream):
 async def _unlock(update, context, q, cid, restream):
     uid = q.from_user.id
     c = await db.get_collection(cid)
-    if not c:
+    if not c or c.get("status", "active") != "active":
         await q.answer("🎀 This drop isn't available anymore...", show_alert=True)
         return
     price = pricing.collection_price(c)
@@ -519,6 +542,7 @@ async def _deliver(update, context, q, c, price_paid):
         completion = (persona.head("⚠️ Delivery incomplete, Senpai") +
             f"Confirmed delivered messages: <code>{len(sent_ids)}</code>. "
             "Some files need owner review; do not repeatedly retry an uncertain delivery.")
+    next_session = await feed_sessions.next_after_delivery(uid, c)
     await _edit(q, completion,
         InlineKeyboardMarkup([
             [InlineKeyboardButton("💾 Save",
@@ -526,7 +550,7 @@ async def _deliver(update, context, q, c, price_paid):
              InlineKeyboardButton("🔄 Re-Stream",
                                   callback_data=f"restream:{c['collection_id']}")],
             [InlineKeyboardButton("➡️ Next Post",
-                                  callback_data=f"feed:{c.get('category') or 'all'}:0"),
+                                  callback_data=f"watch:next:{next_session}" if next_session else f"feed:{c.get('category') or 'all'}:0"),
              InlineKeyboardButton("🏠 Main Menu", callback_data="home")]]))
 
 
@@ -776,6 +800,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /cancel — cancel userbot setup\n"
         "• /botstatus — detected username\n"
         "• /protect on|off — forwarding/saving protection (default ON)\n"
+        "• /broadcast — prepare a copied message/album for all users\n"
+        "• /broadcast status | /broadcast cancel\n"
         "• /stats — counts")
 
 
@@ -1047,6 +1073,8 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_setup_userbot(update, context):
+    if update.effective_user:
+        await broadcast.cancel_input(update.effective_user.id)
     import chat_setup
     await chat_setup.begin(update, context)
 
@@ -1062,6 +1090,10 @@ async def cmd_remove_userbot(update, context):
 
 
 async def cmd_cancel(update, context):
+    if update.effective_user:
+        if await broadcast.cancel_input(update.effective_user.id):
+            await update.message.reply_text('Broadcast message input cancelled. Nothing was sent to users.')
+            return
     import chat_setup
     await chat_setup.cancel(update, context)
 
@@ -1078,7 +1110,9 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import chat_setup
     if await chat_setup.consume(update, context):
         return
-    # Outside an explicit owner-private setup, never capture arbitrary input.
+    if await broadcast.consume(update, context):
+        return
+    # Outside an explicit owner-private setup/broadcast, never capture arbitrary input.
     if (update.message.text or "").strip().lower() in ("/check-in", "/check in"):
         await cmd_checkin(update, context)
 
@@ -1126,3 +1160,13 @@ async def cmd_protect(update, context):
         "\nApplies to new deliveries and Re-Streams, not files already sent."
         "\n/protect on — block Telegram forwarding/saving"
         "\n/protect off — allow forwarding/saving")
+
+
+async def on_private_message(update, context):
+    if getattr(update.message, 'text', None) is not None:
+        return await on_private_text(update, context)
+    await broadcast.consume(update, context)
+
+
+async def cmd_broadcast(update, context):
+    return await broadcast.command(update, context)

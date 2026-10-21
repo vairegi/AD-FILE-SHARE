@@ -33,7 +33,7 @@ def build_bot():
     application = Application.builder().token(config.BOT_TOKEN).defaults(
         Defaults(parse_mode=None)).build()
     commands = {"start": handlers.cmd_start, "checkin": handlers.cmd_checkin,
-        "help": handlers.cmd_help, "covermode": handlers.cmd_covermode,
+        "help": handlers.cmd_help, "broadcast": handlers.cmd_broadcast, "covermode": handlers.cmd_covermode,
     "telegraph_token": handlers.cmd_telegraph_token,
         "retry_covers": handlers.cmd_retry_covers, "cover_status": handlers.cmd_cover_status,
         "test_hosts": handlers.cmd_test_hosts, "select_host": handlers.cmd_select_host,
@@ -50,8 +50,8 @@ def build_bot():
     for name, fn in commands.items():
         application.add_handler(CommandHandler(name, fn, filters=filters.ChatType.PRIVATE))
     application.add_handler(CallbackQueryHandler(handlers.on_button))
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT,
-                                           handlers.on_private_text))
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND,
+                                           handlers.on_private_message))
     return application
 
 
@@ -81,6 +81,8 @@ async def lifespan(app):
             await runtime.replace_userbot(client)
     except Exception:
         log.warning("Userbot not connected. Owner: use /setup_userbot or /userbot_status.")
+    import broadcast
+    await broadcast.recover_after_restart()
     runtime.start_jobs(app_bot.bot)
     try:
         yield
@@ -96,7 +98,7 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"ok": True, "service": "fun-bot3", "version": "autoindex-media-tiers-v1"}
+    return {"ok": True, "service": "fun-bot3", "version": "random-history-broadcast-v1"}
 
 
 @app.post("/webhook")

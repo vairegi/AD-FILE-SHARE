@@ -43,6 +43,9 @@ async def connect():
     await _db.referrals.create_index("inviter_id")
     await _db.deliveries.create_index("auto_delete_at")
     await _db.cover_assets.create_index("public_token", unique=True, sparse=True)
+    await _db.feed_sessions.create_index("expires_on", expireAfterSeconds=0)
+    await _db.broadcast_inputs.create_index("expires_on", expireAfterSeconds=0)
+    await _db.broadcast_jobs.create_index([("owner_id", 1), ("created_at", -1)])
     return _db
 
 

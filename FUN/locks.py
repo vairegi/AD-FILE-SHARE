@@ -3,6 +3,7 @@ import asyncio
 from weakref import WeakValueDictionary
 _users = WeakValueDictionary()
 _channels = WeakValueDictionary()
+_feeds = WeakValueDictionary()
 
 def _get(pool, key):
     lock = pool.get(key)
@@ -16,3 +17,7 @@ def user_lock(uid):
 
 def channel_lock(cid):
     return _get(_channels, int(cid))
+
+
+def feed_lock(uid):
+    return _get(_feeds, int(uid))
