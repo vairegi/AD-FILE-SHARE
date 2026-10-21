@@ -47,7 +47,8 @@ def _post_from_message(m):
 
 
 async def scan_channel(client, channel_id: int, category: str,
-                       limit: Optional[int] = None, full=False):
+                       limit: Optional[int] = None, full=False,
+                       source=None, prepare_covers=True):
     async with channel_lock(channel_id):
         state = await db.col("scan_state").find_one({"_id": int(channel_id)}) or {}
         start = 0 if full else int(state.get("last_cover_id") or 0)
@@ -98,7 +99,7 @@ async def scan_channel(client, channel_id: int, category: str,
                                       "reason": "media before first identifiable cover"}}, upsert=True)
                         pending_count += 1
 
-        async for message in client.iter_messages(int(channel_id),
+        async for message in client.iter_messages(source if source is not None else int(channel_id),
                 min_id=max(0, start - 1), limit=limit, reverse=True):
             last_seen = max(last_seen, message.id)
             post = _post_from_message(message)
@@ -115,12 +116,13 @@ async def scan_channel(client, channel_id: int, category: str,
             await process(unit)
         await db.col("scan_state").update_one({"_id": int(channel_id)}, {"$set": {
             "cursor": last_seen, "last_cover_id": last_cover, "last_scan_at": db.now_ts(),
-            "category": category, "posts_scanned": scanned}}, upsert=True)
+            "category": category, "posts_scanned": scanned,
+            "last_error_type": None}}, upsert=True)
         # Host covers for every touched collection (downloads + telegra.ph/graph.org
         # upload happen at scan time; results are cached in MongoDB).
         covers_ok = 0
         previews_ready = 0
-        for cid in touched:
+        for cid in touched if prepare_covers else []:
             doc = await db.get_collection(cid)
             if doc:
                 try:
@@ -131,4 +133,5 @@ async def scan_channel(client, channel_id: int, category: str,
                 except Exception:
                     log.warning("Cover preparation failed for %s", cid)
         return {"collections": len(touched), "pending_files": pending_count,
-                "posts_scanned": scanned, "covers_ready": covers_ok, "previews_ready": previews_ready}
+                "posts_scanned": scanned, "covers_ready": covers_ok, "previews_ready": previews_ready,
+                "cover_collection_ids": sorted(touched)}

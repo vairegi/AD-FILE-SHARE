@@ -2,6 +2,7 @@
 All dynamic strings are escaped HERE; callers must pass raw strings.
 """
 import config
+import pricing
 import random
 from ui import h
 SEP = "━━━━━━━━━━━━━━━━━━━━"
@@ -31,7 +32,7 @@ def home(balance, streak, unlocked, saved):
 def categories(balance):
     return (head("🎀 Explore Categories, Senpai~! (｡♥‿♥｡)✨")
         + stat("👛", "Token Balance", f"{balance} Tokens")
-        + f"\nEvery drop costs <code>{config.COLLECTION_PRICE}</code> tokens.\n{SEP}\n"
+        + "\n" + pricing.tier_guide_html() + f"\n{SEP}\n"
         + cute("🌸 Uwahh, tap a shelf and I'll fetch the perfect album for you!"))
 
 
@@ -82,7 +83,8 @@ def help_card():
         + "\n\n<b>1. Instant Media Stream 🎬</b>\n"
         "• Start Watching opens the feed.\n• Previous / Next changes the current card.\n"
         "• Categories filters the shelf.\n\n<b>2. Unlock &amp; Vault 📦</b>\n"
-        f"• Each new collection costs <code>{config.COLLECTION_PRICE}</code> tokens.\n"
+        + pricing.tier_guide_html() + "\n"
+        +
         "• Purchased collections stay in your Vault; Re-Stream is free.\n"
         f"• Delivered files auto-clean after <code>{config.AUTO_DELETE_AFTER_SECONDS // 60} min</code>.\n"
         "• Save adds a separate bookmark.\n\n<b>3. Free Token Rewards 👛</b>\n"

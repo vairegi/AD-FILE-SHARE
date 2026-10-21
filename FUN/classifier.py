@@ -97,7 +97,7 @@ def classify(posts: List[Dict[str, Any]], channel_id: int,
                 "files": [],
                 "file_count": 0,
                 "posted_at": first.get("date_ts") or 0,
-                "price": None,  # None -> config.COLLECTION_PRICE at runtime
+                "price": None,  # None -> automatic delivery-media tier at runtime
                 "status": "active",
                 "views": 0,
                 "unlocks": 0,

@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 import config
 import db
 import persona
+import pricing
 import covers
 
 # ── small helpers ───────────────────────────────────────────────
@@ -203,6 +204,7 @@ async def _show_categories(q):
         rows.append([InlineKeyboardButton(f"{c} ({n})",
                                           callback_data=f"feed:{c}:0")])
     rows.append([InlineKeyboardButton("🏠 Main Menu", callback_data="home")])
+    rows.insert(len(rows) - 1, [InlineKeyboardButton("🔄 Refresh Categories", callback_data="cats")])
     await _edit(q, persona.categories(int(doc.get("tokens", 0))),
                 InlineKeyboardMarkup(rows))
 
@@ -349,9 +351,9 @@ async def _render_feed_card(q, c, category, idx, total, context=None):
 
 
 async def _feed_text(uid, c):
-    price = config.COLLECTION_PRICE if c.get("price") is None else int(c["price"])
+    price = pricing.collection_price(c)
     return persona.feed_caption(
-        c.get("title") or "Drop", c.get("file_count", 0),
+        c.get("title") or "Drop", pricing.media_count(c),
         c.get("views", 0), c.get("unlocks", 0), price,
         int((await db.get_user(uid) or {}).get("tokens", 0)),
         await db.is_unlocked(uid, c["collection_id"]))
@@ -430,7 +432,7 @@ async def _unlock(update, context, q, cid, restream):
     if not c:
         await q.answer("🎀 This drop isn't available anymore...", show_alert=True)
         return
-    price = config.COLLECTION_PRICE if c.get("price") is None else int(c["price"])
+    price = pricing.collection_price(c)
 
     if not c.get("files"):
         await _edit(q, persona.head("🎀 This drop isn't ready yet, Senpai~!") +
@@ -757,7 +759,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /channels — list mappings\n"
         "• /reqchannel <channel_id|off> — required join\n"
         "• /addtask <task_id> <label> <url> [reward]\n"
-        "• /setprice <collection_id> <tokens>\n"
+        "• /setprice <collection_id> <tokens|auto>\n"
         "• /scan <channel_id> — run scanner now\n"
         "• /covermode — in-place Telegraph preview mode\n"
         "• /telegraph_token — legacy token help/reset\n"
@@ -990,11 +992,13 @@ async def cmd_setprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     try:
-        cid, price = context.args[0], int(context.args[1])
+        cid = context.args[0]
+        raw = context.args[1].strip().lower()
+        price = None if raw == "auto" else int(raw)
     except (IndexError, ValueError):
-        await update.message.reply_text("Usage: /setprice <collection_id> <n>")
+        await update.message.reply_text("Usage: /setprice <collection_id> <tokens|auto>")
         return
-    if price < 0:
+    if price is not None and price < 0:
         await update.message.reply_text("Price must be zero or greater.")
         return
     if not await db.get_collection(cid):
@@ -1002,7 +1006,11 @@ async def cmd_setprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await db.col("collections").update_one(
         {"collection_id": cid}, {"$set": {"price": price}})
-    await update.message.reply_text(f"✅ {cid} price → {price} tokens.")
+    if price is None:
+        cost = pricing.collection_price(await db.get_collection(cid))
+        await update.message.reply_text(f"✅ {cid} uses automatic media tiers (currently {cost} tokens).")
+    else:
+        await update.message.reply_text(f"✅ {cid} price → {price} tokens.")
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
