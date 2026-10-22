@@ -140,6 +140,7 @@ async def start(user_id, category='all', seed=None):
         doc = await _pick(state, category, seed)
         if doc is None:
             return None
+        state['browse_category'] = category
         await _append(state, doc, category)
         # Reject stale cards, but rotate only the callback identity, not history.
         state['session_id'] = uuid.uuid4().hex[:16]
@@ -148,6 +149,7 @@ async def start(user_id, category='all', seed=None):
 
 async def _adjacent(state, direction):
     cursor = int(state.get('cursor', 0))
+    scope = state.get('browse_category', state.get('category') or 'all')
     sign, order = ('$lt', -1) if direction == 'prev' else ('$gt', 1)
     while True:
         rows = await db.col('feed_history').find({'user_id': state['_id'],
@@ -157,15 +159,15 @@ async def _adjacent(state, direction):
         # Fetch validity once for a bounded page, rather than one request per
         # obsolete record. Deleted/disabled/empty drops are not re-delivered.
         ids = list({r['collection_id'] for r in rows})
-        docs = await db.col('collections').find({**_eligible(),
+        docs = await db.col('collections').find({**_eligible(scope),
             'collection_id': {'$in': ids}}, {'files': 0}).to_list(length=50)
         valid = {d['collection_id'] for d in docs}
         for row in rows:
             if row['collection_id'] in valid:
-                doc = await _collection(row['collection_id'])
+                doc = await _collection(row['collection_id'], scope)
                 if doc:
                     state['cursor'] = row['seq']
-                    state['category'] = row.get('category') or 'all'
+                    state['category'] = scope
                     return doc
         cursor = rows[-1]['seq']
 
@@ -178,6 +180,7 @@ async def navigate(user_id, session_id, direction):
         if not saved:
             return None
         state = await _prepare(user_id, saved)
+        state['category'] = state.get('browse_category', state.get('category') or 'all')
         doc = await _adjacent(state, direction)
         if doc:
             return await _result(state, doc)
@@ -199,6 +202,7 @@ async def next_after_delivery(user_id, collection):
         category = state.get('category') or collection.get('category') or 'all'
         if category != 'all' and category != collection.get('category'):
             category = collection.get('category') or 'all'
+        state['browse_category'] = category
         await _append(state, collection, category)
         await _save(state)
         return state['session_id']

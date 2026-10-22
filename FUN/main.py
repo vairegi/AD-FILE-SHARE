@@ -51,6 +51,7 @@ def build_bot():
         "remove_userbot": handlers.cmd_remove_userbot, "botstatus": handlers.cmd_botstatus,
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,
         "setprice": handlers.cmd_setprice, "stats": handlers.cmd_stats,
+        "autodlt": handlers.cmd_autodlt,
         "pending": handlers.cmd_pending, "collections": handlers.cmd_collections}
     for name, fn in commands.items():
         application.add_handler(CommandHandler(name, fn, filters=filters.ChatType.PRIVATE))

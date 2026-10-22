@@ -278,7 +278,7 @@ async def update_delivery(delivery_id: str, fields: dict):
 
 async def due_deletions(now: Optional[float] = None) -> List[dict]:
     cur = col("deliveries").find(
-        {"auto_delete_at": {"$lte": now if now is not None else now_ts()},
+        {"auto_delete_at": {"$type": "number", "$lte": now if now is not None else now_ts()},
          "delete_status": "pending"})
     return [d async for d in cur]
 

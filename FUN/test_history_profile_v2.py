@@ -140,9 +140,14 @@ async def test_category_changes_preserve_actual_viewing_trail():
     one=await docs(2,'one');two=await docs(2,'two')
     await open_seed(one[0]);state,_,_=await open_seed(two[0])
     state,back,_=await feed_sessions.navigate(7,state['session_id'],'prev')
-    assert back['collection_id']==one[0]['collection_id'] and state['category']=='one'
-    state,forward,_=await feed_sessions.navigate(7,state['session_id'],'next')
-    assert forward['collection_id']==two[0]['collection_id'] and state['category']=='two'
+    # A selected category cannot leak into another category's stored history.
+    assert back['collection_id']==two[0]['collection_id'] and state['category']=='two'
+    saved = await db.col('feed_history').find({'user_id':7}).to_list(None)
+    assert {r['collection_id'] for r in saved} >= {one[0]['collection_id'], two[0]['collection_id']}
+    # The global viewing trail remains available when browsing all categories.
+    state,_,_=await feed_sessions.start(7,'all',seed=two[0]['collection_id'])
+    state,back,_=await feed_sessions.navigate(7,state['session_id'],'prev')
+    assert back['collection_id']==one[0]['collection_id'] and state['category']=='all'
 
 
 async def test_new_view_after_back_keeps_forward_trail_and_last_visible_post():

@@ -504,9 +504,11 @@ async def _deliver(update, context, q, c, price_paid):
     files = c.get("files") or []
     delivery_id = f"d{uuid.uuid4().hex[:12]}"
     sent_ids, failed = [], []
+    import delivery_policy
+    delete_at = await delivery_policy.deadline()
     await db.create_delivery({"delivery_id": delivery_id, "user_id": uid,
         "collection_id": c["collection_id"], "message_ids": [], "failed_files": [],
-        "auto_delete_at": db.now_ts() + config.AUTO_DELETE_AFTER_SECONDS,
+        "auto_delete_at": delete_at,
         "delete_status": "none", "status": "sending", "at": db.now_ts()})
     try:
         from services import deliver_collection
@@ -802,6 +804,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /protect on|off — forwarding/saving protection (default ON)\n"
         "• /broadcast — prepare a copied message/album for all users\n"
         "• /broadcast status | /broadcast cancel\n"
+        "• /autodlt <1m|15m|30m|1h|off> — new delivery deletion timer\n"
         "• /stats — counts")
 
 
@@ -1037,6 +1040,31 @@ async def cmd_setprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {cid} uses automatic media tiers (currently {cost} tokens).")
     else:
         await update.message.reply_text(f"✅ {cid} price → {price} tokens.")
+
+
+async def cmd_autodlt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    import delivery_policy
+    args = context.args or []
+    if not args:
+        seconds = await delivery_policy.current_seconds()
+        await update.message.reply_text(
+            f"🕒 Auto-delete: {delivery_policy.label(seconds)}.\n"
+            "Usage: /autodlt 1m | 15m | 30m | 1h | off\n"
+            "Changes apply to new file deliveries. Existing timers keep their deadlines.")
+        return
+    try:
+        if len(args) != 1:
+            raise ValueError('Supply one duration, such as 15m or 1h.')
+        seconds = delivery_policy.parse_duration(args[0])
+    except ValueError as exc:
+        await update.message.reply_text(f"⚠️ {exc}\nUsage: /autodlt 15m | 1h | off")
+        return
+    await db.update_settings({'autodlt_seconds': seconds})
+    await update.message.reply_text(
+        f"✅ Auto-delete for NEW deliveries: {delivery_policy.label(seconds)}.\n"
+        "Saved across restarts. Existing timers keep their deadlines.")
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
