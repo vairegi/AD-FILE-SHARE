@@ -578,7 +578,7 @@ async def _cursor_of(category):
 
 async def next_unposted(category=None):
     """Lowest db_message_id that has not been posted yet (oldest first)."""
-    q = {"posted": False}
+    q = {"posted": False, "index_complete": {"$ne": False}}
     if category:
         q["category"] = _norm_key(category)
         cur = await _cursor_of(category)
@@ -588,7 +588,7 @@ async def next_unposted(category=None):
 
 
 async def next_n_queued(category=None, n=10):
-    q = {"posted": False}
+    q = {"posted": False, "index_complete": {"$ne": False}}
     if category:
         q["category"] = _norm_key(category)
         cur = await _cursor_of(category)
@@ -660,7 +660,7 @@ async def count_posted(category=None):
 
 
 async def count_pending(category=None):
-    q = {"posted": False}
+    q = {"posted": False, "index_complete": {"$ne": False}}
     if category:
         q["category"] = _norm_key(category)
     return await _db.files.count_documents(q)
@@ -668,11 +668,8 @@ async def count_pending(category=None):
 
 # ── raw staging + grouping (category-scoped) ──────────────────
 async def ingest_raw(entry: dict, category=None):
-    cat = _norm_key(category or entry.get("category"))
-    await _db.raw.update_one(
-        {"category": cat, "message_id": entry["message_id"]},
-        {"$set": {**entry, "category": cat}}, upsert=True
-    )
+    import root_index
+    return await root_index.stage([entry], category or entry.get("category"))
 
 
 async def all_raw(category=None):
@@ -746,32 +743,11 @@ async def rematch_genres(category):
 
 
 async def rebuild_items(category=None):
-    """Re-derive the files collection from raw staging (keeps posted flags).
-
-    Scoped per category so rescanning one pipeline never disturbs another.
-    Self-healing: items whose source messages are no longer in the DB channel
-    are REMOVED, so the queue renumbers itself on the next /rescandb."""
-    cat = _norm_key(category)
-    items = group_items(await all_raw(cat), cat)
-    valid_ids = {it["db_message_id"] for it in items}
-    base = {"category": cat} if cat else {}
-    if valid_ids:
-        await _db.files.delete_many({**base, "db_message_id": {"$nin": list(valid_ids)}})
-    else:
-        await _db.files.delete_many(base)
-    for it in items:
-        await upsert_item({
-            "file_id": make_file_id(cat, it["db_message_id"]) if cat
-                       else f"f{it['db_message_id']}",
-            "category": cat or it.get("category"),
-            "db_message_id": it["db_message_id"],
-            "cover_message_id": it["cover_message_id"],
-            "cover_file_id": it.get("cover_file_id"),
-            "caption": it["caption"],
-            "videos": it["videos"],
-            "srts": it["srts"],
-        })
-    return len(items)
+    """Explicit, streaming, non-destructive metadata reconciliation.
+    Ordinary channel updates never call this maintenance API.
+    """
+    import root_index
+    return await root_index.rebuild(category)
 
 
 # ── tokens ────────────────────────────────────────────────────

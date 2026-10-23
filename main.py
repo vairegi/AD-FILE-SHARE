@@ -20,6 +20,8 @@ from telegram import Update
 import config
 import db
 import outbound
+import root_index
+import root_dispatch
 from bot1 import build_bot1, schedule_daily, schedule_broadcast_sweeper
 from bot2 import build_bot2, schedule_sweeper
 
@@ -83,6 +85,9 @@ async def _set_commands():
 async def lifespan(app: FastAPI):
     # 1. Database + both bots
     await db.connect()
+    await root_index.ensure_indexes()
+    await root_dispatch.ensure_indexes()
+    await root_index.bootstrap()
     await bot1.initialize()
     await bot1.start()
     await bot2.initialize()
@@ -115,19 +120,23 @@ async def lifespan(app: FastAPI):
     await _set_commands()
     log.info("Both bots are up. Patch: db-admins-only + resilient-shorteners-v1")
 
-    yield
-
-    # Shutdown
+    root_index.start()
+    root_dispatch.start(bot1, bot2)
     try:
-        await bot1.stop()
-        await bot1.shutdown()
-        await bot2.stop()
-        await bot2.shutdown()
+        yield
     finally:
+        await root_dispatch.stop()
+        await root_index.stop()
         try:
-            await outbound.close()
+            await bot1.stop()
+            await bot1.shutdown()
+            await bot2.stop()
+            await bot2.shutdown()
         finally:
-            await db.close()
+            try:
+                await outbound.close()
+            finally:
+                await db.close()
 
 
 app = FastAPI(title="Telegram Video Bots", lifespan=lifespan)
@@ -139,39 +148,66 @@ def _secret_ok(request: Request, expected: str) -> bool:
     return request.headers.get("x-telegram-bot-api-secret-token") == expected
 
 
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    return {"service": "root-bots-1-2", "status": "running"}
+
+
 @app.get("/health")
 async def health():
-    healthy = True
+    from fastapi.responses import JSONResponse
     try:
-        await db.ping()
+        await asyncio.wait_for(db.ping(), timeout=2.0)
     except Exception:
-        healthy = False
-    return {"status": "ok" if healthy else "degraded", "database": healthy}
+        return JSONResponse({"status": "degraded", "database": False}, status_code=503)
+    return {"status": "ok", "database": True}
+
+
+async def _webhook(request, name, application, secret):
+    if not _secret_ok(request, secret):
+        return Response(status_code=403)
+    slots = root_dispatch.ingress_slots()
+    try:
+        await asyncio.wait_for(slots.acquire(), timeout=0.05)
+    except asyncio.TimeoutError:
+        return Response(status_code=503)  # Telegram retries; nothing accepted/lost
+    try:
+        import json
+        body = bytearray()
+        declared = request.headers.get('content-length', '')
+        if declared.isdigit() and int(declared) > root_dispatch.MAX_BODY_BYTES:
+            return Response(status_code=413)
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > root_dispatch.MAX_BODY_BYTES:
+                return Response(status_code=413)
+            body.extend(chunk)
+        try:
+            data = json.loads(body)
+            if not isinstance(data, dict) or not isinstance(data.get('update_id'), int):
+                return Response(status_code=400)
+            update = Update.de_json(data, application.bot)
+        except (ValueError, TypeError, KeyError):
+            return Response(status_code=400)
+        if name == 'bot1' and (update.channel_post or update.edited_channel_post):
+            await root_index.stage_message(update.channel_post or update.edited_channel_post, update.update_id)
+        else:
+            await root_dispatch.enqueue(name, data)
+        return Response(status_code=200)  # only after durable persistence succeeded
+    except Exception as exc:
+        log.warning('Webhook persistence retry bot=%s error=%s', name, type(exc).__name__)
+        return Response(status_code=503)
+    finally:
+        slots.release()
 
 
 @app.post("/bot1/webhook")
 async def bot1_webhook(request: Request):
-    if not _secret_ok(request, config.BOT1_WEBHOOK_SECRET):
-        return Response(status_code=403)
-    data = await request.json()
-    update = Update.de_json(data, bot1.bot)
-    # Answer Telegram INSTANTLY (200) and process in the background.
-    # Without this, a slow handler (e.g. a long /broadcast) makes Telegram
-    # retry the same update over and over - which is exactly what caused
-    # the repeated broadcasts AND blocked the event loop so no other
-    # command could get through.
-    asyncio.create_task(bot1.process_update(update))
-    return Response(status_code=200)
+    return await _webhook(request, 'bot1', bot1, config.BOT1_WEBHOOK_SECRET)
 
 
 @app.post("/bot2/webhook")
 async def bot2_webhook(request: Request):
-    if not _secret_ok(request, config.BOT2_WEBHOOK_SECRET):
-        return Response(status_code=403)
-    data = await request.json()
-    update = Update.de_json(data, bot2.bot)
-    asyncio.create_task(bot2.process_update(update))
-    return Response(status_code=200)
+    return await _webhook(request, 'bot2', bot2, config.BOT2_WEBHOOK_SECRET)
 
 
 if __name__ == "__main__":

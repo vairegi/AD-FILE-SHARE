@@ -2289,7 +2289,8 @@ async def _run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_
         return
     await _say(
         f"✅ [{category or 'legacy'}] Scan complete. Messages indexed: {result['scanned']} · "
-        f"Items in queue: {result['items']}")
+        f"Complete blocks indexed: {result['items']}.\n"
+        "The final open cover stays staged. When its upload is finished, use /flushindex <category>.")
     if category and result.get("genres"):
         await _say(
             f"🏷 [{category}] {result['genres']} genre match list(s) refreshed "
@@ -2745,7 +2746,33 @@ async def cmd_checkram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_ram_report(), parse_mode="HTML")
 
 
+@admin_only
+async def cmd_indexstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import root_index
+    args = list(context.args or [])
+    await update.message.reply_text(await root_index.status(args[0] if args else None))
+
+
+@admin_only
+async def cmd_flushindex(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Explicit owner confirmation that the final upload is finished."""
+    import root_index
+    args = list(context.args or [])
+    if len(args) != 1 or not await db.get_category(args[0]):
+        await update.message.reply_text("Usage: /flushindex <category>\nRun ONLY after every video/subtitle for the final cover has finished arriving.")
+        return
+    high = await root_index.seal(args[0])
+    if not high:
+        await update.message.reply_text(f"[{args[0]}] No staged source messages to confirm.")
+        return
+    await update.message.reply_text(
+        f"✅ [{args[0]}] Owner-confirmed completion through message {high}. Queued for safe indexing.\n"
+        "Newer arrivals remain staged for the next batch. Use /indexstatus to inspect progress.")
+
+
 COMMANDS = {
+    "indexstatus": cmd_indexstatus,
+    "flushindex": cmd_flushindex,
     "shortener": cmd_shortener,
     "shortenerapi": cmd_shortenerapi,
     "linkguard": cmd_linkguard,

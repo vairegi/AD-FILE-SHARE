@@ -1189,40 +1189,11 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Live-index new messages appearing in ANY registered Database Channel.
-
-    Routes by chat_id -> the owning category, so each pipeline indexes only
-    its own source channel and never touches another category's queue."""
-    msg = update.channel_post
-    cat = await db.category_for_db_channel(msg.chat_id)
-    if not cat:
-        # Back-compat: fall back to the legacy single global DB channel.
-        settings = await db.get_settings()
-        if not settings.get("db_channel_id") or msg.chat_id != settings.get("db_channel_id"):
-            return
-        cat_key = None
-    else:
-        cat_key = cat["key"]
-    kind = scanner.classify_from_botapi(msg)
-    if not kind:
-        return
-    entry = {"message_id": msg.message_id, "kind": kind,
-             "caption": msg.caption or ""}
-    # capture the Bot API file_id of cover photos so do_post can blur them
-    if kind == "cover" and msg.photo:
-        entry["file_id"] = msg.photo[-1].file_id
-    await db.ingest_raw(entry, category=cat_key)
-    await db.rebuild_items(cat_key)
-    if kind == "cover" and cat_key:
-        # v4.4: lazy incremental genre matching — regex the fresh caption
-        # against this pipeline's genres (in-memory, microseconds); matched
-        # genres store the new file_id so the DB is NEVER re-scanned.
-        try:
-            await db.match_item_genres(cat_key,
-                                       db.make_file_id(cat_key, msg.message_id),
-                                       entry["caption"])
-        except Exception as exc:
-            log.warning("genre match for new item failed (non-fatal): %s", exc)
+    """Stage source metadata durably. Indexing is a separate bounded worker."""
+    import root_index
+    message = update.channel_post or getattr(update, 'edited_channel_post', None)
+    if message:
+        await root_index.stage_message(message, getattr(update, 'update_id', 0))
 
 
 # ── application factory ───────────────────────────────────────

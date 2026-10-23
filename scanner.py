@@ -6,6 +6,9 @@ Everything it sees is written to the `raw` staging collection, after which
 db.rebuild_items() groups messages into items (cover -> videos -> srt).
 """
 import logging
+import asyncio
+
+_scan_lock = asyncio.Lock()
 
 import config
 import db
@@ -54,53 +57,67 @@ def classify_from_botapi(msg):
 
 
 async def scan_channel(channel_id, category=None, progress=None):
-    """Scan a channel's full history into the raw staging collection,
-    tagged to a single category so pipelines never mix."""
-    if not (config.API_ID and config.API_HASH and config.SESSION_USER):
-        raise RuntimeError(
-            "Telethon credentials are missing. Set API_ID, API_HASH and SESSION_USER."
-        )
+    if _scan_lock.locked():
+        raise RuntimeError('A history scan is already running. Wait for it to finish; live posts remain durably staged.')
+    async with _scan_lock:
+        return await _scan_channel(channel_id, category, progress)
 
+
+async def _scan_channel(channel_id, category=None, progress=None):
+    """Explicit history scan with a frozen high-water mark and 100-row batches.
+    No video downloads. Newer live source revisions always win. Reconciliation
+    streams one atomic group at a time, never materializes the full history.
+    """
+    import asyncio
+    import root_index
+    if not (config.API_ID and config.API_HASH and config.SESSION_USER):
+        raise RuntimeError("Telethon credentials are missing. Set API_ID, API_HASH and SESSION_USER.")
     from telethon import TelegramClient
     from telethon.sessions import StringSession
-
-    client = TelegramClient(StringSession(config.SESSION_USER),
-                            config.API_ID, config.API_HASH)
-    await client.connect()
+    client = TelegramClient(StringSession(config.SESSION_USER), config.API_ID, config.API_HASH)
+    scanned, high, batch, ranks = 0, 0, [], []
     try:
-        if not await client.is_user_authorized():
-            raise RuntimeError(
-                "The Telethon session is not authorized. Regenerate SESSION_USER."
-            )
-        scanned = 0
-        async for msg in client.iter_messages(channel_id, reverse=True):
-            kind = classify_message(msg)
-            if not kind:
-                continue
-            entry = {"message_id": msg.id,
-                     "kind": kind,
-                     "caption": msg.message or ""}
-            # capture a Bot API-compatible file_id for cover photos so Bot 1
-            # can re-send them with has_spoiler=True (copy_message can't blur)
-            if kind == "cover" and getattr(msg, "photo", None):
+        await asyncio.wait_for(client.connect(), timeout=30)
+        if not await asyncio.wait_for(client.is_user_authorized(), timeout=15):
+            raise RuntimeError("The Telethon session is not authorized. Regenerate SESSION_USER.")
+        latest = await asyncio.wait_for(client.get_messages(channel_id, limit=1), timeout=45)
+        target = latest[0].id if latest else 0
+        if not target:
+            return {"scanned": 0, "items": 0, "genres": 0}
+        iterator = client.iter_messages(channel_id, reverse=True, max_id=target + 1).__aiter__()
+        while True:
+            try:
+                msg = await asyncio.wait_for(anext(iterator), timeout=45)
+            except StopAsyncIteration:
+                break
+            kind = classify_message(msg) or 'skip'
+            entry = {"message_id": msg.id, "kind": kind, "caption": msg.message or ""}
+            if kind == 'cover' and getattr(msg, 'photo', None):
                 try:
                     from telethon.utils import pack_bot_file_id
-                    entry["file_id"] = pack_bot_file_id(msg.photo)
+                    entry['file_id'] = pack_bot_file_id(msg.photo)
                 except Exception:
                     pass
-            await db.ingest_raw(entry, category=category)
-            scanned += 1
-            if progress and scanned % 200 == 0:
-                await progress(scanned)
-        items = await db.rebuild_items(category)
-        # v4.4: captions may have changed since the last scan — refresh every
-        # genre match list of this category once (still no per-genre scans).
-        genres = 0
-        if category:
-            try:
-                genres = await db.rematch_genres(category)
-            except Exception as exc:
-                log.warning("genre rematch after scan failed (non-fatal): %s", exc)
-        return {"scanned": scanned, "items": items, "genres": genres}
+            date = getattr(msg, 'edit_date', None) or getattr(msg, 'date', None)
+            batch.append(entry)
+            ranks.append(root_index.source_rank(date.timestamp() if date else 0, live=False))
+            high = max(high, msg.id)
+            scanned += kind != 'skip'
+            if len(batch) == 100:
+                await root_index.stage(batch, category, ranks=ranks)
+                batch, ranks = [], []
+                if progress:
+                    await progress(scanned)
+        if batch:
+            await root_index.stage(batch, category, ranks=ranks)
+        # A historical read reaching today's tail does NOT prove the upload
+        # of its final cover is finished. Only next-cover or owner seal does.
+        async with root_index.category_lock(category):
+            await db._db.root_index_state.update_one({'_id': db._norm_key(category)},
+                {'$max': {'trusted_through': high}})
+        items = await root_index.rebuild(category, end_id=high, include_final=False)
+        # Individual committed covers match genres incrementally. Do not load
+        # every file caption into RAM for a redundant genre rebuild.
+        return {"scanned": scanned, "items": items, "genres": 0}
     finally:
         await client.disconnect()

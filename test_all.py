@@ -37,6 +37,16 @@ if not os.environ.get("MONGO_URI"):
         # Swap the client class so the REAL db.connect() runs its settings
         # seed, index creation and migrations unchanged, only offline.
         db.AsyncIOMotorClient = AsyncMongoMockClient
+        # Mock compatibility only: new PyMongo supplies sort=None to bulk
+        # update builders; mongomock has not yet added that optional argument.
+        import inspect as _inspect
+        from mongomock.collection import BulkOperationBuilder as _Bulk
+        if 'sort' not in _inspect.signature(_Bulk.add_update).parameters:
+            _original_add_update = _Bulk.add_update
+            def _compatible_add_update(self, *args, **kwargs):
+                kwargs.pop('sort', None)
+                return _original_add_update(self, *args, **kwargs)
+            _Bulk.add_update = _compatible_add_update
     except ImportError:
         pass
 
@@ -1049,10 +1059,11 @@ async def main():
     import inspect
     src1 = inspect.getsource(m.bot1_webhook)
     src2 = inspect.getsource(m.bot2_webhook)
-    check("webhooks ack instantly via background task",
-          "create_task" in src1 and "create_task" in src2
-          and "await bot1.process_update" not in src1
-          and "await bot2.process_update" not in src2)
+    dispatcher = inspect.getsource(m._webhook)
+    check("webhooks persist before ack without unbounded background tasks",
+          "create_task" not in src1 and "create_task" not in src2
+          and "root_dispatch.enqueue" in dispatcher
+          and "root_index.stage_message" in dispatcher)
 
     # ── 11b. posting flow: protect flag + main-channel tag ─────
     # deterministic queue state: mark everything posted, then add fresh items
@@ -1224,13 +1235,17 @@ async def main():
     await db._db.raw.delete_one({"category": "jav", "message_id": 900})
     await db._db.raw.delete_one({"category": "jav", "message_id": 901})
     await db.rebuild_items("jav")
-    check("rescan drops deleted DB posts from the queue",
-          await db.get_item_by_file_id("jav_f900") is None
+    check("rescan does not delete existing items based on a partial snapshot",
+          await db.get_item_by_file_id("jav_f900") is not None
           and await db.get_item_by_file_id("jav_f910") is not None)
 
     # ── 11e. multi-category isolation (two pipelines, same message ids) ──
-    # NOTE: the rescan above legitimately purged old jav items (self-healing
-    # rebuild), so re-seed the jav items used by this isolation block.
+    # Explicitly isolate the synthetic queue. Reconciliation intentionally
+    # no longer deletes unrelated records that lack staging metadata.
+    await db._db.files.delete_many({'category': {'$in': ['jav', 'anime']},
+                                   'db_message_id': {'$in': [100, 110]}})
+    await db._db.files.update_many({'category': {'$in': ['jav', 'anime']}},
+                                  {'$set': {'posted': True}})
     await db.create_category("anime", "Anime", db_channel_id=-100777,
                              post_channel_id=-100888)
     for cat_key, cap in (("jav", "cap"), ("anime", "anime")):
@@ -2127,7 +2142,14 @@ async def main():
         video=None, document=None, animation=None)
     await bot1.on_channel_post(types.SimpleNamespace(channel_post=msg),
                                FakeContext())
-    check("v4.4: live DB-channel post is genre-matched incrementally",
+    # Closing the block, rather than a timer, makes it safe to publish.
+    import root_index
+    await db.ingest_raw({'message_id':951,'kind':'video','caption':''},'anime')
+    await db.ingest_raw({'message_id':952,'kind':'cover','caption':'next'},'anime')
+    job = await db._db.root_index_jobs.find_one({'_id':'anime'})
+    async with root_index.lease() as fence:
+        await root_index.process_job(job,fence)
+    check("v4.4: closed live DB-channel block is genre-matched incrementally",
           "anime_f950" in ((await db.get_genre("anime", "romance"))["matched"]))
     await db.mark_posted(950, category="anime")
     check("v4.4: the new post appears in the menu once posted",
