@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
     schedule_broadcast_sweeper(bot1)   # v4.0: deletes timed /broadcast copies
     schedule_sweeper(bot2)
     await _set_commands()
-    log.info("Both bots are up. Patch: db-admins-only + resilient-shorteners-v1")
+    log.info("Both bots are up. Patch: root-bandwidth-v1 (event wake + bounded recovery)")
 
     root_index.start()
     root_dispatch.start(bot1, bot2)
@@ -153,7 +153,7 @@ async def root():
     return {"service": "root-bots-1-2", "status": "running"}
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     from fastapi.responses import JSONResponse
     try:

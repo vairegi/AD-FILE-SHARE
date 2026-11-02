@@ -6,6 +6,7 @@ per-bot/update-id idempotence. No per-request detached processing tasks.
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
+import time
 import uuid
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -19,6 +20,13 @@ MAX_BODY_BYTES = 256 * 1024
 PROCESS_TIMEOUT = 3600  # preserve paced broadcasts and explicit history scans
 LEASE_SECONDS = PROCESS_TIMEOUT + 60
 KEEP_COMPLETED_HOURS = 48  # compact receipts outlive Telegram's retry window
+IDLE_POLL_SECONDS = 30.0  # recovery only; persisted local ingress wakes immediately
+RECOVERY_SECONDS = 30.0
+ERROR_SECONDS = 5.0
+_events = {}
+_event_loop = None
+_recovery_at = {}
+_counters = {'claims': 0, 'empty_claims': 0, 'recoveries': 0}
 _tasks = []
 _slots = None
 _loop = None
@@ -35,6 +43,40 @@ def ingress_slots():
     return _slots
 
 
+def worker_event(name, worker_id):
+    """One bounded wake flag per fixed worker; never an in-memory payload queue."""
+    global _event_loop
+    loop = asyncio.get_running_loop()
+    if _event_loop is not loop:
+        _events.clear()
+        _recovery_at.clear()
+        _event_loop = loop
+    return _events.setdefault((name, worker_id), asyncio.Event())
+
+
+def wake(name):
+    for (bot_name, _), event in tuple(_events.items()):
+        if bot_name == name:
+            event.set()
+
+
+async def recover_expired(name):
+    """Rate-limited per bot, shared by its two workers. Never replay side effects."""
+    current = time.monotonic()
+    if current < _recovery_at.get(name, 0):
+        return
+    # Reserve before await so simultaneous workers cannot duplicate the sweep.
+    _recovery_at[name] = current + RECOVERY_SECONDS
+    try:
+        _counters['recoveries'] += 1
+        await db._db.root_update_inbox.update_many(
+            {'bot': name, 'state': 'running', 'lease_until': {'$lte': db.now()}},
+            {'$set': {'state': 'review', 'last_error': 'interrupted_handler'}})
+    except BaseException:
+        _recovery_at.pop(name, None)
+        raise
+
+
 async def ensure_indexes():
     await db._db.root_update_inbox.create_index([('bot', 1), ('state', 1), ('ready_at', 1)])
     await db._db.root_update_inbox.create_index('expires_at', expireAfterSeconds=0)
@@ -46,23 +88,24 @@ async def enqueue(bot_name, payload):
     await db._db.root_update_inbox.update_one({'_id': ident}, {'$setOnInsert': {
         'bot': bot_name, 'payload': payload, 'state': 'pending',
         'ready_at': db.now(), 'attempts': 0}}, upsert=True)
+    # Set only AFTER the write succeeds. Startup/fallback polling covers a
+    # crash between persistence and this process-local latency optimization.
+    wake(bot_name)
 
 
 async def drain_once(name, application):
     global _active, _peak_active
     now = db.now()
     ticket = uuid.uuid4().hex
-    # A crash can happen AFTER a broadcast/spend but before completion is
-    # recorded. Expired running commands need review, not automatic replay.
-    await db._db.root_update_inbox.update_many(
-        {'bot': name, 'state': 'running', 'lease_until': {'$lte': now}},
-        {'$set': {'state': 'review', 'last_error': 'interrupted_handler'}})
+    await recover_expired(name)
+    _counters['claims'] += 1
     doc = await db._db.root_update_inbox.find_one_and_update(
         {'bot': name, 'ready_at': {'$lte': now}, 'state': 'pending'},
         {'$set': {'state': 'running', 'owner': _owner, 'ticket': ticket,
                   'lease_until': now + LEASE_SECONDS}, '$inc': {'attempts': 1}},
         sort=[('ready_at', 1)], return_document=ReturnDocument.AFTER)
     if not doc:
+        _counters['empty_claims'] += 1
         return False
     _active += 1
     _peak_active = max(_peak_active, _active)
@@ -97,15 +140,24 @@ async def drain_once(name, application):
     return True
 
 
-async def loop(name, application):
+async def loop(name, application, worker_id=0):
+    event = worker_event(name, worker_id)
     while True:
+        # Clear BEFORE querying. An enqueue during/after an empty query stays
+        # signalled, so it cannot be lost in the query-to-wait race.
+        event.clear()
+        delay = IDLE_POLL_SECONDS
         try:
             found = await drain_once(name, application)
         except Exception as exc:
             found = False
+            delay = ERROR_SECONDS
             log.warning('Inbox retry bot=%s error=%s', name, type(exc).__name__)
         if not found:
-            await asyncio.sleep(0.25)
+            try:
+                await asyncio.wait_for(event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
 
 
 async def metrics_loop():
@@ -114,8 +166,12 @@ async def metrics_loop():
         try:
             queued = await db._db.root_update_inbox.count_documents({'state': {'$in': ['pending', 'running', 'review']}})
             jobs = await db._db.root_index_jobs.count_documents({})
-            log.info('Root resources rss_mib=%.1f active_updates=%s pending_updates=%s index_categories=%s',
-                psutil.Process().memory_info().rss / (1024 * 1024), _active, queued, jobs)
+            log.info('Root resources rss_mib=%.1f active_updates=%s pending_updates=%s index_categories=%s '
+                'inbox_claims_total=%s inbox_empty_total=%s inbox_recoveries_total=%s '
+                'index_passes_total=%s index_waits_total=%s',
+                psutil.Process().memory_info().rss / (1024 * 1024), _active, queued, jobs,
+                _counters['claims'], _counters['empty_claims'], _counters['recoveries'],
+                root_index.snapshot()['passes'], root_index.snapshot()['waits'])
         except Exception as exc:
             log.warning('Resource metrics unavailable error=%s', type(exc).__name__)
         await asyncio.sleep(60)
@@ -126,7 +182,7 @@ def start(bot1, bot2):
         return
     for name, app in (('bot1', bot1), ('bot2', bot2)):
         for i in range(WORKERS_PER_BOT):
-            _tasks.append(asyncio.create_task(loop(name, app), name=f'root-{name}-worker-{i}'))
+            _tasks.append(asyncio.create_task(loop(name, app, i), name=f'root-{name}-worker-{i}'))
     _tasks.append(asyncio.create_task(metrics_loop(), name='root-resources'))
 
 
@@ -135,3 +191,5 @@ async def stop():
         task.cancel()
     await asyncio.gather(*_tasks, return_exceptions=True)
     _tasks.clear()
+    _events.clear()
+    _recovery_at.clear()

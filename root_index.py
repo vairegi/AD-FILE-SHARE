@@ -21,6 +21,12 @@ QUIET_SECONDS = 2.0
 MAX_WAIT_SECONDS = 8.0
 TICK_SECONDS = 1.0
 RETRY_SECONDS = 15.0
+IDLE_POLL_SECONDS = 30.0
+RECOVERY_SECONDS = 30.0
+SOURCE_RECHECK_SECONDS = 300.0  # sparse safety check, never a completion timeout
+_wake_event = None
+_wake_loop = None
+_counters = {'passes': 0, 'waits': 0}
 LEASE_SECONDS = 60.0
 MAX_GROUP_MESSAGES = 10000
 MAX_GROUP_BYTES = 8 * 1024 * 1024
@@ -31,6 +37,18 @@ _slots = None
 _loop = None
 _worker = None
 _owner = uuid.uuid4().hex
+
+
+def wake_event():
+    global _wake_event, _wake_loop
+    loop = asyncio.get_running_loop()
+    if _wake_loop is not loop or _wake_event is None:
+        _wake_event, _wake_loop = asyncio.Event(), loop
+    return _wake_event
+
+
+def snapshot():
+    return dict(_counters)
 
 
 def category_lock(category):
@@ -55,6 +73,7 @@ async def ensure_indexes():
     await db._db.raw.create_index([('category', 1), ('index_pending', 1), ('message_id', 1)])
     await db._db.raw.create_index([('_job_notified', 1), ('_ingest_seq', 1)])
     await db._db.root_index_jobs.create_index('ready_at')
+    await db._db.root_index_jobs.create_index('first_pending_at')
 
 
 async def sequence():
@@ -82,7 +101,11 @@ async def notify(category, mid, seq):
     await db._db.root_index_jobs.update_one({'_id': cat}, {
         '$min': {'dirty_from': int(mid)}, '$max': {'seq': seq},
         '$set': {'ready_at': now + QUIET_SECONDS, 'last_received_at': now},
-        '$setOnInsert': {'first_pending_at': now}}, upsert=True)
+        '$setOnInsert': {'first_pending_at': now},
+        '$unset': {'retry_at': '', 'waiting_for_source': ''}}, upsert=True)
+    # The durable job is authoritative. Wake even if marking raw notifications
+    # below fails; the periodic recovery repairs that persistence gap.
+    wake_event().set()
     await db._db.raw.update_many({'category': cat, '_ingest_seq': {'$lte': seq},
                                   '_job_notified': False}, {'$set': {'_job_notified': True}})
 
@@ -309,6 +332,7 @@ async def process_block(category, start, job_seq, fence, *, trusted=0, sealed=0,
 
 async def process_job(job, fence):
     cat, started = job['_id'], time.monotonic()
+    _counters['passes'] += 1
     state = await ensure_state(cat)
     current, blocks, waiting = job['dirty_from'], 0, False
     trusted = max(state.get('trusted_through', 0), state.get('sealed_through', 0))
@@ -326,25 +350,39 @@ async def process_job(job, fence):
         pending = await db._db.raw.find_one({'category': cat, 'index_pending': True}, sort=[('message_id', 1)])
         latest = await db._db.root_index_jobs.find_one({'_id': cat})
         if latest:
-            q = {'_id': cat, 'seq': latest.get('seq', 0)}
-            if pending:
+            # A concurrent arrival owns its timing. An older pass must not park
+            # that generation or overwrite a fresh notify()/explicit seal.
+            q = {'_id': cat, 'seq': job.get('seq', 0)}
+            if pending and latest.get('seq', 0) != job.get('seq', 0):
+                # notify's dirty_from already includes the older pending block.
+                # Do not update the newer generation using a stale raw snapshot.
+                pass
+            elif pending:
+                deadline = db.now() + (SOURCE_RECHECK_SECONDS if waiting else TICK_SECONDS)
                 await db._db.root_index_jobs.update_one(q, {'$set': {
-                    'dirty_from': pending['message_id'], 'ready_at': db.now() + (RETRY_SECONDS if waiting else TICK_SECONDS),
+                    'dirty_from': pending['message_id'], 'ready_at': deadline,
+                    'retry_at': deadline, 'waiting_for_source': waiting,
                     'first_pending_at': db.now(), 'last_blocks': blocks}})
-            else:
-                await db._db.root_index_jobs.delete_one(q)
-                await db._db.root_index_state.update_one({'_id': cat}, {'$set': {
-                    'waiting_cover': None, 'waiting_reason': 'ready', 'last_checked_at': db.now()}})
+                if waiting:
+                    _counters['waits'] += 1
+            elif latest.get('seq', 0) == job.get('seq', 0):
+                result = await db._db.root_index_jobs.delete_one(q)
+                if result.deleted_count:
+                    await db._db.root_index_state.update_one({'_id': cat}, {'$set': {
+                        'waiting_cover': None, 'waiting_reason': 'ready', 'last_checked_at': db.now()}})
     if blocks:
         log.info('Indexed closed blocks category=%s blocks=%s', cat, blocks)
     return blocks
 
 
-async def drain_once():
-    await recover_notification()
+async def drain_once(*, recover=True):
+    if recover:
+        await recover_notification()
     now = db.now()
     job = await db._db.root_index_jobs.find_one({'$or': [
-        {'ready_at': {'$lte': now}}, {'first_pending_at': {'$lte': now - MAX_WAIT_SECONDS}}]}, sort=[('ready_at', 1)])
+        {'ready_at': {'$lte': now}},
+        {'first_pending_at': {'$lte': now - MAX_WAIT_SECONDS},
+         'retry_at': {'$exists': False}, 'waiting_for_source': {'$ne': True}}]}, sort=[('ready_at', 1)])
     if not job:
         return 0
     async with lease() as fence:
@@ -354,8 +392,10 @@ async def drain_once():
             return await process_job(job, fence)
         except Exception as exc:
             log.warning('Index retry category=%s error=%s; source retained', job['_id'], type(exc).__name__)
-            await db._db.root_index_jobs.update_one({'_id': job['_id']}, {'$set': {
-                'ready_at': db.now() + RETRY_SECONDS, 'first_pending_at': db.now(), 'last_error': type(exc).__name__}})
+            deadline = db.now() + RETRY_SECONDS
+            await db._db.root_index_jobs.update_one({'_id': job['_id'], 'seq': job.get('seq', 0)}, {'$set': {
+                'ready_at': deadline, 'retry_at': deadline,
+                'first_pending_at': db.now(), 'last_error': type(exc).__name__}})
             return 0
 
 
@@ -414,17 +454,47 @@ async def status(category=None):
         pending = await db._db.raw.count_documents({'category': cat, 'index_pending': True})
         lines.append(f"[{cat or 'legacy'}] pending metadata={pending}; "
             f"waiting cover={state.get('waiting_cover', 'none')}; {state.get('waiting_reason', 'ready')}; "
-            f"job={'queued' if job else 'idle'}")
+            f"job={'waiting for source' if job and job.get('waiting_for_source') else 'queued' if job else 'idle'}")
     return '\n'.join(lines)
 
 
+async def next_delay():
+    """Sleep to the next durable deadline; new local metadata interrupts it.
+    Only compact job projections, never raw history/captions or message arrays.
+    """
+    now = db.now()
+    deadline = now + IDLE_POLL_SECONDS
+    job = await db._db.root_index_jobs.find_one({}, {'ready_at': 1}, sort=[('ready_at', 1)])
+    if job:
+        deadline = min(deadline, job.get('ready_at', now))
+    burst = await db._db.root_index_jobs.find_one(
+        {'retry_at': {'$exists': False}, 'waiting_for_source': {'$ne': True}},
+        {'first_pending_at': 1}, sort=[('first_pending_at', 1)])
+    if burst:
+        deadline = min(deadline, burst.get('first_pending_at', now) + MAX_WAIT_SECONDS)
+    return max(TICK_SECONDS, deadline - now)
+
+
 async def worker_loop():
+    event = wake_event()
+    repair_at = 0.0
     while True:
+        event.clear()  # clear before reads, never after them (no lost wakeup)
         try:
-            await drain_once()
+            recovery_due = time.monotonic() >= repair_at
+            await drain_once(recover=recovery_due)
+            if recovery_due:
+                repair_at = time.monotonic() + RECOVERY_SECONDS
+            delay = await next_delay()
+            # Quiet jobs can be asleep longer than notification recovery.
+            delay = min(delay, max(TICK_SECONDS, repair_at - time.monotonic()))
         except Exception as exc:
+            delay = RETRY_SECONDS
             log.warning('Index loop retry error=%s', type(exc).__name__)
-        await asyncio.sleep(TICK_SECONDS)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
 
 
 def start():
@@ -434,8 +504,9 @@ def start():
 
 
 async def stop():
-    global _worker
+    global _worker, _wake_event
     if _worker:
         _worker.cancel()
         await asyncio.gather(_worker, return_exceptions=True)
         _worker = None
+    _wake_event = None
