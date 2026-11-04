@@ -58,6 +58,19 @@ def check(name, cond, extra=""):
     print(f"{'PASS' if cond else 'FAIL'}  {name} {extra if not cond else ''}")
 
 
+def has_force_prompt(bot, callback_prefix):
+    """Assert keyboard behavior, not the obsolete generic Join Channel copy."""
+    for _, _, kwargs in bot.sent:
+        markup = kwargs.get('reply_markup')
+        if markup is None:
+            continue
+        buttons = [b for row in markup.inline_keyboard for b in row]
+        if any(b.url for b in buttons) and any(
+                (b.callback_data or '').startswith(callback_prefix) for b in buttons):
+            return True
+    return False
+
+
 # ── fakes ─────────────────────────────────────────────────────
 class FakeMessage:
     def __init__(self, text=""):
@@ -369,7 +382,7 @@ async def main():
     await bot1.process_file(fb2, 4242, 4242, "f21")
     joined = str(fb2.sent[-1])
     check("gate: non-member gets Join+Check buttons",
-          "Join Channel" in joined and "checksub:f21" in joined)
+          has_force_prompt(fb2, 'checksub:f21'))
 
     # pending join request satisfies the gate (v3.5: scoped to the gated channel)
     _fch = (await db.force_sub_channels()) or [None]
@@ -377,7 +390,7 @@ async def main():
     fb3 = FakeBot(); fb3.membership = False
     await bot1.process_file(fb3, 4243, 4243, "f21")
     check("gate: pending join request passes",
-          "Join Channel" not in str(fb3.sent[-1]))
+          not has_force_prompt(fb3, 'checksub:'))
 
     # ── 5b. admin bypass + strict per-post verification (v2.4) ──
     fb_adm = FakeBot()
@@ -2393,7 +2406,7 @@ async def main():
     await _b2.start(upd, FakeContext(bot=fb, args=[f"deliver_jav_f480_{_tok2}"]))
     check("v4.7: bot2 blocks delivery until the channel is joined",
           not getattr(fb, "copied_batch", [])
-          and any("join our channel" in str(t).lower() for _, t, _ in fb.sent))
+          and has_force_prompt(fb, 'sub2:'))
     check("v4.7: gated deliver token is NOT burned",
           (await db.get_token(_tok2)).get("used") is False)
     fb.membership = True
@@ -2410,7 +2423,7 @@ async def main():
     await _b2.start(upd, FakeContext(bot=fb, args=[]))
     check("v4.7: bare /start is force-sub gated too",
           not getattr(fb, "copied_batch", [])
-          and any("join our channel" in str(t).lower() for _, t, _ in fb.sent))
+          and has_force_prompt(fb, 'sub2:'))
     fb.membership = True
     upd = FakeUpdate(uid=998)
     upd.callback_query = _mk_query(998, "sub2:r")

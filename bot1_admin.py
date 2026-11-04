@@ -37,6 +37,7 @@ from telegram.ext import ContextTypes
 
 import config
 import db
+import force_sub
 import scanner
 from utils import admin_only, format_ram_report, human_duration, parse_duration
 from telegram.helpers import escape_markdown
@@ -1282,7 +1283,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_forcesublist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/forcesublist — dashboard of every force-sub channel (global + per-category)."""
     s = await db.get_settings()
-    lines = ["📢 Force-Sub configuration\n"]
+    blocks = []
 
     async def _ensure_link(cid, cat_key, stored):
         """Stored join-request link, or create+save one on the fly (v3.6 —
@@ -1297,28 +1298,47 @@ async def cmd_forcesublist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db.set_force_sub_link(cid, link, cat_key)
                 return link
         except Exception as exc:
-            return f"(could not create: {exc})"
-        return "(could not create)"
+            log.warning('Force-sub invite unavailable channel=%s error=%s', cid, type(exc).__name__)
+        return None
+
+    async def _entry(cid, scope, cat_key, stored):
+        title = await force_sub.channel_title(context.bot, cid, refresh=True)
+        link = await _ensure_link(cid, cat_key, stored)
+        # Titles and saved links are data, never Telegram markup.
+        from html import escape
+        escaped_link = escape(str(link), quote=True) if link else ''
+        invite = (f'<a href="{escaped_link}">Join / request access</a>'
+                  if link and str(link).startswith(('https://', 'http://'))
+                  and len(escaped_link) <= 1500 else '⚠️ Unavailable — check bot permissions')
+        blocks.append(f'{scope}: <b>{_h(title)}</b>\n'
+                      f'   ID: <code>{int(cid)}</code>\n   Invite: {invite}')
 
     gids = await db.force_sub_channels(None)
     if gids:
-        for cid in gids:
-            link = await _ensure_link(cid, None,
-                                      (s.get("force_sub_links") or {}).get(str(cid)))
-            lines.append(f"🌐 Global: {cid}")
-            lines.append(f"   Invite: {link}")
+        for cid in dict.fromkeys(gids):
+            await _entry(cid, '🌐 Global', None,
+                         (s.get("force_sub_links") or {}).get(str(cid)))
     else:
-        lines.append("🌐 Global: none")
+        blocks.append('🌐 Global: none')
     for cat in await db.list_categories():
         cids = cat.get("force_sub_channel_ids") or (
             [cat["force_sub_channel_id"]] if cat.get("force_sub_channel_id") else [])
-        for cid in cids:
-            link = await _ensure_link(cid, cat["key"],
-                                      (cat.get("force_sub_links") or {}).get(str(cid)))
-            lines.append(f"📁 [{cat['key']}]: {cid}")
-            lines.append(f"   Invite: {link}")
-    lines.append("\nRemove: /forcesubremove <channel_id> · /forcesubremove <category>")
-    await update.message.reply_text("\n".join(lines))
+        for cid in dict.fromkeys(cids):
+            await _entry(cid, f"📁 [{_h(cat['key'])}]", cat['key'],
+                         (cat.get("force_sub_links") or {}).get(str(cid)))
+    header = '📢 <b>Force-Sub configuration</b>\n'
+    footer = ('Remove: /forcesubremove &lt;channel_id&gt; · '
+              '/forcesubremove &lt;category&gt;')
+    # Paginate by complete entries, not arbitrary HTML slices. Keep a margin
+    # under Telegram's 4096-character limit, including UTF-16 emoji units.
+    page = header
+    for block in blocks + [footer]:
+        addition = '\n' + block + '\n'
+        if len((page + addition).encode('utf-16-le')) // 2 > 3800:
+            await update.message.reply_text(page, parse_mode='HTML', disable_web_page_preview=True)
+            page = header
+        page += addition
+    await update.message.reply_text(page, parse_mode='HTML', disable_web_page_preview=True)
 
 
 @admin_only

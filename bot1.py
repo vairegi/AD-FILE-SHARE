@@ -27,6 +27,7 @@ from telegram.ext import (
 
 import config
 import db
+import force_sub
 import scanner
 import shortener
 import linkguard
@@ -211,48 +212,21 @@ async def _force_sub_channel_for(category):
     return (await db.get_settings()).get("force_sub_channel_id")
 
 
+async def missing_force_sub(bot, user_id, category=None):
+    return await force_sub.missing_channels(
+        bot, user_id, category, member_check=_is_member)
+
+
 async def gate_ok(bot, user_id, category=None) -> bool:
-    """Force-subscribe gate: active member OR a pending join request passes."""
-    channel = await _force_sub_channel_for(category)
-    channels = await db.force_sub_channels(category)
-    for channel in channels or ([channel] if channel else []):
-        if not channel:
-            continue
-        member = await _is_member(bot, channel, user_id)
-        if member is True:
-            continue
-        if member is None:
-            # check itself failed (bot not admin etc.) — fail open, logged in _is_member
-            continue
-        # v3.5: join request must be for THIS channel (was: any request passed
-        # every channel -> users with an old request skipped Gate 1 forever)
-        if await db.has_join_request(user_id, channel):
-            continue
-        return False   # missing at least one required channel
-    return True
-    if member is None:
-        # Misconfiguration (bot not admin / wrong id) — fail open so real users
-        # are not locked out. Log it so the admin can fix the setup.
-        log.warning("Force-sub check inconclusive; failing open for user %s", user_id)
-        return True
-    return False
+    """Same live membership/join-request policy as the filtered prompt."""
+    return not await missing_force_sub(bot, user_id, category)
 
 
-async def send_force_sub(bot, chat_id, file_id, category=None):
-    channel = await _force_sub_channel_for(category)
-    rows = []
-    for ch in await db.force_sub_channels(category):
-        # prefer the stored join-request invite link (v3.5), else best-effort
-        u = await db.force_sub_link(ch, category) or await _channel_link(bot, ch)
-        if u:
-            rows.append([InlineKeyboardButton("📢 Join Channel", url=u)])
-    rows.append([InlineKeyboardButton("✅ I've Joined", callback_data=f"checksub:{file_id}")])
-    await bot.send_message(
-        chat_id,
-        "🔒 To continue you must join our channel first.\n\n"
-        "Tap *Join Channel*, then tap *I've Joined*.",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+async def send_force_sub(bot, chat_id, file_id, category=None, *,
+                         user_id=None, missing=None, query=None):
+    await force_sub.prompt(bot, chat_id, user_id if user_id is not None else chat_id,
+        f"checksub:{file_id}", category, member_check=_is_member,
+        missing=missing, query=query)
 
 
 async def send_shortener_gate(bot, chat_id, user_id, item, settings):
@@ -366,8 +340,10 @@ async def process_file(bot, chat_id, user_id, file_id):
         await bot.send_message(chat_id, "❌ This file is no longer available.")
         return
     category = item.get("category") or await db.resolve_category(file_id)
-    if not await gate_ok(bot, user_id, category):
-        await send_force_sub(bot, chat_id, file_id, category)
+    missing = await missing_force_sub(bot, user_id, category)
+    if missing:
+        await send_force_sub(bot, chat_id, file_id, category,
+                             user_id=user_id, missing=missing)
         return
     # Admin bypass (v2.4): admins receive the file immediately, no shortener.
     # Only the shortener step is skipped — force-sub (above) still applies.
@@ -456,8 +432,10 @@ async def process_verify(bot, chat_id, user_id, file_id, token,
             await bot.send_message(chat_id,
                                    "❌ This file is no longer available.")
             return
-        if not await gate_ok(bot, user_id, category):
-            await send_force_sub(bot, chat_id, file_id, category)
+        missing = await missing_force_sub(bot, user_id, category)
+        if missing:
+            await send_force_sub(bot, chat_id, file_id, category,
+                                 user_id=user_id, missing=missing)
             return
         await deliver_now(bot, chat_id, user_id, item)
         return
@@ -498,8 +476,10 @@ async def process_verify(bot, chat_id, user_id, file_id, token,
     if not item:
         await bot.send_message(chat_id, "❌ This file is no longer available.")
         return
-    if not await gate_ok(bot, user_id, category):
-        await send_force_sub(bot, chat_id, file_id, category)
+    missing = await missing_force_sub(bot, user_id, category)
+    if missing:
+        await send_force_sub(bot, chat_id, file_id, category,
+                             user_id=user_id, missing=missing)
         return
     await deliver_now(bot, chat_id, user_id, item)
 
@@ -868,7 +848,8 @@ async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     file_id = (query.data or "").split(":", 1)[-1]
     category = await db.resolve_category(file_id)
-    if await gate_ok(context.bot, user.id, category):
+    missing = await missing_force_sub(context.bot, user.id, category)
+    if not missing:
         await query.answer("Thanks for joining!")
         try:
             await query.edit_message_text("✅ Membership confirmed.")
@@ -876,8 +857,10 @@ async def on_checksub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await process_file(context.bot, user.id, user.id, file_id)
     else:
-        await query.answer("You haven't joined yet. Please join, then tap again.",
+        await query.answer("A few channels are still needed — list refreshed.",
                            show_alert=True)
+        await send_force_sub(context.bot, user.id, file_id, category,
+                             user_id=user.id, missing=missing, query=query)
 
 
 # ══════════════════════════════════════════════════════════════

@@ -1,4 +1,127 @@
-# Root Bots 1 + 2 — Bandwidth Fix v1
+# Root Bots 1 + 2 — Smart Force-Sub Update v1
+
+Prepared 2026-11-04 against latest repository commit
+4e956d73310905199f425fd27c5e953affbd6c75. Root service only; FUN is unchanged.
+
+## Install this update
+
+Extract this ZIP and upload its files to the repository ROOT (not FUN):
+
+- bot1.py, bot2.py, bot1_admin.py: actual replacement source files.
+- force_sub.py: REQUIRED new shared helper; upload with the bot files.
+- test_force_sub.py: 50 focused regressions.
+- test_all.py: existing legacy harness with only four gate-UI assertions
+  adapted to inspect join/check buttons instead of the removed generic text.
+- GUIDE.md: this maintained guide.
+
+Commit the four runtime files together so Render never deploys a partial set.
+Deploy only the root Bots 1 + 2 service. Existing environment variables,
+requirements, build/start commands and one-worker deployment remain unchanged.
+No database migration, re-adding channels, URI change, rescan or reset is needed.
+The already-installed bandwidth fix remains: main.py, root_dispatch.py,
+root_index.py, db.py, requirements.txt and all FUN files are unchanged.
+Nothing was pushed/deployed automatically or written to production MongoDB.
+
+## New behavior
+
+If a user already joined three required channels and an admin adds a fourth,
+only that fourth channel appears on the next download. A recorded join request
+for the SAME user and SAME channel also satisfies the gate, as before. Another
+user's request, another channel's request or an unscoped legacy request cannot
+satisfy a requirement for a specific channel.
+
+Both bots now display actual channel titles on join buttons instead of six
+identical Join Channel labels. The prompt shows the remaining count. Tapping
+I've Joined rechecks requirements and edits the old prompt down to the remaining
+channels. Once satisfied, Bot 1 resumes its existing file/shortener flow and
+Bot 2 resumes its existing pending delivery. Tokens and captions are unchanged.
+
+/forcesublist now shows channel TITLE, numeric ID, global/category scope and
+clickable invite. IDs remain so /forcesubremove works as before. Long lists are
+split into complete HTML-safe pages. Missing legacy request links are still
+created/saved by this admin command as before; existing stored links are kept.
+
+Titles use Telegram getChat. For reliable checks and metadata, configure BOTH
+bots with appropriate channel permissions/admin access. If a title lookup fails,
+a previous known title is reused or a safe Channel <id> fallback is shown;
+this never substitutes a guessed title or a guessed invite URL. If an invite
+cannot be resolved, the prompt explains the problem without treating that
+requirement as satisfied.
+
+Only channel display metadata is cached: at most 256 entries, separately keyed
+by bot identity, with a ten-minute success TTL / short failure retry. Admin list
+refreshes titles explicitly. A renamed channel can therefore take up to ten
+minutes to change in user prompts unless the admin refreshes the list first.
+Membership is NEVER cached: newly added requirements and users leaving channels
+are checked on each new download/check-again. There is no background polling,
+new scheduler or new production dependency. Each initial gate passes one fresh
+missing-channel snapshot to its renderer to avoid duplicate membership calls.
+
+Existing policy is deliberately preserved: an inconclusive Telegram membership
+check fails open and is logged. This release does not make that policy stricter.
+The existing database stores recorded requests, not a live Telegram request
+lifecycle; declined/stale request reconciliation is not introduced here.
+
+The obsolete, shadowed first force-sub block in bot2.py was removed. The active
+later definitions were updated; broadcast and active delivery bodies are kept.
+
+## Verification for this update
+
+Sandbox Python 3.12 and isolated real MongoDB 8.0.16 (localhost:27019 only).
+Mocked Telegram API calls; no live Telegram or provider requests were exercised.
+No production database write or Render deployment was performed.
+
+- 50 new force-sub tests pass on both mocked and real local MongoDB.
+- Combined focused regression suite: 202 passed.
+- Real local database suite: 131 passed (root indexing, bandwidth and force-sub).
+- Standalone profile-title harness: 10/10 passed; ASGI route harness: PASS.
+- The exact final ZIP is extracted over a clean base checkout and retested;
+  compilation, archive integrity and byte-identical source checks are verified.
+- The legacy harness remains 433/440, with the SAME seven pre-existing failures
+  as the untouched base commit; the names are retained in the historical
+  bandwidth section below. No legacy functional failure was hidden or repaired.
+  Four obsolete label-only gate checks were legitimately updated to inspect
+  required URL buttons and their existing callbacks instead of generic wording.
+
+Coverage includes the three-joined-plus-new-fourth scenario, channel-scoped
+requests, restricted membership, category overrides/global fallback, live
+rechecks after leaving, title cache limits/renaming/failure, private request
+links, missing invite handling, partial-join prompt refresh, deleted/unchanged
+prompts, admin permissions, HTML safety, pagination, actual database persistence,
+and a full Bot 2 pending -> request -> fresh-token -> copy -> consume path with
+mocked Telegram copying and REAL sandbox database writes. The original gated
+handoff token remains unused while the new resume token is validated/consumed.
+
+For maintainers, use the existing root test dependencies plus pytest,
+pytest-asyncio and mongomock-motor, then run (sandbox only):
+
+    MONGO_URI='' python -m pytest -q --asyncio-mode=auto test_root_index.py test_bandwidth.py test_force_sub.py test_delivery_hotfix.py test_resilience_admin.py test_linkguard.py
+
+With isolated local MongoDB on port 27019:
+
+    ROOT_LOCAL_MONGO_TEST=1 MONGO_URI='' python -m pytest -q --asyncio-mode=auto test_root_index.py test_bandwidth.py test_force_sub.py
+
+Standalone legacy scripts are run separately, not imported into pytest. Never
+point them at production: their fixed test databases may be dropped.
+
+After deploying, check one existing download in each bot, join/request one of
+several missing channels, then tap I've Joined: that channel should disappear
+while the others remain. Confirm an already-subscribed user sees only a newly
+added channel and /forcesublist displays titles. Existing older prompt messages
+refresh on their next check-again; they are not edited in bulk at deployment.
+Sandbox tests cannot guarantee perfect production Telegram permissions or API
+behavior. Keep the existing bandwidth monitoring instructions below.
+
+Rollback this update only: restore bot1.py, bot2.py and bot1_admin.py together
+from commit 4e956d7 and redeploy root only. The unused force_sub.py can remain or
+be removed after rollback. Do NOT revert the bandwidth files or delete data.
+
+---
+
+# Historical bandwidth fix v1 — already installed
+
+The following records the PREVIOUS release. Its installation/rollback filenames
+are NOT the instructions for the current smart force-sub ZIP above.
 
 Prepared 2026-11-02 against repository commit
 585aa8f0a30ce7c68494acbbf10d103ff0e34491.

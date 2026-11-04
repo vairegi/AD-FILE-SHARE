@@ -29,6 +29,7 @@ from telegram.ext import (
 
 import config
 import db
+import force_sub
 
 
 async def _ban_msg():
@@ -39,145 +40,6 @@ async def _ban_msg():
 from utils import admin_only, format_ram_report, human_duration, parse_duration
 
 log = logging.getLogger("bot2")
-
-
-# ══════════════════════════════════════════════════════════════
-#  v4.7: FORCE-SUBSCRIBE GATE (Bot 2's own — same list as Bot 1)
-# ══════════════════════════════════════════════════════════════
-async def _channel_link(bot, channel_id):
-    try:
-        chat = await bot.get_chat(channel_id)
-        if getattr(chat, "username", None):
-            return f"https://t.me/{chat.username}"
-    except Exception:
-        pass
-    try:
-        return await bot.export_chat_invite_link(channel_id)
-    except Exception:
-        return None
-
-
-async def _is_member(bot, channel_id, user_id):
-    """True/False for a definitive answer, None when the check itself failed
-    (Bot 2 not admin of the channel, wrong id, …) — fails OPEN, like Bot 1."""
-    try:
-        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        if member.status == "restricted":
-            return bool(getattr(member, "is_member", False))
-        return member.status in ("member", "administrator", "creator")
-    except Exception as exc:
-        log.warning("bot2 get_chat_member failed for %s: %s", channel_id, exc)
-        return None
-
-
-async def gate_ok(bot, user_id, category=None) -> bool:
-    for channel in await db.force_sub_channels(category):
-        if not channel:
-            continue
-        member = await _is_member(bot, channel, user_id)
-        if member is True:
-            continue
-        if member is None:
-            continue
-        if await db.has_join_request(user_id, channel):
-            continue
-        return False
-    return True
-
-
-async def send_force_sub(bot, chat_id, category=None):
-    """Join prompt with a single 'I've Joined' button (callback 'sub2:g').
-    What to resume is read back from the DB — nothing long rides inside
-    callback_data (64-byte limit)."""
-    rows = []
-    for ch in await db.force_sub_channels(category):
-        u = await db.force_sub_link(ch, category) or await _channel_link(bot, ch)
-        if u:
-            rows.append([InlineKeyboardButton("📢 Join Channel", url=u)])
-    rows.append([InlineKeyboardButton("✅ I've Joined",
-                                      callback_data="sub2:g")])
-    await bot.send_message(
-        chat_id,
-        "🔒 To continue you must join our channel first.\n\n"
-        "Tap *Join Channel*, then tap *I've Joined*.",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-
-
-async def resume_pending_delivery(bot, chat_id, user_id, file_id):
-    """Mint a FRESH single-use token, then run the full delivery path."""
-    ttl = int((await db.get_settings()).get("token_ttl_minutes") or 10)
-    token = await db.create_token(user_id, file_id, ttl, kind="deliver")
-    await process_delivery(bot, chat_id, user_id, file_id, token)
-
-
-async def resend_held_files(bot, chat_id, user_id):
-    """Re-deliver every not-yet-deleted file the user holds, ALL AT ONCE via
-    one copyMessages batch (server-side copy from the own chat)."""
-    mids = await db.pending_delivery_message_ids(user_id)
-    if not mids:
-        await bot.send_message(
-            chat_id,
-            "✅ Membership confirmed.\nYou have no files waiting — tap "
-            "Download in the main bot to get one.")
-        return
-    await bot.send_message(chat_id,
-                           "✅ Membership confirmed — sending your files…")
-    try:
-        sent = await bot.copy_messages(
-            chat_id=chat_id, from_chat_id=chat_id, message_ids=mids[:100])
-        delivered = [getattr(m, "message_id", None) for m in sent]
-    except Exception as exc:
-        log.error("copy_messages resend failed: %s", exc)
-        await bot.send_message(
-            chat_id,
-            "⚠️ Failed to re-send your files. Please tap Download again.")
-        return
-    minutes = await _autodelete_minutes(user_id)
-    if minutes and minutes > 0:
-        await db.add_deletion(chat_id, [m for m in delivered if m],
-                              db.now() + minutes * 60, bot="bot2")
-        note = (f"⏳ These files will be auto-deleted in "
-                f"{human_duration(minutes * 60)}.")
-    else:
-        note = "📌 These files will stay in the chat."
-    await bot.send_message(chat_id, note)
-
-
-async def on_checksub2(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """'I've Joined' under Bot 2's own force-sub prompt. Resumes the pending
-    delivery (stored in the DB, v4.7.1) with a fresh token, else re-sends the
-    user's held files."""
-    query = update.callback_query
-    user = query.from_user
-    pend = await db.get_pending_delivery(user.id)
-    category = None
-    if pend and pend.get("file_id"):
-        _item = await db.get_item_by_file_id(pend["file_id"])
-        category = ((_item or {}).get("category")
-                    or await db.resolve_category(pend["file_id"]))
-    if await gate_ok(context.bot, user.id, category):
-        await query.answer("Thanks for joining!")
-        try:
-            await query.edit_message_text("✅ Membership confirmed.")
-        except Exception:
-            pass
-        if pend and pend.get("file_id"):
-            await db.clear_pending_delivery(user.id)
-            await resume_pending_delivery(context.bot, user.id, user.id,
-                                          pend["file_id"])
-        else:
-            await resend_held_files(context.bot, user.id, user.id)
-    else:
-        await query.answer(
-            "You haven't joined yet. Please join, then tap again.",
-            show_alert=True)
-
-
-async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    req = update.chat_join_request
-    await db.record_join_request(req.from_user.id, req.chat.id)
-    log.info("bot2 recorded join request from %s", req.from_user.id)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -339,41 +201,21 @@ async def _is_member(bot, channel_id, user_id):
         return None
 
 
+async def missing_force_sub(bot, user_id, category=None):
+    return await force_sub.missing_channels(
+        bot, user_id, category, member_check=_is_member)
+
+
 async def gate_ok(bot, user_id, category=None) -> bool:
-    """Force-subscribe gate: active member OR a pending join request passes.
-    Same channel list Bot 1 enforces (per-category override else the global
-    /setforcesub list); a check that itself fails fails OPEN, like Bot 1."""
-    for channel in await db.force_sub_channels(category):
-        if not channel:
-            continue
-        member = await _is_member(bot, channel, user_id)
-        if member is True:
-            continue
-        if member is None:
-            continue  # misconfiguration — never lock real users out
-        if await db.has_join_request(user_id, channel):
-            continue  # a join request to THIS channel also passes
-        return False   # missing at least one required channel
-    return True
+    """Same live membership/join-request policy as the filtered prompt."""
+    return not await missing_force_sub(bot, user_id, category)
 
 
-async def send_force_sub(bot, chat_id, category=None):
-    """Join prompt with a single 'I've Joined' button (callback 'sub2:g').
-    What to resume is read back from the DB — nothing long rides inside
-    callback_data (64-byte limit)."""
-    rows = []
-    for ch in await db.force_sub_channels(category):
-        u = await db.force_sub_link(ch, category) or await _channel_link(bot, ch)
-        if u:
-            rows.append([InlineKeyboardButton("📢 Join Channel", url=u)])
-    rows.append([InlineKeyboardButton("✅ I've Joined",
-                                      callback_data="sub2:g")])
-    await bot.send_message(
-        chat_id,
-        "🔒 To continue you must join our channel first.\n\n"
-        "Tap *Join Channel*, then tap *I've Joined*.",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+async def send_force_sub(bot, chat_id, category=None, *,
+                         user_id=None, missing=None, query=None):
+    """Filtered requirements; pending delivery remains in the DB, not callback_data."""
+    await force_sub.prompt(bot, chat_id, user_id if user_id is not None else chat_id,
+        "sub2:g", category, member_check=_is_member, missing=missing, query=query)
 
 
 async def resume_pending_delivery(bot, chat_id, user_id, file_id):
@@ -429,7 +271,8 @@ async def on_checksub2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _item = await db.get_item_by_file_id(pend["file_id"])
         category = ((_item or {}).get("category")
                     or await db.resolve_category(pend["file_id"]))
-    if await gate_ok(context.bot, user.id, category):
+    missing = await missing_force_sub(context.bot, user.id, category)
+    if not missing:
         await query.answer("Thanks for joining!")
         try:
             await query.edit_message_text("✅ Membership confirmed.")
@@ -443,8 +286,9 @@ async def on_checksub2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await resend_held_files(context.bot, user.id, user.id)
     else:
         await query.answer(
-            "You haven't joined yet. Please join, then tap again.",
-            show_alert=True)
+            "A few channels are still needed — list refreshed.", show_alert=True)
+        await send_force_sub(context.bot, user.id, category,
+                             user_id=user.id, missing=missing, query=query)
 
 
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -954,17 +798,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item = await db.get_item_by_file_id(file_id)
         category = (item or {}).get("category") or \
             await db.resolve_category(file_id)
-        if not await gate_ok(context.bot, user.id, category):
+        missing = await missing_force_sub(context.bot, user.id, category)
+        if missing:
             await db.set_pending_delivery(user.id, file_id)
-            await send_force_sub(context.bot, user.id, category)
+            await send_force_sub(context.bot, user.id, category, missing=missing)
             return
         await process_delivery(context.bot, user.id, user.id, file_id, token)
         return
 
     # v4.7: a bare /start is gated too — after joining, held files
     # are re-sent ALL AT ONCE.
-    if not await gate_ok(context.bot, user.id):
-        await send_force_sub(context.bot, user.id)
+    missing = await missing_force_sub(context.bot, user.id)
+    if missing:
+        await send_force_sub(context.bot, user.id, missing=missing)
         return
 
     await update.message.reply_text(WELCOME)
