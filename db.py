@@ -1161,6 +1161,15 @@ async def set_token_shortener(token, site, state=None):
     await _db.tokens.update_one({"token": token}, {"$set": fields})
 
 
+async def set_token_grant(token, grant_slug):
+    """v1.3: remember which LinkGuard exit grant a verify token belongs to,
+    so the Worker can confirm Door 3 completed before delivery."""
+    if not grant_slug:
+        return
+    await _db.tokens.update_one(
+        {"token": token}, {"$set": {"grant_slug": grant_slug}})
+
+
 async def active_shorteners():
     """All ACTIVE shorteners in stable order (v4.1 failover list)."""
     return await _db.shorteners.find({"status": "active"}).sort("site", 1).to_list(None)

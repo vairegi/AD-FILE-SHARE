@@ -251,6 +251,9 @@ async def send_shortener_gate(bot, chat_id, user_id, item, settings):
             if grant:
                 shortener_target = grant["finish2_url"]
                 grant_slug = grant["slug"]
+                # v1.3: bind this token to its exit grant so delivery can
+                # require the Worker's confirmation of Door 3 completion.
+                await db.set_token_grant(token, grant_slug)
         except Exception as exc:
             log.warning("linkguard mint2 failed (shortener wraps raw deep link): %s", exc)
     short, state, site, failures = await shortener.shorten(
@@ -367,6 +370,84 @@ async def process_file(bot, chat_id, user_id, file_id):
     await send_shortener_gate(bot, chat_id, user_id, item, settings)
 
 
+_RETRY_TEXT = (
+    "⏳ <b>Verification check is taking longer than usual.</b>\n\n"
+    "Please tap the Download button again in a few seconds — your link "
+    "was not used up and nothing has been charged."
+)
+_DENY_TEXT = (
+    "🚫 <b>Verification could not be confirmed.</b>\n\n"
+    "The shortener step was not completed in this browser. Open the "
+    "shortener link, finish its own steps, and let it bring you back — "
+    "do not paste the final link from another app or bot.\n\n"
+    "Tap Download again to start a fresh link."
+)
+
+
+async def _return_proof(bot, chat_id, user_id, doc):
+    """v1.3 anti-bypass gate: honour a verify token only when the LinkGuard
+    Worker confirms its exit grant was redeemed by a REAL browser navigation
+    (Door 3). Returns 'allow' | 'deny' | 'retry'.
+
+    A bypass bot hands the user our /finish2 URL to paste into the browser
+    that already solved Turnstile; the cookie and UA match, so v1.2 released
+    the deep link. The Worker now refuses a pasted navigation, and this gate
+    means even a deep link obtained some other way cannot unlock files.
+
+    'retry' = the Worker could not answer. The token is NOT burned and no
+    one is banned: our outage must never cost the user their file.
+    """
+    grant_slug = (doc or {}).get("grant_slug")
+    configured = False
+    if grant_slug:
+        try:
+            configured = bool(await linkguard.enabled())
+        except Exception as exc:
+            log.warning("return proof: linkguard state unreadable: %s", exc)
+    release = None
+    if grant_slug and configured:
+        try:
+            release = await linkguard.release_status(grant_slug)
+        except Exception as exc:
+            log.warning("return proof: release_status failed: %s", exc)
+    verdict = linkguard.return_proof_verdict(
+        release, has_grant=bool(grant_slug), worker_configured=configured)
+    if verdict == linkguard.VERDICT_ALLOW:
+        return "allow"
+    if verdict == linkguard.VERDICT_RETRY:
+        await bot.send_message(chat_id, _RETRY_TEXT, parse_mode="HTML")
+        log.warning("return proof unavailable (grant=%s) — user %s asked to retry",
+                    grant_slug, user_id)
+        for aid in await db.list_admin_ids():
+            try:
+                await bot.send_message(
+                    aid,
+                    "⚠️ LinkGuard confirmation unavailable — no file was "
+                    f"delivered and no ban was issued.\ngrant: {grant_slug}\n"
+                    f"user: {user_id}\nCheck the Worker / Render logs.")
+            except Exception as exc:
+                log.warning("admin alert to %s failed: %s", aid, exc)
+        return "retry"
+    # deny: the Worker answered and there is no verified release.
+    await db.mark_token_used(token=doc.get("token"))
+    await bot.send_message(chat_id, _DENY_TEXT, parse_mode="HTML")
+    log.warning("return proof failed (grant=%s, user=%s, state=%s)",
+                grant_slug, user_id, (release or {}).get("reason"))
+    for aid in await db.list_admin_ids():
+        try:
+            await bot.send_message(
+                aid,
+                "🚨 Verification NOT confirmed — file withheld (no ban, "
+                "no strike).\n"
+                f"user: {user_id}\n"
+                f"grant: {grant_slug}\n"
+                f"worker reason: {(release or {}).get('reason')}\n"
+                "This is the paste-back / bypass-bot pattern.")
+        except Exception as exc:
+            log.warning("admin alert to %s failed: %s", aid, exc)
+    return "deny"
+
+
 async def process_verify(bot, chat_id, user_id, file_id, token,
                          username=None, via_gate=False):
     """via_gate=True marks the '_g' link Bot 1's own Get File message carries
@@ -418,6 +499,14 @@ async def process_verify(bot, chat_id, user_id, file_id, token,
             except Exception as exc:
                 log.warning("admin alert to %s failed: %s", aid, exc)
         return
+
+    # ── v1.3 return proof (bypass-bot / paste-back defence) ────────────
+    # Runs for every NON-gate verify link, after the timing gate and before
+    # anything is burned, marked verified or delivered.
+    if not via_gate:
+        _verdict = await _return_proof(bot, chat_id, user_id, doc)
+        if _verdict != "allow":
+            return
 
     if via_gate:
         # The user already solved the shortener (the '_g' link only exists

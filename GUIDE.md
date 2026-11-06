@@ -1,290 +1,173 @@
-# Root Bots 1 + 2 — Smart Force-Sub Update v1
+# LinkGuard v1.3 — Return Proof (closes the shortener bypass)
 
-Prepared 2026-11-04 against latest repository commit
-4e956d73310905199f425fd27c5e953affbd6c75. Root service only; FUN is unchanged.
-
-## Install this update
-
-Extract this ZIP and upload its files to the repository ROOT (not FUN):
-
-- bot1.py, bot2.py, bot1_admin.py: actual replacement source files.
-- force_sub.py: REQUIRED new shared helper; upload with the bot files.
-- test_force_sub.py: 50 focused regressions.
-- test_all.py: existing legacy harness with only four gate-UI assertions
-  adapted to inspect join/check buttons instead of the removed generic text.
-- GUIDE.md: this maintained guide.
-
-Commit the four runtime files together so Render never deploys a partial set.
-Deploy only the root Bots 1 + 2 service. Existing environment variables,
-requirements, build/start commands and one-worker deployment remain unchanged.
-No database migration, re-adding channels, URI change, rescan or reset is needed.
-The already-installed bandwidth fix remains: main.py, root_dispatch.py,
-root_index.py, db.py, requirements.txt and all FUN files are unchanged.
-Nothing was pushed/deployed automatically or written to production MongoDB.
-
-## New behavior
-
-If a user already joined three required channels and an admin adds a fourth,
-only that fourth channel appears on the next download. A recorded join request
-for the SAME user and SAME channel also satisfies the gate, as before. Another
-user's request, another channel's request or an unscoped legacy request cannot
-satisfy a requirement for a specific channel.
-
-Both bots now display actual channel titles on join buttons instead of six
-identical Join Channel labels. The prompt shows the remaining count. Tapping
-I've Joined rechecks requirements and edits the old prompt down to the remaining
-channels. Once satisfied, Bot 1 resumes its existing file/shortener flow and
-Bot 2 resumes its existing pending delivery. Tokens and captions are unchanged.
-
-/forcesublist now shows channel TITLE, numeric ID, global/category scope and
-clickable invite. IDs remain so /forcesubremove works as before. Long lists are
-split into complete HTML-safe pages. Missing legacy request links are still
-created/saved by this admin command as before; existing stored links are kept.
-
-Titles use Telegram getChat. For reliable checks and metadata, configure BOTH
-bots with appropriate channel permissions/admin access. If a title lookup fails,
-a previous known title is reused or a safe Channel <id> fallback is shown;
-this never substitutes a guessed title or a guessed invite URL. If an invite
-cannot be resolved, the prompt explains the problem without treating that
-requirement as satisfied.
-
-Only channel display metadata is cached: at most 256 entries, separately keyed
-by bot identity, with a ten-minute success TTL / short failure retry. Admin list
-refreshes titles explicitly. A renamed channel can therefore take up to ten
-minutes to change in user prompts unless the admin refreshes the list first.
-Membership is NEVER cached: newly added requirements and users leaving channels
-are checked on each new download/check-again. There is no background polling,
-new scheduler or new production dependency. Each initial gate passes one fresh
-missing-channel snapshot to its renderer to avoid duplicate membership calls.
-
-Existing policy is deliberately preserved: an inconclusive Telegram membership
-check fails open and is logged. This release does not make that policy stricter.
-The existing database stores recorded requests, not a live Telegram request
-lifecycle; declined/stale request reconciliation is not introduced here.
-
-The obsolete, shadowed first force-sub block in bot2.py was removed. The active
-later definitions were updated; broadcast and active delivery bodies are kept.
-
-## Verification for this update
-
-Sandbox Python 3.12 and isolated real MongoDB 8.0.16 (localhost:27019 only).
-Mocked Telegram API calls; no live Telegram or provider requests were exercised.
-No production database write or Render deployment was performed.
-
-- 50 new force-sub tests pass on both mocked and real local MongoDB.
-- Combined focused regression suite: 202 passed.
-- Real local database suite: 131 passed (root indexing, bandwidth and force-sub).
-- Standalone profile-title harness: 10/10 passed; ASGI route harness: PASS.
-- The exact final ZIP is extracted over a clean base checkout and retested;
-  compilation, archive integrity and byte-identical source checks are verified.
-- The legacy harness remains 433/440, with the SAME seven pre-existing failures
-  as the untouched base commit; the names are retained in the historical
-  bandwidth section below. No legacy functional failure was hidden or repaired.
-  Four obsolete label-only gate checks were legitimately updated to inspect
-  required URL buttons and their existing callbacks instead of generic wording.
-
-Coverage includes the three-joined-plus-new-fourth scenario, channel-scoped
-requests, restricted membership, category overrides/global fallback, live
-rechecks after leaving, title cache limits/renaming/failure, private request
-links, missing invite handling, partial-join prompt refresh, deleted/unchanged
-prompts, admin permissions, HTML safety, pagination, actual database persistence,
-and a full Bot 2 pending -> request -> fresh-token -> copy -> consume path with
-mocked Telegram copying and REAL sandbox database writes. The original gated
-handoff token remains unused while the new resume token is validated/consumed.
-
-For maintainers, use the existing root test dependencies plus pytest,
-pytest-asyncio and mongomock-motor, then run (sandbox only):
-
-    MONGO_URI='' python -m pytest -q --asyncio-mode=auto test_root_index.py test_bandwidth.py test_force_sub.py test_delivery_hotfix.py test_resilience_admin.py test_linkguard.py
-
-With isolated local MongoDB on port 27019:
-
-    ROOT_LOCAL_MONGO_TEST=1 MONGO_URI='' python -m pytest -q --asyncio-mode=auto test_root_index.py test_bandwidth.py test_force_sub.py
-
-Standalone legacy scripts are run separately, not imported into pytest. Never
-point them at production: their fixed test databases may be dropped.
-
-After deploying, check one existing download in each bot, join/request one of
-several missing channels, then tap I've Joined: that channel should disappear
-while the others remain. Confirm an already-subscribed user sees only a newly
-added channel and /forcesublist displays titles. Existing older prompt messages
-refresh on their next check-again; they are not edited in bulk at deployment.
-Sandbox tests cannot guarantee perfect production Telegram permissions or API
-behavior. Keep the existing bandwidth monitoring instructions below.
-
-Rollback this update only: restore bot1.py, bot2.py and bot1_admin.py together
-from commit 4e956d7 and redeploy root only. The unused force_sub.py can remain or
-be removed after rollback. Do NOT revert the bandwidth files or delete data.
+Prepared 2026-11-06. Patch base: repo commit `0f29868`.
+Scope: Cloudflare Worker (`worker.js`) + Bots 1&2 root service (`linkguard.py`, `bot1.py`, `db.py`).
+Funbot / `FUN/` is **not** touched. No new Python dependency, no new env var required.
 
 ---
 
-# Historical bandwidth fix v1 — already installed
+## 1. What was actually happening
 
-The following records the PREVIOUS release. Its installation/rollback filenames
-are NOT the instructions for the current smart force-sub ZIP above.
+The reported bypass worked like this:
 
-Prepared 2026-11-02 against repository commit
-585aa8f0a30ce7c68494acbbf10d103ff0e34491.
-This is a root-service-only replacement package. FUN is unchanged.
+1. User taps **Download** in the posting channel → Bot 1 mints a verify token, a
+   LinkGuard landing slug, and a signed Door-3 **exit grant**.
+2. The landing page solves Turnstile in the user's real browser and the shortener
+   opens. The browser keeps the `lg_s` session cookie.
+3. Instead of finishing the shortener, the user sends the `vplink.in` link to a
+   bypass bot. The bot returns our own
+   `linkguard.fubukisecure.workers.dev/finish2?s=…&t=…` URL.
+4. The user **pastes that URL into the same browser** (the one holding the cookie,
+   same User-Agent) — and v1.2 released the Telegram deep link, because every
+   v1.2 check was satisfied:
+   - `lg_s` cookie present ✔
+   - User-Agent matched ✔
+   - grant authentic, unused, bound to that session ✔
+   - **Referer empty — and `ALLOW_EMPTY_REFERER=true` let it through** ✔
 
-## Install through GitHub
+The Cloudflare events confirm it: at 08:47:24 IST the Chrome request to
+`/finish2` carried a cookie, **no Referer**, and `Sec-Fetch-Site: none`, and the
+Worker answered **302**. The later Edge request without the cookie got **403** —
+so the browser binding was working; it just was not proving the shortener was
+completed *by a real navigation*.
 
-1. Extract this ZIP. Upload main.py, root_dispatch.py, root_index.py,
-   test_bandwidth.py and this GUIDE.md to the repository ROOT, replacing
-   matching filenames. Do not put them inside FUN or inside another folder.
-2. Commit the three runtime replacements together, not as separate deployed
-   partial versions. Existing requirements.txt, bot1.py, bot2.py and db.py stay.
-3. Deploy only the Render service hosting root Bots 1 + 2. Keep its root
-   directory at repository root, its existing environment variables, build
-   command and uvicorn main:app start command. No new environment variable or
-   production dependency is required. Keep ONE instance / ONE Uvicorn worker.
-4. Prefer a quiet deployment window; pause the source importer briefly, wait
-   for the prior process to exit and the new service to become healthy, then
-   resume. Already-running uncertain commands remain review-only, not replayed.
-5. Confirm the startup log contains root-bandwidth-v1 (event wake + bounded
-   recovery). GET and HEAD /health both return 200 when the database is healthy;
-   database failure still returns 503.
+**Key insight:** a cookie can be kept, and a User-Agent can be matched, by a URL
+that was pasted. What a paste cannot fake is the *navigation shape* of the
+request. No page script can forge `Sec-Fetch-*`; only the browser writes them.
 
-No database reset, rescan, queue purge, URI change or indiscriminate /flushindex
-is required. Do not delete raw staging or waiting jobs. Uploading this archive
-has not deployed anything automatically.
+---
 
-## Diagnosis and changes
+## 2. What this patch changes
 
-The November screenshot reports 1.73 GB monthly Service-Initiated traffic and
-53.31 MB in the selected hourly point. The full November log has 1,650 lines
-from 10:25:18 to 11:43:03 UTC: 70 successful Bot 1 and 45 successful Bot 2
-webhooks, two recorded file deliveries, 1,090 successful health GETs, six
-health HEAD 405s, and five index categories in all 78 resource samples.
-Normal root file delivery uses Telegram-side copies, not video reuploads.
-These observations support persistent background traffic; the logs do not
-provide per-destination byte attribution or prove that every billed byte came
-from MongoDB.
+### Worker (`worker.js`) — v1.3
 
-- root_dispatch.py keeps four fixed workers and durable-before-ack receipts.
-  Workers wake locally AFTER a successful inbox write, then drain available
-  work immediately. Empty workers wait up to 30 seconds instead of 0.25s;
-  this fallback catches missed local signals, delayed retries and updates
-  persisted by an overlapping old process. Normal local webhooks DO NOT wait
-  30 seconds. Expired-running recovery is shared/rate-limited per bot to once
-  per 30 seconds instead of every claim. Review-only handling of uncertain
-  side effects, deduplication, lease duration and processing limits are kept.
-- root_index.py wakes on durable source notifications. It sleeps to a durable
-  quiet/max-wait deadline, with a 30-second recovery backstop instead of
-  one-second idle polling. Open/missing/oversized blocks are parked with a
-  five-minute safety recheck. This is NOT a completion timeout: they remain
-  unpublished. New source metadata, caption edits or explicit owner sealing
-  reactivate work immediately. Error retry remains 15 seconds. Ingestion's
-  eight-second maximum wait cannot override error or parked-source backoff.
-  A stale processing/error generation cannot delay a fresh notification.
-- main.py adds HEAD /health support and a recognizable startup version line.
-- test_bandwidth.py adds 30 isolated regressions, reusing test_root_index.py's
-  existing sandbox fixture; that existing file is already in the repository.
-- A small first_pending_at index is created automatically for job scheduling.
-  There is no destructive data migration and no published-flag/token change.
+1. **Navigation proof on `/finish2`** (`navProof()`):
+   - `Sec-Fetch-Site: none` → **denied** (`pasted_url`). This is the exact
+     signature of a URL typed or pasted into the address bar.
+   - `Sec-Fetch-Mode` / `Sec-Fetch-Dest` must be `navigate` / `document`.
+   - A **present but unapproved** Referer is always denied.
+   - A browser that sends **no** `Sec-Fetch-*` at all needs an approved Referer.
+   - `ALLOW_EMPTY_REFERER` no longer opens a hole: in `RETURN_POLICY=nav_only`
+     it is only honoured in `legacy` mode.
+2. **Departure proof**: `/finish` (the hop to the shortener) now stamps
+   `finish2_grants.departed_at`. A grant that never departed cannot be redeemed
+   (`no_departure`).
+3. **Atomic single use**: the burn is now
+   `UPDATE … SET used = 1 … WHERE slug = ? AND used = 0` and the row count is
+   checked, so two concurrent redemptions can no longer both win.
+4. **Release record**: a verified redemption stores `released_at`, `released_ip`,
+   `release_site`.
+5. **New admin route** `POST /api/admin/release_status {slug}` →
+   `{ok, released, reason, released_at, release_site, departed_at, policy}`.
+   This is what lets the bot verify Door 3 *completed*.
+6. Schema is migrated in place (`ensureV13Tables`) with `ALTER TABLE … ADD COLUMN`
+   guarded by try/catch, so an existing D1 database keeps working.
+7. Observe-mode can still **learn** an unknown exit host, but can no longer turn a
+   pasted URL into a pass.
+7. Retry page gained real hints for the new refusal reasons.
 
-Normal scheduled posting, forced membership, shortener gates, delivery tokens,
-Telegram-side copies, caption behavior and deletion schedules are not edited.
-Existing memory bounds, item fences, one heavy indexer, category locks,
-metadata-only staging and independent FUN runtime are retained.
+### Bot side (`linkguard.py`, `bot1.py`, `db.py`)
 
-## Local measurement (not a Render billing prediction)
+- `db.set_token_grant(token, grant_slug)` — the verify token now remembers its
+  exit grant.
+- `bot1.send_shortener_gate` persists that grant when it mints one.
+- `linkguard.release_status(slug)` — asks the Worker; returns `None` when the
+  Worker cannot be asked (unconfigured, transport error, 5xx, non-`ok` payload).
+- `linkguard.return_proof_verdict(...)` — pure policy:
+  | grant on token | Worker answer | verdict |
+  |---|---|---|
+  | no (pre-v1.3 link) | — | `allow` (old timing-gate rule only) |
+  | yes | `released: true` | `allow` |
+  | yes | `released: false` | `deny` |
+  | yes | no answer | `retry` |
+- `bot1._return_proof(...)` runs inside `process_verify` for **every non-`_g`
+  verify link**, before anything is burned, marked verified or delivered:
+  - `allow` → normal flow.
+  - `deny` → token burned, **file withheld**, user told the shortener step was
+    not completed in this browser, admins alerted. **No automatic ban** and no
+    strike: a wrong denial must never punish a paying user.
+  - `retry` → token **not** burned, nothing delivered, user asked to tap Download
+    again, admins alerted. Our outage never costs the user their file.
+- `_g` (force-sub resume) links skip the proof, exactly as they already skipped
+  the timing gate.
 
-Identical 60-second A/B runs used real isolated MongoDB 8.0.16 on localhost,
-five unfinished cover groups, four inbox workers, the indexer and metrics
-worker, no user activity and unchanged production source versus this fix.
+### Explicitly not changed
 
-| Measurement | Before | Fixed |
-| --- | ---: | ---: |
-| Database commands | 2,478 | 94 |
-| Serialized outgoing command BSON bytes | 804,316 | 24,657 |
-| Pending raw metadata retained | 10 | 10 |
-| Incomplete groups published | 0 | 0 |
+- Posting, captions, delivery, purchases, force-sub, Funbot.
+- The 100 s anti-bypass timing gate stays as a second, independent layer.
 
-That is about 96.2% fewer commands and 96.9% less outgoing command BSON in
-this specific idle test, including initial processing of the five groups.
-BSON was measured by the MongoDB command listener. It excludes TLS/TCP
-framing, replies, heartbeats and other services/HTTP traffic. Atlas latency,
-replica topology and real ingestion differ; no monthly GB saving is promised.
-Full Render service-initiated traffic has NOT been measured after deployment.
+---
 
-## Tests and limits
+## 3. Deploy
 
-Sandbox interpreter: Python 3.12; actual Render Python version was not changed.
-Real-database tests use only localhost:27019 and a fixed disposable sandbox
-name. No production write, Telegram delivery, provider purchase, live
-broadcast or Render deployment was performed for this fix.
+### A. Worker
+1. Cloudflare dashboard → Workers → `linkguard` → **Edit code**.
+2. Paste the new `worker.js`. Deploy.
+3. Keep every existing secret/var. `RETURN_POLICY` is **optional**:
+   - unset → `nav_only` (recommended, this is the default),
+   - `strict` → also requires a Referer on every return,
+   - `legacy` → old v1.2 behaviour (do not use; it re-opens the hole).
+4. Keep `ALLOW_EMPTY_REFERER=true` — it is now inert in `nav_only`.
 
-Focused root regressions: 152 passed (51 existing root-index/webhook tests,
-30 new bandwidth tests, plus 71 existing delivery/admin/HTTP/LinkGuard tests).
-Real local MongoDB run: 81 passed (51 existing root-index tests + 30 new tests).
-Standalone profile-title harness: 10/10 checks passed.
-Standalone ASGI route harness: PASS (health, webhook persistence and secrets).
-Compilation, ZIP CRC integrity, exact extraction/file-byte comparisons and
-FUN unchanged checks are also performed before delivery.
+No D1 migration step is needed: the Worker adds the columns itself on the first
+`/finish` or `/finish2`.
 
-The legacy test_all.py harness is NOT completely green: 433/440 checks pass,
-with the exact same seven failures on untouched commit 585aa8f and this fix:
+### B. Bots 1 + 2 (Render root service)
+Upload to the **repository root** (not `FUN/`): `bot1.py`, `db.py`,
+`linkguard.py`. Commit together, then deploy only the Bots 1+2 service.
+`/health` must stay 200. No env var change.
 
-- deliver: multi-version delivers ALL versions (no chooser)
-- shortener text mode
-- shortener JSON mode
-- wizard parsers accept valid input and skips
-- gate outage: admins alerted which providers failed
-- v4.8.3: 3 videos + srt delivered per-file, back-to-back
-- v4.8.3: 'I've Joined' resumes delivery per-file
+### C. Verify after deploy (2 minutes)
+- Open a fresh Download link, complete the shortener normally → file delivered.
+- Cloudflare logs should show `finish2_ok` with `release_site: "cross-site"`.
+- Paste a `/finish2` URL into the address bar → `finish2_nav_denied` with
+  `reason: "pasted_url"`, and the bot withholds the file.
+- Admin alert text: “Verification NOT confirmed — file withheld”.
 
-Those failures predate this change; this bandwidth package does not claim to
-repair them. Targeted delivery tests pass separately. Do not combine the
-standalone scripts into pytest collection: some execute and exit at import.
-Mock runs produce deprecation warnings from mongomock; these are not failures.
+---
 
-For a maintainer reproducing sandbox tests (not required to deploy), install
-root requirements plus pytest, pytest-asyncio and mongomock-motor, then run:
+## 4. Test evidence (all run in the sandbox, offline)
 
-    MONGO_URI='' python -m pytest -q --asyncio-mode=auto test_root_index.py test_bandwidth.py test_delivery_hotfix.py test_resilience_admin.py test_linkguard.py
+| Suite | What it is | Result |
+|---|---|---|
+| `test_worker_return_proof.mjs` | the **real** `worker.js` under Node against a local `node:sqlite` D1 shim, Turnstile mocked, no network | **24/24** |
+| `test_return_proof.py` | Bot-side gate on the real patched modules (httpx MockTransport + mongomock) | **19/19** |
+| `test_linkguard.py` | legacy Python mirror of the Worker, updated to teach the v1.3 rule | **38/38** |
 
-With an isolated local MongoDB listening on 127.0.0.1:27019 only:
+Worker checks covered: mint → landing cookie → claim → `/finish` departure →
+normal cross-site return (302 to the deep link) → `release_status` reports
+`released: true`; the reported paste-back (403, was 302 in v1.2); bypass bot
+fetching directly with no headers (403); unapproved Referer (403); observe-mode
+cannot rescue a paste (403); Referer stripped by policy still passes in
+`nav_only` (302); `strict` still demands a Referer (403); grant that never
+departed (403); missing cookie (403); UA mismatch (403); replay (403); three
+concurrent redemptions → exactly one 302; `/api/health` and unknown admin routes
+unchanged.
 
-    ROOT_LOCAL_MONGO_TEST=1 MONGO_URI='' python -m pytest -q --asyncio-mode=auto test_root_index.py test_bandwidth.py
+Bot checks covered: released → silent allow; not released → file withheld, token
+burned, **no ban, no strike**; unreachable Worker → retry, token preserved; Worker
+exception → retry; Worker disabled while a grant exists → retry, never a silent
+allow; legacy token without a grant → allow with **no** needless Worker call;
+`process_verify` wiring (proof runs for real links, skipped for `_g`); grant slug
+persisted on the token.
 
-Never point a test harness at production. Test collection may create/drop its
-fixed sandbox database. Sandbox success cannot guarantee perfect production
-behavior or verify Telegram/provider compatibility without live checks.
+**Not tested here:** a real Cloudflare Worker deployment, real D1, real
+Turnstile, live Telegram delivery, and a real Render deploy. Those need the
+deploy steps above; the sandbox cannot reach them.
 
-## Verify after deployment
+---
 
-First check /health and the root-bandwidth-v1 startup marker. Smoke-test an
-existing Download link through Bot 1 to Bot 2, ordinary gate completion,
-caption/copy behavior and deletion. Add a new cover group and then its next
-cover: the first should index; the current final cover should stay waiting.
-A waiting index status is expected and does NOT imply a stuck publishing job.
+## 5. Honest limits
 
-The existing once-per-minute Root resources log now includes cumulative,
-process-local counters: inbox_claims_total, inbox_empty_total,
-inbox_recoveries_total, index_passes_total and index_waits_total. Compare their
-differences between lines, not their totals; they reset on process restart.
-They contain no message bodies, tokens, URIs or credentials. The existing
-pending_updates count includes review records, so one review record is not
-necessarily an actively queued update. Do not reset it merely for a zero.
-
-In an idle settled service, these counters should rise slowly instead of
-thousands of times per minute. Source bursts legitimately raise them. A
-five-minute safety recheck of a waiting group is intentional; it never seals
-that group.
-
-Compare two COMPLETE hourly Render graph windows after deployment, preferably
-with similar activity. Do not compare an hour containing a deployment overlap
-or a large import against a quiet hour. The 1.73 GB monthly total will NOT go
-back down: verify that subsequent hourly increments fall. If they do not,
-collect matching root logs and investigate Atlas command rates plus actual
-outbound traffic. Health probes/Telegram requests, source metadata writes,
-explicit history scans and external API calls still have real costs.
-
-## Rollback
-
-Restore main.py, root_dispatch.py and root_index.py together from base commit
-585aa8f0a30ce7c68494acbbf10d103ff0e34491 and redeploy the root service only.
-Do not delete database collections. Added job fields/index are additive; old
-code can read them, but rollback restores its aggressive polling behavior.
-Rollback may bring the original bandwidth cost back. FUN needs no rollback.
+- `Sec-Fetch-*` is sent by current Chrome/Edge/Firefox/Safari. A very old browser
+  sends none and then needs an approved Referer — that is the `missing_nav_headers`
+  hint telling the user to update the browser. Real mobile traffic in the
+  captured events all sent these headers.
+- A determined attacker running a **real headless browser** that follows the
+  shortener's own redirect is indistinguishable from a human by header shape.
+  This patch stops the *reported* bypass (paste-back of a bot-minted URL) and
+  stops a leaked deep link from being honoured; it does not claim to defeat a
+  full browser-automation farm.
+- Residual gap worth closing next: require a server-side receipt from the
+  shortener itself (a postback/signed callback per completion). `vplink.in`
+  publishes no such API, so nothing here pretends to have it.

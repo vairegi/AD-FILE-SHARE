@@ -223,3 +223,58 @@ async def add_ref_host(host: str):
 async def clear_observed():
     return await _admin_post("/api/admin/observed_clear")
 
+
+# ── v1.3: return proof / Door-3 completion ─────────────────────────
+# Three verdicts so callers can tell "definitely a bypass" apart from
+# "we could not ask":
+#   allow  — the Worker confirms a real browser navigation redeemed it
+#   deny   — the Worker answered and there is NO verified release
+#   retry  — no answer (unconfigured, transport error, 5xx): never
+#            punish the user, never hand over the file
+VERDICT_ALLOW = "allow"
+VERDICT_DENY = "deny"
+VERDICT_RETRY = "retry"
+
+
+async def release_status(slug: str):
+    """Did Door 3 actually COMPLETE for this exit grant?
+
+    Returns the Worker's dict ({'released': bool, ...}) on a real answer,
+    or None when it could not be asked. None is NOT a pass.
+    """
+    slug = (slug or "").strip()
+    if not slug:
+        return None
+    base, key = await _cfg()
+    if not base:
+        return None
+    try:
+        r = await _post(f"{base}/api/admin/release_status",
+                        headers={"x-admin-key": key},
+                        json={"slug": slug})
+        if r.status_code != 200:
+            log.warning("linkguard release_status HTTP=%s", r.status_code)
+            return None
+        d = r.json() or {}
+        if d.get("ok") is not True:
+            return None
+        return d
+    except Exception as exc:
+        log.warning("linkguard release_status failed: error=%s", type(exc).__name__)
+        return None
+
+
+def return_proof_verdict(release, *, has_grant: bool, worker_configured: bool) -> str:
+    """Pure decision used by Bot 1 before any file is handed over.
+
+    Tokens minted before v1.3 carry no grant slug and keep the old rule
+    (the anti-bypass timing gate) so in-flight links never break.
+    """
+    if not has_grant:
+        return VERDICT_ALLOW
+    if not worker_configured:
+        return VERDICT_RETRY
+    if not isinstance(release, dict):
+        return VERDICT_RETRY
+    return VERDICT_ALLOW if release.get("released") is True else VERDICT_DENY
+

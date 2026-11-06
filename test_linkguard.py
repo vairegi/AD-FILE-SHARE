@@ -74,7 +74,8 @@ def check_finish(referer, token_state, claim_ip, finish_ip, claim_ua, finish_ua)
 # ── Python mirror of handleFinish2 (Door 3 exit, v1.1) ──────────────────────
 def check_finish2(has_cookie, sess_state, sess_ua, req_ua, sess_ip, req_ip,
                   ref_host, allowed, grant_state, grant_session, sess_id,
-                  now, exp, allow_empty_referer=False):
+                  now, exp, allow_empty_referer=False, sec_fetch_site="cross-site",
+                  departed=True):
     if not has_cookie:
         return 403, "no_cookie"
     if sess_state is None:
@@ -84,11 +85,15 @@ def check_finish2(has_cookie, sess_state, sess_ua, req_ua, sess_ip, req_ip,
     if sess_ua != req_ua:
         return 403, "ua_mismatch"
     # sess_ip vs req_ip: drift allowed (logged only)
-    if not ref_host:
-        if not allow_empty_referer:
-            return 403, "bad_shortener_referer"
-    elif ref_host not in allowed:
+    # v1.3: a pasted URL is never a verified return, whatever the cookie says.
+    if sec_fetch_site == "none":
+        return 403, "pasted_url"
+    if ref_host and ref_host not in allowed:
         return 403, "bad_shortener_referer"
+    if not ref_host and not sec_fetch_site and not allow_empty_referer:
+        return 403, "missing_nav_headers"
+    if not departed:
+        return 403, "no_departure"
     if grant_state == "malformed":
         return 403, "malformed"
     if grant_state == "forged":
@@ -201,11 +206,19 @@ class TestFinish2Matrix(unittest.TestCase):
                          "bad_shortener_referer")
 
     def test_empty_referer_403_by_default(self):
-        self.assertEqual(self._f2(ref_host="")[1], "bad_shortener_referer")
+        self.assertEqual(self._f2(ref_host="", sec_fetch_site="")[1],
+                         "missing_nav_headers")
 
-    def test_empty_referer_allowed_when_configured(self):
-        self.assertEqual(self._f2(ref_host="", allow_empty_referer=True),
-                         (302, "ok"))
+    def test_empty_referer_with_navigation_proof_passes(self):
+        # v1.3: Referer stripped by policy is fine when the browser proves a
+        # real cross-site navigation.
+        self.assertEqual(self._f2(ref_host=""), (302, "ok"))
+
+    def test_pasted_url_is_refused_even_with_a_cookie(self):
+        # THE reported bypass: /finish2 pasted into the verified browser.
+        self.assertEqual(
+            self._f2(ref_host="", sec_fetch_site="none", allow_empty_referer=True)[1],
+            "pasted_url")
 
     def test_arolinks_referer_ok(self):
         self.assertEqual(self._f2(ref_host="arolinks.com"), (302, "ok"))
@@ -223,6 +236,9 @@ class TestFinish2Matrix(unittest.TestCase):
     def test_wrong_session_403(self):
         # Another verified browser cannot claim this grant.
         self.assertEqual(self._f2(sess_id="S2")[1], "wrong_session")
+
+    def test_grant_that_never_departed_is_refused(self):
+        self.assertEqual(self._f2(departed=False)[1], "no_departure")
 
 
 class TestNicktrick(unittest.TestCase):

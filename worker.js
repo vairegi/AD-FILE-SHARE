@@ -1,5 +1,22 @@
 /**
- * LinkGuard v1.2 — three-door link protection on Cloudflare Workers.
+ * LinkGuard v1.3 — three-door link protection on Cloudflare Workers.
+ *
+ * v1.3 (RETURN PROOF — closes the paste-back bypass):
+ *   A bypass bot returns the /finish2 URL for the user to paste into the
+ *   browser that already solved Turnstile. Cookies and UA still match, so
+ *   v1.2 released the deep link. v1.3 adds two proofs that a pasted URL
+ *   cannot fake:
+ *     1. NAVIGATION SHAPE — Sec-Fetch-Site must not be 'none' and
+ *        mode/dest must be navigate/document. Browsers set 'none' for a
+ *        URL typed/pasted into the address bar; page script cannot forge
+ *        Sec-Fetch-* at all.
+ *     2. DEPARTURE — /finish must have recorded that this session left
+ *        for the shortener, and redemption burns the grant atomically
+ *        (WHERE used = 0).
+ *   A verified release is stored (released_at / released_ip /
+ *   release_site) and exposed to the bot via POST /api/admin/
+ *   release_status, so Bot 1 only hands over files after the Worker
+ *   confirms Door 3 actually completed.
  *
  * v1.2 (observe-mode + host-learning): paid shorteners exit through
  * ad-network intermediate hosts, so a static Referer allowlist can
@@ -39,6 +56,79 @@
 
 const JSON_CT = { "content-type": "application/json; charset=utf-8" };
 const NOSTORE = { "cache-control": "no-store, no-cache, must-revalidate" };
+
+/* ────────────── v1.3: return proof (departure + navigation) ────────────── */
+
+let _v13Ready = false;
+
+async function ensureV13Tables(env) {
+  if (_v13Ready) return;
+  for (const ddl of [
+    "ALTER TABLE finish2_grants ADD COLUMN released_at INTEGER",
+    "ALTER TABLE finish2_grants ADD COLUMN released_ip TEXT",
+    "ALTER TABLE finish2_grants ADD COLUMN release_site TEXT",
+    "ALTER TABLE finish2_grants ADD COLUMN departed_at INTEGER",
+  ]) {
+    try { await env.LINKGUARD_DB.prepare(ddl).run(); } catch { /* column exists */ }
+  }
+  _v13Ready = true;
+}
+
+function returnPolicy(env) {
+  const p = String(env.RETURN_POLICY || "nav_only").trim().toLowerCase();
+  return ["nav_only", "strict", "legacy"].includes(p) ? p : "nav_only";
+}
+
+function refHostAllowed(refHost, allowed) {
+  if (!refHost) return false;
+  return (allowed || []).some(h => refHost === h || refHost.endsWith("." + h));
+}
+
+/* Was this /finish2 hit a REAL browser navigation away from another site?
+ *
+ * The bypass: the short link is handed to a "bypass bot", which returns our
+ * /finish2 URL, and the user pastes it into the address bar of the browser
+ * that already solved Turnstile. Cookies and UA still match, so a pure
+ * cookie/UA binding releases the deep link.
+ *
+ * A paste is Sec-Fetch-Site: none with no Referer. A genuine shortener
+ * redirect is a cross-site DOCUMENT navigation, so mode/dest say
+ * navigate/document. Referrer-Policy can strip Referer, but no page can
+ * forge Sec-Fetch-*, which is why this proof survives missing Referers.
+ *
+ * ALLOW_EMPTY_REFERER is honoured only in RETURN_POLICY=legacy: in nav_only
+ * a request with no Sec-Fetch-* headers needs an approved Referer.
+ */
+function navProof(request, env, allowed) {
+  const policy = returnPolicy(env);
+  const site = String(request.headers.get("sec-fetch-site") || "").toLowerCase();
+  const mode = String(request.headers.get("sec-fetch-mode") || "").toLowerCase();
+  const dest = String(request.headers.get("sec-fetch-dest") || "").toLowerCase();
+  const refHost = hostOf(request.headers.get("referer") || "");
+
+  // A present-but-unapproved Referer is always a denial: it also stops our
+  // own retry page being reloaded into a pass.
+  if (refHost && !refHostAllowed(refHost, allowed))
+    return { ok: false, reason: "bad_shortener_referer", site, refHost, policy };
+
+  if (!site) {
+    // Browser without Sec-Fetch-* headers.
+    if (refHost) return { ok: true, reason: "referer_only", site, refHost, policy };
+    const legacyEmpty = String(env.ALLOW_EMPTY_REFERER || "false").toLowerCase() === "true";
+    if (policy === "legacy" && legacyEmpty)
+      return { ok: true, reason: "legacy_no_headers", site, refHost, policy };
+    return { ok: false, reason: "missing_nav_headers", site, refHost, policy };
+  }
+  if (site === "none")
+    return { ok: false, reason: "pasted_url", site, refHost, policy };
+  if (mode && mode !== "navigate")
+    return { ok: false, reason: "not_a_navigation", site, refHost, policy };
+  if (dest && dest !== "document")
+    return { ok: false, reason: "not_a_navigation", site, refHost, policy };
+  if (policy === "strict" && !refHost)
+    return { ok: false, reason: "missing_referer", site, refHost, policy };
+  return { ok: true, reason: "ok", site, refHost, policy };
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -354,6 +444,20 @@ async function handleFinish(request, env, url, ctx) {
   await env.LINKGUARD_DB.prepare("UPDATE claims SET used = 1 WHERE token = ?").bind(token).run();
   await logEvent(env, "claim_ok", { slug, sessionId, ip });
 
+  // v1.3: record DEPARTURE for this post's exit grant. A minted grant that
+  // never went out to the shortener cannot be redeemed at /finish2.
+  try {
+    await ensureV13Tables(env);
+    const srow = await env.LINKGUARD_DB.prepare(
+      "SELECT grant_slug FROM slugs WHERE slug = ?").bind(slug).first();
+    if (srow && srow.grant_slug) {
+      await env.LINKGUARD_DB.prepare(
+        "UPDATE finish2_grants SET departed_at = ? WHERE slug = ? AND used = 0"
+      ).bind(Date.now(), srow.grant_slug).run();
+      await logEvent(env, "finish2_departure", { slug, grant: srow.grant_slug });
+    }
+  } catch { /* pre-migration schema */ }
+
   ctx.waitUntil(fireDecoys(env, slug, ip));
 
   return new Response(null, {
@@ -406,23 +510,21 @@ async function handleFinish2(request, env, url) {
   if (sess.ip !== ip)
     await logEvent(env, "ip_drift", { slug, sessionId: sess.id, from: sess.ip, to: ip, stage: "finish2" });
 
-  // 3. Referer allowlist — must arrive FROM a known shortener host.
-  const ref = request.headers.get("referer") || "";
-  const refHost = hostOf(ref);
+  // 3. v1.3 RETURN PROOF — the exit must be a REAL browser navigation away
+  // from a known shortener host, not a URL pasted into the address bar.
+  await ensureV13Tables(env);
   const allowed = await allowedRefHosts(env, slug);
-  const emptyOk = String(env.ALLOW_EMPTY_REFERER || "false").toLowerCase() === "true";
-  if (!refHost) {
-    if (!emptyOk) return fail("bad_shortener_referer", "(empty)");
-  } else   if (!allowed.some(h => refHost === h || refHost.endsWith("." + h))) {
-    // v1.2: while observe-mode is on, record the real exit host and
-    // let the request continue to the cookie/UA/grant checks instead
-    // of false-denying a legit user who solved the shortener.
-    if (refHost && await observeActive(env)) {
-      await recordObservedHost(env, refHost);
-      await logEvent(env, "finish2_observed_ref", { slug, refHost });
-    } else {
-      return fail("bad_shortener_referer", refHost);
+  const proof = navProof(request, env, allowed);
+  if (!proof.ok) {
+    // Never lose the learned host: observe-mode still records unknown
+    // Referers, it just cannot turn a pasted URL into a pass any more.
+    if (proof.refHost && await observeActive(env)) {
+      await recordObservedHost(env, proof.refHost);
+      await logEvent(env, "finish2_observed_ref", { slug, refHost: proof.refHost });
     }
+    await logEvent(env, "finish2_nav_denied",
+      { slug, ip, reason: proof.reason, site: proof.site, refHost: proof.refHost });
+    return fail(proof.reason, proof.site || "(none)");
   }
 
   // 4. HMAC + expiry on the grant token itself.
@@ -446,9 +548,36 @@ async function handleFinish2(request, env, url) {
   if (row.used) return fail("reused");
   if (row.session_id !== sess.id) return fail("wrong_session");
 
-  // 6. Burn BEFORE revealing the deep link.
-  await env.LINKGUARD_DB.prepare(
-    "UPDATE finish2_grants SET used = 1 WHERE slug = ?").bind(slug).run();
+  // 5b. v1.3: this session must have actually LEFT for the shortener.
+  // A grant that never departed can never be redeemed.
+  let departedAt = null;
+  try {
+    const drow = await env.LINKGUARD_DB.prepare(
+      "SELECT departed_at FROM finish2_grants WHERE slug = ?").bind(slug).first();
+    departedAt = (drow && drow.departed_at) || null;
+  } catch { /* pre-migration schema */ }
+  if (!departedAt) {
+    await logEvent(env, "finish2_no_departure", { slug, ip });
+    return fail("no_departure");
+  }
+
+  // 6. Burn BEFORE revealing the deep link — atomically (v1.3), and record
+  //    the verified release so the bot can confirm Door 3 completed.
+  let burned = 0;
+  try {
+    const upd = await env.LINKGUARD_DB.prepare(
+      "UPDATE finish2_grants SET used = 1, released_at = ?, released_ip = ?, " +
+      "release_site = ? WHERE slug = ? AND used = 0"
+    ).bind(Date.now(), ip, proof.site || "", slug).run();
+    burned = Number((upd && upd.meta && upd.meta.changes) || 0);
+  } catch {
+    // pre-migration schema (no released_* columns): keep single-use only.
+    const upd = await env.LINKGUARD_DB.prepare(
+      "UPDATE finish2_grants SET used = 1 WHERE slug = ? AND used = 0"
+    ).bind(slug).run();
+    burned = Number((upd && upd.meta && upd.meta.changes) || 0);
+  }
+  if (!burned) return fail("reused");
   try {
     await env.LINKGUARD_DB.prepare(
       "UPDATE sessions SET state = 'completed' WHERE id = ?").bind(sess.id).run();
@@ -478,6 +607,14 @@ async function retryPage(env, slug, reason) {
     wrong_session: "This link belongs to a different session.",
     slug_mismatch: "This link is invalid.",
     malformed: "This link is invalid.",
+    pasted_url: "This link was opened directly instead of through the shortener page. " +
+      "Open the shortener link and wait for its own continue button.",
+    not_a_navigation: "This link must be opened by the shortener page itself.",
+    missing_nav_headers: "Your browser did not send the navigation proof. Update the browser " +
+      "or open the link in Chrome.",
+    missing_referer: "You did not arrive through the official shortener flow.",
+    no_departure: "You never opened the shortener from your verification page. " +
+      "Start the verification again.",
   };
   const hint = hints[reason] || "Verification failed.";
   let btn = "";
@@ -687,6 +824,35 @@ async function handleAdmin(request, env, path) {
     await env.LINKGUARD_DB.prepare("DELETE FROM ref_observed").run();
     return json({ ok: true });
   }
+  // v1.3: bot-side confirmation that Door 3 COMPLETED for an exit grant.
+  // This is what stops a leaked deep link from being honoured: Bot 1 asks
+  // before it hands over any file.
+  if (path === "/api/admin/release_status" && request.method === "POST") {
+    const body = await request.json().catch(() => ({}));
+    const slug = String(body.slug || "").trim();
+    if (!slug) return json({ error: "bad_slug" }, 400);
+    await ensureV13Tables(env);
+    let row = null;
+    try {
+      row = await env.LINKGUARD_DB.prepare(
+        "SELECT used, released_at, released_ip, release_site, departed_at " +
+        "FROM finish2_grants WHERE slug = ?").bind(slug).first();
+    } catch {
+      row = await env.LINKGUARD_DB.prepare(
+        "SELECT used FROM finish2_grants WHERE slug = ?").bind(slug).first();
+    }
+    if (!row) return json({ ok: true, released: false, reason: "unknown_grant" });
+    const released = !!row.used && !!row.released_at;
+    return json({
+      ok: true, released,
+      reason: released ? "released" : (row.departed_at ? "awaiting_return" : "no_departure"),
+      released_at: row.released_at || null,
+      release_site: row.release_site || null,
+      departed_at: row.departed_at || null,
+      policy: returnPolicy(env),
+    });
+  }
+
   return json({ error: "unknown_admin_route" }, 404);
 }
 
