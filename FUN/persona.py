@@ -210,3 +210,11 @@ def alive(scene):
 
 def share_text():
     return random.choice(SHARE_LINES)
+
+
+def gift_notify(amount, balance):
+    return (head("🎁 A surprise gift for you, Senpai~! (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧")
+        + "The admins sent a little happiness straight to your wallet!\n\n"
+        + stat("🎀", "Gift Received", f"+{amount:,} tokens")
+        + stat("👛", "Current Balance", f"{balance:,} Tokens")
+        + "\n" + cute("🌸 No check-in or invite needed — these are yours! Tap below and enjoy a new drop~"))

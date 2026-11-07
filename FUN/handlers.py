@@ -21,6 +21,7 @@ import pricing
 import feed_sessions
 import broadcast
 import covers
+import token_admin
 
 # ── small helpers ───────────────────────────────────────────────
 def esc(t) -> str:
@@ -81,7 +82,7 @@ async def _start(update, context):
         # Balance and welcomed flag are updated in ONE atomic MongoDB write.
         awarded = await db.col("users").update_one(
             {"user_id": u.id, "welcomed": {"$ne": True}},
-            {"$set": {"welcomed": True}, "$inc": {"tokens": bonus}})
+            {"$set": {"welcomed": True, "started_at": db.now_ts()}, "$inc": {"tokens": bonus}})
         if awarded.modified_count:
             await db.col("transactions").insert_one({"user_id": u.id,
                 "amount": bonus, "reason": "welcome_referral" if referral else "welcome",
@@ -150,6 +151,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_help(q)
         elif data == "ref":
             await _show_referral(q)
+        elif data.startswith("gift:"):
+            await token_admin.callback(update, context)
+        elif data.startswith("ut:"):
+            await token_admin.users_callback(update, context)
         elif data.startswith("bc:"):
             await broadcast.callback(update, context)
         elif data.startswith("watch:"):
@@ -805,6 +810,10 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /broadcast — prepare a copied message/album for all users\n"
         "• /broadcast status | /broadcast cancel\n"
         "• /autodlt <1m|15m|30m|1h|off> — new delivery deletion timer\n"
+        "• /gift <user_id> <amount> — send token gift + alert\n"
+        "• /gift all <amount> — preview and confirm gifts for everyone\n"
+        "• /gift status — latest gift progress\n"
+        "• /userstoken [page] — balances + referred friends\n"
         "• /stats — counts")
 
 

@@ -386,8 +386,10 @@ def start_jobs(telegram_bot):
     global bot
     bot = telegram_bot
     import live_index
+    import token_admin
     _background.extend([spawn(deletion_loop()), spawn(scan_loop()),
-                        spawn(live_index.loop(telegram_bot))])
+                        spawn(live_index.loop(telegram_bot)),
+                        spawn(token_admin.loop(telegram_bot))])
 
 
 async def stop_jobs():

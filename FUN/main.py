@@ -19,6 +19,7 @@ import handlers
 import runtime
 import userbot_setup
 import live_index
+import token_admin
 
 WEBHOOK_UPDATES = ["message", "callback_query", "channel_post"]
 
@@ -51,6 +52,7 @@ def build_bot():
         "remove_userbot": handlers.cmd_remove_userbot, "botstatus": handlers.cmd_botstatus,
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,
         "setprice": handlers.cmd_setprice, "stats": handlers.cmd_stats,
+        "gift": token_admin.command, "userstoken": token_admin.users_command,
         "autodlt": handlers.cmd_autodlt,
         "pending": handlers.cmd_pending, "collections": handlers.cmd_collections}
     for name, fn in commands.items():
@@ -71,6 +73,7 @@ async def lifespan(app):
         raise RuntimeError("Set WEBHOOK_SECRET to a unique random value in Render.")
     await db.connect()
     await live_index.ensure_indexes()
+    await token_admin.ensure_indexes()
     app_bot = build_bot()
     await app_bot.initialize()
     await app_bot.start()
