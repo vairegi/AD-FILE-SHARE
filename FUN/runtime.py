@@ -387,9 +387,11 @@ def start_jobs(telegram_bot):
     bot = telegram_bot
     import live_index
     import token_admin
+    import earn_links
     _background.extend([spawn(deletion_loop()), spawn(scan_loop()),
                         spawn(live_index.loop(telegram_bot)),
-                        spawn(token_admin.loop(telegram_bot))])
+                        spawn(token_admin.loop(telegram_bot)),
+                        spawn(earn_links.loop(telegram_bot))])
 
 
 async def stop_jobs():
@@ -408,3 +410,5 @@ async def stop_jobs():
     _cover_pending.clear()
     _cover_task = None
     await disconnect_userbot()
+    import earn_links
+    await earn_links.close_http()

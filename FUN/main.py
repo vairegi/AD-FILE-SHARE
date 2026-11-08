@@ -20,6 +20,7 @@ import runtime
 import userbot_setup
 import live_index
 import token_admin
+import earn_links
 
 WEBHOOK_UPDATES = ["message", "callback_query", "channel_post"]
 
@@ -53,6 +54,10 @@ def build_bot():
         "reqchannel": handlers.cmd_reqchannel, "addtask": handlers.cmd_addtask,
         "setprice": handlers.cmd_setprice, "stats": handlers.cmd_stats,
         "gift": token_admin.command, "userstoken": token_admin.users_command,
+        "users": token_admin.users_alias,
+        "solve": earn_links.cmd_earn, "shortenerapi": earn_links.cmd_providers,
+        "shortener": earn_links.cmd_switch, "setperverifytoken": earn_links.cmd_reward,
+        "bantimecontrol": earn_links.cmd_timer,
         "autodlt": handlers.cmd_autodlt,
         "pending": handlers.cmd_pending, "collections": handlers.cmd_collections}
     for name, fn in commands.items():
@@ -74,6 +79,7 @@ async def lifespan(app):
     await db.connect()
     await live_index.ensure_indexes()
     await token_admin.ensure_indexes()
+    await earn_links.ensure_indexes()
     app_bot = build_bot()
     await app_bot.initialize()
     await app_bot.start()
@@ -84,7 +90,7 @@ async def lifespan(app):
             secret_token=config.WEBHOOK_SECRET, allowed_updates=WEBHOOK_UPDATES,
             drop_pending_updates=False)
     await app_bot.bot.set_my_commands([
-        BotCommand("start", "Open the cute hub"), BotCommand("checkin", "Daily tokens"), BotCommand("help", "How it works"),
+        BotCommand("start", "Open the cute hub"), BotCommand("checkin", "Daily tokens"), BotCommand("solve", "Shortener token adventure"), BotCommand("help", "How it works"),
         BotCommand("admin", "Owner setup and controls")])
     try:
         await runtime._ensure_userbot()

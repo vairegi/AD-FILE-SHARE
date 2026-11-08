@@ -49,7 +49,7 @@ async def isolated(monkeypatch):
 
 
 def bot():
-    return NS(send_message=AsyncMock(return_value=NS(message_id=91)))
+    return NS(send_message=AsyncMock(return_value=NS(message_id=91)), _post=AsyncMock(return_value={'message_id':91}))
 
 
 def update(uid=7, mid=10, kind='private'):
@@ -380,40 +380,43 @@ async def test_token_table_sort_pagination_referrals_names_and_links():
     await db.create_referral(23,101)
     await db.qualify_referral(101)
     await db.create_referral(23,102)
-    text,kb=await ta.table(0,7)
-    assert '23 started users' in text and 'Page 1/3' in text
-    assert text.index('User 23')<text.index('User 22')
-    assert 'User 14' in text and 'User 13' not in text
-    assert '1 pending' in text and 'tg://user?id=23' in text
-    assert '<pre>' in text and '<b>' in text
-    assert 'qualified referrals' in text
+    rich,kb=await ta.table(0,7)
+    assert rich['blocks'][1]['text']=='👥 23 started users · Page 1/3'
+    cells=next(b for b in rich['blocks'] if b['type']=='table')['cells']
+    assert cells[1][1]['text'][0]['text']=='User 23'
+    assert cells[-1][1]['text'][0]['text']=='User 14'
+    assert cells[1][3]['text']=='1\n+1 pending'
+    assert cells[1][1]['text'][0]['url']=='tg://user?id=23'
     assert not any('Previous' in b.text for row in kb.inline_keyboard for b in row)
     assert any(b.callback_data=='ut:7:1' for row in kb.inline_keyboard for b in row)
     last,last_kb=await ta.table(2,7)
-    assert 'Page 3/3' in last and 'User 1' in last
+    assert last['blocks'][1]['text'].endswith('Page 3/3')
+    last_cells=next(b for b in last['blocks'] if b['type']=='table')['cells']
+    assert last_cells[-1][1]['text'][0]['text']=='User 1'
     assert not any('Next' in b.text for row in last_kb.inline_keyboard for b in row)
-    for row in kb.inline_keyboard:
-        assert all(len(b.callback_data.encode())<=64 for b in row)
-
+    assert all(len(b.callback_data.encode())<=64 for row in kb.inline_keyboard for b in row)
 
 async def test_table_empty_and_out_of_range_page():
-    text,kb=await ta.table(99,7)
-    assert 'No users yet' in text and 'Page 1/1' in text
+    rich,kb=await ta.table(99,7)
+    assert any('No users yet' in str(b.get('text','')) for b in rich['blocks'])
+    assert rich['blocks'][1]['text'].endswith('Page 1/1')
     await user(55)
-    text,_=await ta.table(99999,7)
-    assert 'Page 1/1' in text
-
+    rich,_=await ta.table(99999,7)
+    assert rich['blocks'][1]['text'].endswith('Page 1/1')
 
 async def test_table_html_escape_long_unicode_no_html_injection():
+    # Native RichText strings are literal, NOT parsed as HTML. User content
+    # must stay inside a text field, not become a rich block or an HTML string.
     name='<b>&"😀界\n' * 30
     for uid in range(1,11): await user(uid,name=name)
-    text,kb=await ta.table(0,7)
-    assert '&lt;b&gt;' in text
-    assert len(text)<4096
-    assert '<b>&' not in text
-    assert '\n' not in ta.short_name({'first_name':name,'user_id':1})
-    assert len(ta.short_name({'first_name':name,'user_id':1}))<=12
-
+    rich,kb=await ta.table(0,7)
+    assert 'html' not in rich and 'markdown' not in rich
+    cells=next(b for b in rich['blocks'] if b['type']=='table')['cells']
+    for row in cells[1:]:
+        literal=row[1]['text'][0]['text']
+        assert '<b>' in literal and len(literal)<=60 and '\n' not in literal
+        assert row[1]['text'][0]['type']=='url'
+    assert len(cells)==11
 
 @pytest.mark.parametrize('args', [['0'],['-1'],['a'],['1','2']])
 async def test_token_command_invalid_pages(args):
@@ -424,18 +427,19 @@ async def test_token_command_invalid_pages(args):
 
 async def test_directory_command_callback_owner_refresh_and_live_balances():
     await user(55)
-    u=update()
-    await ta.users_command(u,context())
-    assert '<pre>' in u.message.reply_text.call_args.args[0]
+    u=update();b=bot()
+    await ta.users_command(u,context(client=b))
+    assert b._post.call_args.args[0]=='sendRichMessage'
+    assert b._post.call_args.args[1]['rich_message']['blocks'][2]['cells'][1][2]['text']=='10'
     await db.col('users').update_one({'user_id':55},{'$inc':{'tokens':8}})
     q=callback('ut:7:0')
-    await handlers.on_button(q,context())
-    assert '18' in q.callback_query.edit_message_text.call_args.args[0]
+    await handlers.on_button(q,context(client=b))
+    assert b._post.call_args.args[0]=='editMessageText'
+    assert b._post.call_args.args[1]['rich_message']['blocks'][2]['cells'][1][2]['text']=='18'
     for uid in (8,99):
-        forbidden=callback('ut:7:0',uid)
-        await handlers.on_button(forbidden,context())
-        assert not forbidden.callback_query.edit_message_text.called
-
+        before=b._post.call_count
+        await handlers.on_button(callback('ut:7:0',uid),context(client=b))
+        assert b._post.call_count==before
 
 @pytest.mark.parametrize('data', ['gift:evil:x','gift:confirm','ut:x:y','ut:7:-1','ut:7:999999999999'])
 async def test_invalid_callbacks_no_mutations(data):
@@ -549,12 +553,17 @@ async def test_real_ptb_serializes_gift_and_table_offline():
         receipt = await ta.credit(j, 55)
         await ta.notify(b, j, receipt)
         text, kb = await ta.table(0, 7)
-        await b.send_message(7, text, parse_mode='HTML', reply_markup=kb)
+        import native_tables
+        await native_tables.send(b, 7, text, kb)
     sends = [params for api, params in request.calls if api == 'sendMessage']
-    assert len(sends) == 2
+    assert len(sends) == 1
     assert '+5 tokens' in sends[0]['text'] and sends[0]['parse_mode'] == 'HTML'
-    assert '<pre>' in sends[1]['text'] and 'tg://user?id=55' in sends[1]['text']
-    for params in sends:
+    rich_send = next(p for api,p in request.calls if api == 'sendRichMessage')
+    rich = rich_send['rich_message']
+    if isinstance(rich, str): rich = json.loads(rich)
+    assert rich['blocks'][2]['type'] == 'table'
+    assert rich['blocks'][2]['cells'][1][1]['text'][0]['url'] == 'tg://user?id=55'
+    for params in sends + [rich_send]:
         kb = params['reply_markup']
         if isinstance(kb, str): kb = json.loads(kb)
         assert all('style' in b for row in kb['inline_keyboard'] for b in row)

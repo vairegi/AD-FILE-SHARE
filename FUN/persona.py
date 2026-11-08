@@ -89,7 +89,10 @@ def help_card():
         f"• Delivered files auto-clean after <code>{config.AUTO_DELETE_AFTER_SECONDS // 60} min</code>.\n"
         "• Save adds a separate bookmark.\n\n<b>3. Free Token Rewards 👛</b>\n"
         f"• /checkin: <code>+{config.DAILY_CHECKIN_REWARD}</code> daily; streak bonuses apply.\n"
-        "• Configured sponsor tasks have a 24-hour cooldown.\n"
+        "• Solve &amp; Earn (or /solve): five rewards per provider in a rolling 24h.\n"
+        "• Active shorteners rotate per user; each new link shows its promised reward.\n"
+        "• Shortener reminders follow your latest successful return, not midnight.\n"
+        "• Configured sponsor tasks have a separate 24-hour cooldown.\n"
         f"• Referrals: you <code>+{config.REFERRAL_INVITER_BONUS}</code>, friend "
         f"<code>+{config.REFERRAL_FRIEND_BONUS}</code>.\n{SEP}\n"
         + cute("🌸 If you need me, just tap Main Menu below, okay? Ehehe~"))
@@ -112,15 +115,17 @@ def profile(user_id, balance, streak, unlocked, saved, earned, spent, tasks, ref
 def earn_home(balance):
     return (head("🎀 Earn Free Tokens, Senpai~! (*≧ω≦)✨")
         + stat("👛", "Token Balance", f"{balance} Tokens")
-        + "\n<b>How to earn free tokens</b>\n"
-        "1. Tap an available sponsor task.\n2. Complete its verification flow.\n"
-        "3. Return to collect the configured reward.\n\n"
-        + cute("🌸 Ehehe, each task renews every 24 hours!"))
+        + "\n<b>Your little earning adventures</b>\n"
+        "• Solve &amp; Earn: finish a shortener and return for its reward.\n"
+        "• Five rewards per provider in a rolling 24h — eligible providers rotate.\n"
+        "• Daily Check-In and Refer Friends are still waiting below!\n"
+        "• Extra sponsor tasks, when configured, have their own 24h cooldown.\n\n"
+        + cute("🌸 Ehehe, pick an adventure and let’s brighten that token pouch~"))
 
 
 def task_unavailable():
-    return (head("🎀 No sponsor tasks yet, Senpai... (｡•́︿•̀｡)")
-        + cute("🌸 The owner hasn't configured working sponsor tasks yet. Try /checkin or invite friends!"))
+    return (head("🎀 No extra sponsor tasks yet, Senpai... (｡•́︿•̀｡)")
+        + cute("🌸 The extra sponsor shelf is empty. You can still try Solve & Earn, /checkin or invite friends!"))
 
 
 def task_cooldown(hours, minutes):
@@ -218,3 +223,58 @@ def gift_notify(amount, balance):
         + stat("🎀", "Gift Received", f"+{amount:,} tokens")
         + stat("👛", "Current Balance", f"{balance:,} Tokens")
         + "\n" + cute("🌸 No check-in or invite needed — these are yours! Tap below and enjoy a new drop~"))
+
+
+# ── Shortener rewards (temporary timer/return-link checks) ──────────
+def earn_link(site, reward, minimum, expires):
+    return (head('🔗 A tiny token adventure, Senpai~! (｡•̀ᴗ-)✧')
+        + stat('🌸', 'Your shortener', site)
+        + stat('🎁', 'Reward after the return', f'+{reward} tokens')
+        + stat('⏱', 'Minimum wait', f'{minimum} seconds')
+        + stat('⌛', 'Link expires', expires)
+        + '\n' + cute('Open the shortener, finish its steps, then use its final Telegram button to return here. This link belongs only to you~')
+        + '\n\n' + cute('🎀 Five rewards per provider in any rolling 24 hours. Tap Solve & Earn again to reopen the SAME unfinished link — extra taps do not make extra rewards.'))
+
+
+def earn_notice(kind, **values):
+    messages = {
+        'start': ('🌸 Let’s meet first, Senpai~!', 'Please send /start before collecting shortener tokens.'),
+        'building': ('🎀 One tiny moment, Senpai~', 'Your link is still being prepared. Tap Solve & Earn again shortly; your wallet and daily allowance have not changed.'),
+        'disabled': ('🌸 The token adventure is resting, Senpai~', 'The admin has not opened shortener rewards yet. You can still check in or invite a friend!'),
+        'unavailable': ('🎀 The shortener shelf needs a little rest~', 'No provider could make your link right now, Senpai. Please try again later. No tokens or daily uses were taken.'),
+        'limit': ('🌙 You’ve collected today’s little treasures, Senpai~', 'Every active provider has reached its five rewards in the last 24 hours. A slot returns as its old completion leaves that window.'),
+        'invalid': ('🎀 This little link isn’t yours, Senpai~', 'I could not match this link to your wallet. Please use Solve & Earn to get your own.'),
+        'expired': ('🍂 That little link has finished its journey~', 'The link expired or is no longer active, Senpai. Tap Solve & Earn for a fresh one. Nothing was deducted.'),
+        'already': ('🎁 That reward is already tucked in your wallet~', 'No need to claim it twice, Senpai! Tap Solve & Earn for the next available provider.'),
+        'early': ('⏳ Just a little patience, Senpai~', 'The minimum wait is not finished. Wait {seconds} more seconds, then reopen the shortener’s final Telegram link. No ban, no deduction.'),
+        'retry': ('🎀 My token pouch needs a moment, Senpai~', 'I could not finish the wallet check. Please reopen your final Telegram link shortly. A saved reward will not be paid twice.'),
+        'recovered': ('🌸 Your little reward is safe, Senpai~', 'I recovered your saved reward. Check your balance, then tap Solve & Earn for the next adventure.')}
+    title, body = messages.get(kind, messages['retry'])
+    if kind == 'early':
+        body = body.format(seconds=values.get('seconds', 1))
+    text = head(title) + cute(body)
+    if kind == 'limit' and values.get('when'):
+        text += '\n\n' + stat('⏰', 'Next slot', values['when'])
+    return text
+
+
+def earn_success(amount, balance, next_reminder):
+    return (head('🎁 Tokens landed, Senpai~! (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧')
+        + stat('🪙', 'Added to your wallet', f'+{amount} tokens')
+        + stat('👛', 'Current balance', f'{balance} Tokens')
+        + stat('⏰', 'Next reminder', next_reminder)
+        + '\n' + cute('🌸 Lovely work! If another rolling slot is free, Solve & Earn will rotate you to it. Your next reminder follows THIS successful return, not midnight~'))
+
+
+def earn_reminder(style, reward):
+    variants = [
+        ('🌸 Senpai, your token garden is blooming~!', 'A fresh shortener adventure is waiting. Shall we pick a few tokens together?'),
+        ('🎁 Psst… a little treat is ready, Senpai~', 'Your next earning reminder has arrived. One tiny adventure, a happier token pouch!'),
+        ('☕ Token break, Senpai? (｡•ᴗ•｡)', 'Take a cozy little break with me. Tap below when you want to collect your next reward~'),
+        ('✨ Your next sparkle is waiting, Senpai~', 'The token shelf is calling softly. Ready for another shortener adventure?'),
+        ('🎀 A tiny quest has appeared, Senpai~!', 'No pressure — your next reward is waiting whenever you feel like solving a link.'),
+        ('🌷 Knock knock, Senpai~ Your token fairy is here!', 'I saved you a little earning reminder. Shall we brighten your wallet today?'),
+        ('🌙 A soft little nudge from me, Senpai~', 'Your next token adventure is ready. Tap below, finish the shortener, and come back to me~')]
+    title, body = variants[int(style) % len(variants)]
+    return (head(title) + cute(body) + '\n\n' + stat('🎁', 'Reward per accepted return', f'+{reward} tokens')
+        + cute('🌸 Still five rewards per provider in a rolling 24h. I’ll remind you again in 24h if you haven’t returned; completing a link resets that clock.'))

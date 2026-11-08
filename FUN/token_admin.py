@@ -328,6 +328,7 @@ def short_name(user, width=12):
 
 
 async def table(page, owner):
+    import native_tables as native
     total = await db.col('users').count_documents({'welcomed': True})
     pages = max(1, math.ceil(total / PAGE_SIZE))
     page = max(0, min(int(page), pages - 1))
@@ -340,28 +341,39 @@ async def table(page, owner):
         {'$group': {'_id': '$inviter_id', 'friends': {'$sum': {'$cond': [
             {'$eq': ['$status', 'qualified']}, 1, 0]}}, 'total': {'$sum': 1}}}]).to_list(PAGE_SIZE)
     refs = {r['_id']: r for r in stats}
-    lines = [' # Name          Tokens Friends', ' ─────────────────────────────']
-    links = []
+    unlocks = await db.col('unlocks').aggregate([
+        {'$match': {'user_id': {'$in': ids}}},
+        {'$group': {'_id': '$user_id', 'n': {'$sum': 1}}}]).to_list(PAGE_SIZE)
+    counts = {r['_id']: r['n'] for r in unlocks}
+    cells = [[native.cell(label, header=True) for label in
+              ('#', 'Name / User ID', 'Tokens', 'Friends', 'Unlocked Posts')]]
     for index, user in enumerate(rows, page * PAGE_SIZE + 1):
         ref = refs.get(user['user_id'], {'friends': 0, 'total': 0})
-        lines.append(f'{index:>2} {short_name(user)} {int(user.get("tokens", 0)):>6} {ref["friends"]:>7}')
-        name = ' '.join(str(user.get('first_name') or user.get('username') or 'User').split())[:45]
+        raw = str(user.get('first_name') or user.get('username') or 'User')
+        name = ' '.join(''.join(c if not unicodedata.category(c).startswith('C') else ' '
+                               for c in raw).split())[:60]
+        linked = [{'type':'url', 'text':name, 'url':f'tg://user?id={user["user_id"]}'},
+                  f'\n{user["user_id"]}']
         pending = ref['total'] - ref['friends']
-        links.append(f'{index}. <a href="tg://user?id={user["user_id"]}">{html.escape(name)}</a>'
-                     f' · <code>{user["user_id"]}</code>' + (f' · {pending} pending' if pending else ''))
-    text = (f'🪙 <b>Senpai’s Token Directory</b>\n'
-            f'👥 {total:,} started users · Page {page + 1}/{pages}\n'
-            '<i>Highest balances first · Friends = qualified referrals</i>\n\n'
-            '<pre>' + html.escape('\n'.join(lines)) + '</pre>\n' +
-            ('\n'.join(links) if rows else '🎀 No users yet — waiting for the first /start!') +
-            '\n\n<i>Profile links are tappable. Refresh for current balances.</i>')
+        friends = str(ref['friends']) + (f'\n+{pending} pending' if pending else '')
+        cells.append([native.cell(str(index), align='right'), native.cell(linked),
+            native.cell(str(int(user.get('tokens',0))), align='right'),
+            native.cell(friends, align='right'),
+            native.cell(str(counts.get(user['user_id'],0)), align='right')])
+    blocks = [native.paragraph({'type':'bold', 'text':'🪙 Senpai’s Token Directory'}),
+              native.paragraph(f'👥 {total:,} started users · Page {page + 1}/{pages}'),
+              {'type':'table', 'cells':cells, 'is_bordered':True, 'is_striped':True,
+               'is_compact':True, 'caption':'🎀 Live wallets, friends and unlocked drops'}]
+    if not rows:
+        blocks.append(native.paragraph('🎀 No users yet — waiting for the first /start, Senpai~!'))
+    blocks.append(native.paragraph('🌸 Highest balances first. Friends = qualified referrals; pending invites are separate. Unlocked Posts = unique purchases in the user’s vault, not repeat re-streams. Tap a name to open their profile~'))
     buttons = []
     if page:
         buttons.append(button('◀ Previous', f'ut:{owner}:{page - 1}'))
     buttons.append(button('🔄 Refresh', f'ut:{owner}:{page}'))
     if page + 1 < pages:
         buttons.append(button('Next ▶', f'ut:{owner}:{page + 1}'))
-    return text, InlineKeyboardMarkup([buttons])
+    return {'blocks':blocks, 'skip_entity_detection':True}, InlineKeyboardMarkup([buttons])
 
 
 async def users_command(update, context):
@@ -369,10 +381,25 @@ async def users_command(update, context):
         return
     args = list(context.args or [])
     if len(args) > 1 or (args and not re.fullmatch(r'[1-9][0-9]{0,6}', args[0])):
-        await update.message.reply_text('Usage: /userstoken [page]')
+        await update.message.reply_text('🎀 Usage: /userstoken [page], Senpai~')
         return
-    text, kb = await table(int(args[0]) - 1 if args else 0, update.effective_user.id)
-    await update.message.reply_text(text, parse_mode='HTML', reply_markup=kb)
+    import native_tables
+    rich, kb = await table(int(args[0]) - 1 if args else 0, update.effective_user.id)
+    try:
+        await native_tables.send(context.bot, update.message.chat.id, rich, kb)
+    except BadRequest:
+        await update.message.reply_text('🎀 Native rich tables are unavailable on this Bot API endpoint, Senpai. This screen needs Bot API 10.2+; use an up-to-date Telegram app and Bot API server. I will not replace it with a fake text table.')
+
+
+async def users_alias(update, context):
+    if not private_admin(update):
+        return
+    args = list(context.args or [])
+    if not args or args[0].lower() not in ('token', 'tokens'):
+        await update.message.reply_text('🎀 Use /users token [page] or /userstoken, Senpai~')
+        return
+    from types import SimpleNamespace
+    return await users_command(update, SimpleNamespace(args=args[1:], bot=context.bot))
 
 
 async def users_callback(update, context):
@@ -385,5 +412,9 @@ async def users_callback(update, context):
         return
     if int(parts[1]) != q.from_user.id or len(parts[2]) > 7:
         return
-    text, kb = await table(int(parts[2]), q.from_user.id)
-    await edit_card(q, text, kb)
+    import native_tables
+    rich, kb = await table(int(parts[2]), q.from_user.id)
+    try:
+        await native_tables.edit(context.bot, q.message.chat.id, q.message.message_id, rich, kb)
+    except BadRequest:
+        await context.bot.send_message(q.from_user.id, '🎀 This native table could not be refreshed, Senpai. Try /userstoken again. No wallet data was changed.')

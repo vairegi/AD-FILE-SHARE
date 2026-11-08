@@ -22,6 +22,7 @@ import feed_sessions
 import broadcast
 import covers
 import token_admin
+import earn_links
 
 # ── small helpers ───────────────────────────────────────────────
 def esc(t) -> str:
@@ -57,6 +58,11 @@ def _nav_row(back_cb="home", home_cb="home"):
 
 # ── /start (+ referral deep link ref_<id>) ───────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if args and args[0].startswith('earn_'):
+        # Reward checks have their own user lock. Never send a welcome bonus
+        # or turn an unknown user's return into an auto-created earning wallet.
+        return await earn_links.complete_update(update, context, args[0][5:])
     async with user_lock(update.effective_user.id):
         await _start(update, context)
 
@@ -145,6 +151,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_categories(q)
         elif data == "earn":
             await _show_earn(q)
+        elif data == "earn:solve":
+            await earn_links.solve_callback(update, context)
         elif data == "profile":
             await _show_profile(q)
         elif data == "help":
@@ -237,6 +245,9 @@ async def _show_earn(q):
     if not any(t.get("enabled", True) and t.get("secret") for t in tasks):
         text += "\n\n" + persona.task_unavailable()
     rows.insert(0, [InlineKeyboardButton("🎁 Daily Check-In", callback_data="checkin")])
+    rows.insert(1, [InlineKeyboardButton("🔗 Solve & Earn Tokens", callback_data="earn:solve", style="success")])
+    _, reward, _ = earn_links.settings_values(settings)
+    text += "\n\n" + persona.cute(f"🔗 Senpai’s shortener adventures: {reward} tokens per accepted return; five per provider in a rolling 24 hours. Tap Solve & Earn to check your next slot~")
     await _edit(q, text, InlineKeyboardMarkup(rows))
 
 
@@ -813,7 +824,12 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /gift <user_id> <amount> — send token gift + alert\n"
         "• /gift all <amount> — preview and confirm gifts for everyone\n"
         "• /gift status — latest gift progress\n"
-        "• /userstoken [page] — balances + referred friends\n"
+        "• /userstoken [page] — native table: balances, referrals, unlocked posts\n"
+        "• /shortenerapi add <site> <api_base> <key> — add provider\n"
+        "• /shortenerapi pause|resume|remove <site> — rotation controls\n"
+        "• /shortener on|off|status — shortener rewards\n"
+        "• /setperverifytoken <n> — tokens per accepted return\n"
+        "• /bantimecontrol <150s|3m> — minimum wait; NO bans\n"
         "• /stats — counts")
 
 

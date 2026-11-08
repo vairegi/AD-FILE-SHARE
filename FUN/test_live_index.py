@@ -473,7 +473,7 @@ async def test_real_lifespan_registers_channel_updates_starts_worker_and_stops(m
         assert 'channel_post' in call['allowed_updates']
         assert call['drop_pending_updates'] is False
         assert live.snapshot()['state'] == 'running'
-        assert len(runtime._background) == 4
+        assert len(runtime._background) == 5
         assert any(t.get_coro().cr_code.co_filename.endswith('/token_admin.py') for t in runtime._background)
     assert not runtime._tasks
     assert live.snapshot()['state'] == 'stopped'

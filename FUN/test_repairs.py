@@ -582,7 +582,7 @@ async def test_starting_background_jobs_and_shutdown(monkeypatch):
     monkeypatch.setattr(services,"run_deletion_sweeper",sweep)
     runtime.start_jobs(Bot())
     await asyncio.sleep(0.01)
-    assert called and len(runtime._background)==4  # cleanup, history, channel-post queue, gifts
+    assert called and len(runtime._background)==5  # cleanup, history, channel-post queue, gifts
     assert any(t.get_coro().cr_code.co_filename.endswith('/token_admin.py') for t in runtime._background)
     await runtime.stop_jobs()
     assert not runtime._tasks and not runtime._background
