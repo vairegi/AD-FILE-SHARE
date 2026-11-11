@@ -106,33 +106,34 @@ async def main():
     check("rich table has exactly 2 user rows", len(name_cells) == 2)
 
     ok_all_linked = True
-    labels = {}
+    rich_rows = []
     for cell_ in name_cells:
-        text = cell_.get("text", "")
-        ents = cell_.get("entities") or []
-        ent = ents[0] if ents else {}
-        if ent.get("type") != "text_link" or not str(ent.get("url", "")).startswith("tg://user?id="):
+        rich = cell_.get("text")
+        if not isinstance(rich, dict) or rich.get("type") not in ("url", "text_mention"):
             ok_all_linked = False
-        uid = str(ent.get("url", "")).rsplit("=", 1)[-1]
-        labels[uid] = text
-    check("every Name cell is a text_link to tg://user?id=", ok_all_linked)
+            continue
+        rich_rows.append(rich)
+    check("every Name cell is a documented rich link (url/text_mention), never tg://",
+          ok_all_linked and not any("tg://" in str(r) for r in rich_rows))
     check("normal row label is profile TITLE 'Ananya Singh' (not @username/id)",
-          labels.get("880001") == "Ananya Singh")
+          any(r["text"] == "Ananya Singh" and r["url"] == "https://t.me/ananya"
+              for r in rich_rows))
     check("legacy row backfilled from users collection -> title 'Ravi Kumar'",
-          labels.get("880002") == "Ravi Kumar")
+          any(r["text"] == "Ravi Kumar" for r in rich_rows))
 
-    # ── FALLBACK PATH (rich rejected) ─────────────────────────────────────
+# ── FALLBACK PATH (rich rejected) ─────────────────────────────────────
     bot2_ = FakeBot(rich_fails=True)
     upd2 = FakeUpdate()
     await bot1_admin.cmd_verified_users(upd2, FakeCtx(bot2_, []))
     html_all = "\n".join(t for t, kw in upd2.message.replies)
     check("fallback emits HTML pages", upd2.message.replies)
-    check("fallback name 1 is an HTML profile link with the TITLE",
-          '<a href="tg://user?id=880001">' in html_all and "Ananya Singh" in html_all)
-    check("fallback name 2 (legacy) is an HTML profile link with backfilled TITLE",
-          '<a href="tg://user?id=880002">' in html_all and "Ravi Kumar" in html_all)
-    check("fallback shows no bare '880001' outside its link",
-          html_all.count("880001") == 1 and "tg://user?id=880001" in html_all)
+    check("fallback name 1 is a t.me profile link with the TITLE",
+          '<a href="https://t.me/ananya">Ananya Singh</a>' in html_all)
+    check("fallback name 2 is a real profile URL (its username was backfilled)",
+          '<a href="https://t.me/ravi_k">Ravi Kumar</a>' in html_all
+          and "tg://user" not in html_all)
+    check("fallback no longer prints a bare user id",
+          "880001" not in html_all and "880002" not in html_all)
 
     # ── ZERO-VERIFICATION DAY (regression guard) ──────────────────────────
     db2 = mongomock_motor.AsyncMongoMockClient()

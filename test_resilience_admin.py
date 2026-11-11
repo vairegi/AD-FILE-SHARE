@@ -61,7 +61,8 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
             await admin._send_admin_table(self.update,self.context)
         cells=self.bot._post.call_args.kwargs['data']['rich_message']['blocks'][2]['cells']
         self.assertEqual(len(cells),2)
-        self.assertEqual(cells[1][1]['text']['url'],'tg://user?id=222')
+        self.assertEqual(cells[1][1]['text']['type'],'text_mention')
+        self.assertEqual(cells[1][1]['text']['user']['id'],222)
         self.assertEqual(cells[1][1]['text']['text'],'Visible')
 
     async def test_profile_title_and_safe_html_fallback(self):
@@ -69,7 +70,8 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.bot._post.side_effect=RuntimeError('simulated rich rejection')
         await admin._send_admin_table(self.update,self.context)
         text=self.message.reply_text.call_args.args[0]
-        self.assertIn('<a href="tg://user?id=222">A &amp; &lt;B&gt; 😄</a>',text)
+        self.assertIn('<b>A &amp; &lt;B&gt; 😄</b>',text)
+        self.assertNotIn('tg://user',text)
         self.assertIn('DB only',text)
         self.assertNotIn('111',text)
         self.assertNotIn('<pre>',text)

@@ -2230,9 +2230,9 @@ async def main():
           all(c.get("is_header") for c in _tb["cells"][0])
           and [c["text"] for c in _tb["cells"][0]] == ["User", "Added", "Days left", "Expires"])
     _nc = _tb["cells"][1][0]["text"]
-    check("v4.6: user title embeds tg:// profile link",
-          _nc["type"] == "url" and _nc["url"] == "tg://user?id=555000222"
-          and _nc["text"] == "Ada")
+    check("v4.9.30: user title uses a documented profile link (no tg://)",
+          _nc["type"] == "text_mention" and _nc["user"]["id"] == 555000222
+          and _nc["text"] == "Ada" and "tg://" not in str(_nc))
     check("v4.6: days-left column is present and numeric",
           _tb["cells"][1][2]["text"].endswith("d"))
     check("v4.6: suggest-genre blocks render below the browse menu",

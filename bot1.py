@@ -25,6 +25,7 @@ from telegram.ext import (
     filters,
 )
 
+import caption_text  # v4.9.30: bold channel-post captions
 import config
 import db
 import force_sub
@@ -639,6 +640,13 @@ async def _forward_with_tag(bot, post_channel, post_msg_id, main_id, tag,
     return fwd
 
 
+def _clean_kwargs(kwargs):
+    """Drop optional keys that are None/empty so the payload stays minimal."""
+    for key in ("caption", "caption_entities"):
+        if key in kwargs and not kwargs[key]:
+            kwargs.pop(key)
+
+
 async def _post_cover(bot, post_channel, db_channel, item, markup, styled=False):
     """Post the cover image BLURRED (has_spoiler) so only the IMAGE is hidden;
     the caption text stays normal.
@@ -660,26 +668,45 @@ async def _post_cover(bot, post_channel, db_channel, item, markup, styled=False)
     _s_cc = await db.get_settings()
     _cc_html = _s_cc.get("cover_caption_extra_html")
     _cc_extra = _s_cc.get("cover_caption_extra")
-    caption_pm = None
+    # v4.9.30 — BOLD CAPTION. A plain copy/forward re-uses the stored caption
+    # verbatim (so it can never be bold, and a forward cannot be re-captioned
+    # at all). We therefore always send an EXPLICIT caption plus
+    # `caption_entities` (documented for sendPhoto/sendVideo/copyMessage):
+    # one `bold` span over the whole caption, measured in UTF-16 units, while
+    # any formatting the /addcovercaption extra already had (bold/italic/
+    # links/quotes) is kept as its own entities.
     if _cc_html:
-        caption = (caption + "\n" + str(_cc_html).strip()).strip()
-        caption_pm = "HTML"
+        caption, _cap_ents = caption_text.bold_caption_html(
+            (caption + "\n" + str(_cc_html).strip()).strip())
     elif _cc_extra:
-        caption = (caption + "\n" + str(_cc_extra).strip()).strip()
-        # v4.8: /addcovercaption extra keeps its formatting (HTML).
-        # v4.7: the /addcovercaption extra keeps its formatting — the stored
-        # HTML is appended as HTML so bold/quote/mono/links survive the post.
+        caption, _cap_ents = caption_text.bold_caption(
+            (caption + "\n" + str(_cc_extra).strip()).strip())
+    else:
+        caption, _cap_ents = caption_text.bold_caption(caption)
+    if not caption_text.fits_caption(caption):
+        # Telegram caps media captions at 1024 units — trim, never fail a post.
+        caption, _cap_ents = caption_text.bold_caption(
+            caption_text.truncate(caption))
+    cap_entities = caption_text.to_message_entities(_cap_ents)
     photo_fid = item.get("cover_file_id")
     api_kwargs = ({"reply_markup": _build_styled_markup(markup).to_dict()}
                   if styled else None)
-    if photo_fid and len(caption) <= 1024:
-        kwargs = {"caption": caption or None, "reply_markup": markup,
-                  "has_spoiler": True, "parse_mode": caption_pm}
+    if photo_fid and caption and caption_text.fits_caption(caption):
+        kwargs = {"caption": caption, "caption_entities": cap_entities or None,
+                  "reply_markup": markup, "has_spoiler": True}
+        _clean_kwargs(kwargs)
         if api_kwargs:
             kwargs["api_kwargs"] = api_kwargs
         return await bot.send_photo(chat_id=post_channel, photo=photo_fid,
                                     **kwargs)
     kwargs = {"reply_markup": markup}
+    if caption and caption_text.fits_caption(caption):
+        # copyMessage: "caption — New caption for media ... caption_entities —
+        # A JSON-serialized list of special entities that appear in the new
+        # caption" — this is what makes a COPIED post's caption bold.
+        kwargs["caption"] = caption
+        kwargs["caption_entities"] = cap_entities or None
+    _clean_kwargs(kwargs)
     if api_kwargs:
         kwargs["api_kwargs"] = api_kwargs
     return await bot.copy_message(

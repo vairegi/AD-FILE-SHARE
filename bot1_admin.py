@@ -37,6 +37,7 @@ from telegram.ext import ContextTypes
 
 import config
 import db
+import profile_link  # v4.9.30: documented rich profile links
 import force_sub
 import scanner
 from utils import admin_only, format_ram_report, human_duration, parse_duration
@@ -1469,18 +1470,31 @@ def _fmt_ist_ts(ts):
         return "—"
 
 
+def _u16(text) -> int:
+    """Entity offset/length unit: UTF-16 code units (emoji count as 2)."""
+    return len(str(text or "").encode("utf-16-le")) // 2
+
+
+def _h_pad(markup, width) -> str:
+    """Pad an HTML fragment to `width` DISPLAY cells (tags carry no width)."""
+    import re as _re
+    plain = _re.sub(r"<[^>]+>", "", markup)
+    pad = max(0, width - len(plain))
+    return markup + (" " * pad)
+
+
 def _verified_table_payload(users):
     """Bot API 10.1+ InputRichBlockTable payload — SAME proven shape as
     /banlist (compact cells of InputRichText), is_compact=True. v4.8: each
     Name is a RichTextUrl LINK to the user's profile (tg://user?id=...)."""
     def cell(text, code=False):
-        fmt = [{"type": "code", "offset": 0, "length": len(text)}] if code else []
+        fmt = [{"type": "code", "offset": 0, "length": _u16(text)}] if code else []
         return {"text": text, "entities": fmt}
-    def link_cell(text, user_id):
-        return {"text": text,
-                "entities": [{"type": "text_link",
-                              "offset": 0, "length": len(text),
-                              "url": f"tg://user?id={user_id}"}]}
+    def link_cell(text, user_id, username=None):
+        # v4.9.30: RichTextUrl -> https://t.me/<username> (documented),
+        # RichTextTextMention -> by id for users without a username.
+        # tg://user?id= is NOT a Bot API rich link and renders as dead text.
+        return {"text": profile_link.rich_title(text, user_id, username)}
     header = [cell("#"), cell("Name"), cell("Elapsed"), cell("Category"),
               cell("Link Type"), cell("Count")]
     rows, pages = [], []
@@ -1493,7 +1507,8 @@ def _verified_table_payload(users):
         elapsed = f"{el:.0f}s" if el is not None else "—"
         cat = ", ".join(u.get("categories") or []) or "—"
         link = ", ".join(u.get("link_types") or []) or "—"
-        rows.append([cell(str(i)), link_cell(name, u.get("user_id")),
+        rows.append([cell(str(i)),
+                     link_cell(name, u.get("user_id"), u.get("username")),
                      cell(elapsed), cell(cat), cell(link),
                      cell(str(u.get("count") or "—"))])
         if len(rows) == 40:
@@ -1577,8 +1592,8 @@ async def cmd_verified_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 (f"@{u['username']}" if u.get("username") else None)
                 or str(u.get("user_id")))
         el = u.get("elapsed")
-        name_link = (f'<a href="tg://user?id={u.get("user_id")}">'
-                     f'{_h(str(name)[:19]):<20}</a>')
+        name_link = _h_pad(profile_link.html_title(
+            str(name)[:19], u.get("user_id"), u.get("username")), 20)
         lines.append(f"{i:<4}{name_link}"
                      f"{(f'{el:.0f}s' if el is not None else '—'):<8}"
                      f"{(','.join(u.get('categories') or []) or '—')[:9]:<10}"
@@ -1634,7 +1649,7 @@ async def _verified_user_detail(update, context, user_id, extra_args):
     name = (doc.get("name") or
             (f"@{doc['username']}" if doc.get("username") else None)
             or str(user_id))
-    profile = f"tg://user?id={user_id}"
+    profile = profile_link.tme_url(doc.get("username"))
     events = doc.get("events") or []
     if events:
         import datetime as _dt
@@ -1652,7 +1667,7 @@ async def _verified_user_detail(update, context, user_id, extra_args):
                 {"text": str(i)},
                 ({"text": label,
                   "entities": [{"type": "text_link", "offset": 0,
-                                "length": len(label), "url": flink}]}
+                                "length": _u16(label), "url": flink}]}
                  if flink else {"text": label}),
                 {"text": ist.strftime("%H:%M:%S")},
                 {"text": (f"{el:.0f}s" if el is not None else "—")},
@@ -1665,14 +1680,15 @@ async def _verified_user_detail(update, context, user_id, extra_args):
               "disable_notification": False}
         try:
             await update.message.reply_text(
-                f'👤 <a href="{profile}">{_h(name)}</a> — {day}: '
-                f'{int(doc.get("count") or 1)} fetch(es)',
+                f'👤 {profile_link.html_title(name, user_id, doc.get("username"), _h)}'
+                f' — {day}: {int(doc.get("count") or 1)} fetch(es)',
                 parse_mode="HTML", disable_web_page_preview=True)
             await context.bot._post("sendRichMessage", data=pl)
             return
         except Exception as exc:
             log.warning("rich user detail failed (%s); text fallback", exc)
-    lines2 = [f'👤 <a href="{profile}">{_h(name)}</a> (id <code>{user_id}</code>)',
+    lines2 = [f'👤 {profile_link.html_title(name, user_id, doc.get("username"), _h)}'
+              f' (id <code>{user_id}</code>)',
               f"Day: {day} ({'yesterday' if offset else 'today'})",
               f"Fetches: {int(doc.get('count') or 1)}",
               f"Categories: {_h(', '.join(doc.get('categories') or []) or '—')}",
@@ -1859,8 +1875,8 @@ async def _send_admin_table(update, context):
             added = _fmt_ist_ts(row["added_at"]) if row.get("added_at") else "—"
             cells.append([
                 {"text": str(i)},
-                {"text": {"type": "url", "text": row["title"],
-                          "url": f"tg://user?id={uid}"}},
+                {"text": profile_link.rich_title(row["title"], uid,
+                                                 row.get("username"))},
                 {"text": str(uid)},
                 {"text": added},
                 {"text": f"/radmin {uid}"},
@@ -1884,7 +1900,7 @@ async def _send_admin_table(update, context):
         for i, row in enumerate(page, offset + 1):
             uid = int(row["user_id"])
             lines.extend([
-                f'{i}. <a href="tg://user?id={uid}">{_h(row["title"])}</a>',
+                f'{i}. {profile_link.html_title(row["title"], uid, row.get("username"), _h)}',
                 f'ID: <code>{uid}</code> · Remove: <code>/radmin {uid}</code>',
                 "",
             ])
@@ -2599,9 +2615,8 @@ def _premium_table_payload(rows, page_size=20):
     def cell(t):
         return {"text": t}
 
-    def name_cell(text, uid):
-        return {"text": {"type": "url", "text": text,
-                         "url": f"tg://user?id={int(uid)}"}}
+    def name_cell(text, uid, username=None):
+        return {"text": profile_link.rich_title(text, int(uid), username)}
 
     header = [hcell("User"), hcell("Added"), hcell("Days left"), hcell("Expires")]
     cells = [header]
@@ -2619,7 +2634,9 @@ def _premium_table_payload(rows, page_size=20):
         except Exception:
             exp = "-"
         cells.append([
-            name_cell(_premium_name_from_doc(r.get("_user"), uid), uid),
+            name_cell(_premium_name_from_doc(r.get("_user"), uid), uid,
+                      (r.get("_user") or {}).get("username")
+                      or r.get("username")),
             cell(f"{added_days}d"),
             cell("expired" if left_days <= 0 else f"{left_days}d"),
             cell(exp),
